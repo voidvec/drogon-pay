@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ORM models were split into a `drogon_pay_models` OBJECT library that
   keeps the advisory profile — generated code must not be hand-edited to
   satisfy the gate.
+- **clang-tidy two-tier gate** (`scripts/clang_tidy_gate.py`, new CI job
+  `clang-tidy` on Linux): `.clang-tidy` stays advisory while a promoted
+  subset of bugprone/performance checks runs with `--warnings-as-errors`
+  as a hard gate over first-party, non-model translation units. The
+  promote list only grows (0-finding checks first; `--report` prints hit
+  counts for the next candidates), and unknown check names fail the gate
+  instead of being silently dropped by clang-tidy.
 
 ### Changed
 
