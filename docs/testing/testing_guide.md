@@ -53,6 +53,12 @@ ctest --test-dir build/windows-msvc -C Release        # Windows
 ctest --test-dir build/linux-release                  # Linux/macOS
 ```
 
+Or through the dev wrappers, which pick the preset for you and refuse to run
+before a build exists: `examples/pay-server/scripts/test.sh` (Windows:
+`examples\pay-server\scripts\test.bat`), with `-l` to list, `-r <pattern>` to
+filter by CTest name, `-v` for per-test output and `-o` to also keep
+`test_results.log`.
+
 ### A single test (by CTest name)
 
 ```bash
