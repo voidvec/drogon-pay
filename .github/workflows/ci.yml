@@ -79,6 +79,17 @@ jobs:
       - name: Test layout guard
         run: python3 scripts/check_test_layout.py
 
+      # Two halves of one gate, split so a stale spec and a stale exclusion
+      # list produce different failing step names. The checker parses a
+      # YAML subset with the stdlib only: GitHub's ubuntu runners ship
+      # PyYAML today, but a third-party runner without it must not be able
+      # to turn a documentation gate into a red build.
+      - name: OpenAPI contract lint
+        run: python3 scripts/check_openapi_routes.py --lint-only
+
+      - name: OpenAPI route parity
+        run: python3 scripts/check_openapi_routes.py --routes-only
+
       # Hard gate: format-the-tree commit resolved all pre-existing drift.
       # models/ is generated code and excluded (same scope as
       # .clang-format-ignore). Version pin lives in

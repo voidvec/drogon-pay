@@ -66,6 +66,10 @@ pre-Conan build-Drogon-from-source rollback net and is dispatch-only.
 
 `handlers/` → `services/` → `channels/` → `models/` (ORM, read-only)
 
+HTTP surface: `examples/pay-server/openapi.yaml` is the contract, and
+`scripts/check_openapi_routes.py` fails the FAST gate when code and spec
+disagree. See `.claude/skills/openapi-update/SKILL.md`.
+
 Full technical spec: [TECH_SPECS.md](TECH_SPECS.md) | Claude-specific guide: [CLAUDE.md](CLAUDE.md)
 
 ## Git Workflow
