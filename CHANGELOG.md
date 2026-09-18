@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Postgres readiness loop fell through to a green step when the probe never
   succeeded. Readiness now probes `SELECT 1`, hard-fails on timeout and dumps
   the container log.
+- **OpenAPI 3.0 contract** (`examples/pay-server/openapi.yaml`): all 11 plugin
+  routes and 4 host routes documented with request/response schemas, the
+  business-code → HTTP-status mapping, scope requirements and the two
+  channel-facing notify bodies (marked as channel conventions, not this
+  service's contract). `docs/api/pay-api-examples.md` gains the two endpoints
+  it never documented (`/api/pay/orders`, `/api/pay/reconcile/summary`) plus
+  the Alipay callback.
 
 ### Changed
 
@@ -93,6 +100,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     snapshot failures (which affect retry correctness), the
     `clearReservation` path remains `LOG_ERROR` and is the recommended
     alert anchor. See `docs/development/logging_standards.md`.
+
+### Fixed
+
+- **Documentation contradicted the code on money, statuses and routes.**
+  Writing the contract surfaced four stale claims, now corrected against the
+  implementation:
+  - Amounts were documented as `BIGINT` cents/fen
+    (`libs/drogon-pay/src/models/README.md`, the `openapi-update` skill and
+    `.claude/agents/api-documenter.md`). They are `VARCHAR(32)` decimal
+    **strings in yuan units**, validated by the controller regex
+    `^\d+(\.\d{1,2})?$`.
+  - `TECH_SPECS.md` 「订单状态机」 named states the code never writes
+    (`SUCCESS` for orders, `REFUND_PROCESSING` / `REFUND_FAILED`). The tables
+    now list the values produced by `PayUtils.cc` and `services/*.cc`, and flag
+    the one real inconsistency left in code: WeChat maps a failed payment to
+    `FAIL` while the Alipay `TRADE_CLOSED` branch maps it to `FAILED`.
+  - `.claude/agents/api-documenter.md` and the `docker-integration-test` skill
+    (both mirrors, including `scripts/pay_e2e_test.py`) drove a fictional
+    `/api/v1/payments` surface with numeric amounts and no `user_id`; every one
+    of those requests would have been a 404. They now use the real routes and
+    payload shapes.
+  - `updated_at` was documented as caller-maintained; the
+    `update_*_modtime` triggers in `sql/001_init_pay_tables.sql` set it.
 
 ## [1.0.0] - 2026-07-31
 

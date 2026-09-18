@@ -1,0 +1,1344 @@
+openapi: 3.0.3
+
+# Contract for the example host server (examples/pay-server), i.e. the pay
+# plugin routes plus the four host routes. This file is machine-checked:
+# `scripts/check_openapi_routes.py` diffs every path+method below against the
+# routes the code actually registers (PayPlugin::registerHttpHandlers plus the
+# host's ADD_METHOD_TO macros) and fails CI on any one-sided difference.
+#
+# Source of truth order when code and this file disagree:
+#   the code wins for routes and status codes, the docs win for intent.
+# Fix whichever side drifted; never silence the gate by deleting a route.
+
+info:
+  title: Drogon Pay Server API
+  version: 1.0.0
+  description: |
+    Payment gateway surface exposed by the example host: order creation,
+    status/refund queries, an operator reconciliation summary, auth metrics,
+    and the two inbound channel callbacks.
+
+    Conventions that hold for every `/api/pay/*` business route:
+
+    * The prefix is the plugin's `base_path` config key (default `/api/pay`).
+      This document pins the default. The one exception is the QR create
+      operation, which stays at the historical `/api/qrpay/create` when
+      `base_path` is the default and moves to `{base_path}/qrpay/create`
+      otherwise.
+    * Money is a **decimal string in yuan units**, never a cent integer and
+      never a JSON number. `amount` matches `^\\d+(\\.\\d{1,2})?$`
+      ("9.99", "100", "0.5"); anything else is rejected with business code
+      40001 before the request reaches the database.
+    * Success envelopes carry `code: 0` (or `code: 200` on the order list)
+      plus `message` and, where there is a payload, `data`. A non-zero `code`
+      is paired with a matching HTTP status, so clients may branch on either;
+      prefer HTTP status for transport decisions and `code` for business ones.
+    * Write operations (`/create`, `/api/qrpay/create`, `/refund`) are
+      idempotent. Send `X-Idempotency-Key` (or `Idempotency-Key`) to make a
+      retry replay the stored snapshot; omit it and the server derives a key
+      from `order_no` + user/amount, which still dedupes but is invisible to
+      the caller.
+  contact:
+    name: Pay plugin maintainers
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:5566
+    description: Default listener of examples/pay-server/config.json
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "5566"
+
+tags:
+  - name: payments
+    description: Order creation and status lookup
+  - name: refunds
+    description: Refund creation and status lookup
+  - name: operations
+    description: Listing, reconciliation and auth metrics
+  - name: callbacks
+    description: Inbound channel notifications (signature-authenticated)
+  - name: host
+    description: Liveness/readiness/metrics routes owned by the example host
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+paths:
+  /api/pay/create:
+    post:
+      tags: [payments]
+      operationId: createPayment
+      summary: Create a payment order
+      description: |
+        Persists a `pay_order` row, calls the channel, and returns the channel
+        artefacts needed to complete the payment. `user_id` may come from the
+        body or from an authenticated request attribute; with API-key auth
+        there is no attribute, so omitting it yields 401.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+            examples:
+              alipay:
+                value:
+                  order_no: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+                  amount: "9.99"
+                  currency: CNY
+                  description: Demo Order
+                  channel: alipay
+                  user_id: 10001
+                  notify_url: "https://example.com/api/pay/notify/alipay"
+      responses:
+        "200":
+          description: Payment created (business code 0)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+              examples:
+                wechat:
+                  value:
+                    code: 0
+                    message: Payment created successfully
+                    data:
+                      order_no: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+                      payment_no: "PAY2026091810345612345678"
+                      status: PAYING
+                      code_url: "weixin://wxpay/bizpayurl?pr=xxxx"
+                      prepay_id: "wx181034..."
+                alipay:
+                  value:
+                    code: 0
+                    message: Payment created successfully
+                    data:
+                      order_no: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+                      payment_no: "PAY2026091810345612345678"
+                      status: PAYING
+                      qr_code: "https://qr.alipay.com/bax..."
+                      alipay_response:
+                        code: "10000"
+                        msg: Success
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "502":
+          $ref: '#/components/responses/BadGateway'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [payments]
+      operationId: createPaymentPreflight
+      summary: CORS preflight
+      description: |
+        Preflight bypasses authentication and returns an empty 200. Declared
+        so the route-parity gate can see the method the code registers.
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/qrpay/create:
+    post:
+      tags: [payments]
+      operationId: createQRPayment
+      summary: Create a QR-code payment
+      description: |
+        Historical QR entry point. Unlike `/api/pay/create` it requires
+        `channel` and `user_id` in the body, defaults `subject` to "Payment",
+        and reports failures inside the body with HTTP 200 (codes 500 and
+        1005) rather than via the transport status -- see
+        `docs/development/plugin_integration.md` for the migration note.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQRPaymentRequest'
+      responses:
+        "200":
+          description: QR created (code 0) or channel failure reported in-body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateQRPaymentResponse'
+              examples:
+                ok:
+                  value:
+                    code: 0
+                    message: QR code created successfully
+                    data:
+                      order_no: "ord-2026-0001"
+                      qr_code: "https://qr.alipay.com/bax..."
+                      out_trade_no: "ord-2026-0001"
+                unknown-channel:
+                  value:
+                    code: 1005
+                    message: "CHANNEL_NOT_AVAILABLE: paypal"
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "500":
+          $ref: '#/components/responses/InternalError'
+    options:
+      tags: [payments]
+      operationId: createQRPaymentPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/query:
+    get:
+      tags: [payments]
+      operationId: queryOrder
+      summary: Query one order (with a live channel check)
+      description: |
+        Reads the database snapshot and then refreshes it from the channel, so
+        the returned `status` is authoritative rather than merely recorded.
+        When the channel query fails the response still returns the stored
+        snapshot with `code: 1` (degraded) and a
+        `data.wechat_query_error` / `data.alipay_query_error` field instead of
+        failing the request.
+      parameters:
+        - name: order_no
+          in: query
+          required: true
+          schema:
+            type: string
+            maxLength: 64
+          example: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+      responses:
+        "200":
+          description: Order found (code 0, or code 1 for degraded channel data)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryOrderResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [payments]
+      operationId: queryOrderPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/refund:
+    post:
+      tags: [refunds]
+      operationId: createRefund
+      summary: Refund part or all of a paid order
+      description: |
+        Takes a row lock on the payment, sums existing refunds, and rejects an
+        over-refund before touching the channel. Requires the `refund` scope
+        when `api_key_scopes` (or `api_key_default_scopes`) is configured.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRefundRequest'
+      responses:
+        "200":
+          description: Refund accepted (business code 0)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateRefundResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "502":
+          $ref: '#/components/responses/BadGateway'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [refunds]
+      operationId: createRefundPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/refund/query:
+    get:
+      tags: [refunds]
+      operationId: queryRefund
+      summary: Query one refund
+      description: |
+        Returns the stored refund row and, for the wechat channel, refreshes
+        `data.status` from the channel (a channel query error falls back to the
+        stored snapshot). Requires the `refund_query` scope.
+      parameters:
+        - name: refund_no
+          in: query
+          required: true
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        "200":
+          description: Refund found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryRefundResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [refunds]
+      operationId: queryRefundPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/orders:
+    get:
+      tags: [operations]
+      operationId: queryOrderList
+      summary: List orders
+      description: |
+        Newest first. Success uses `code: 200` (the one endpoint that does not
+        use 0) and `data` is the row array itself. Note that this route is not
+        scope-gated by `resolveScope` -- it is reachable with any valid key.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+          description: Omit, or pass `all`, for no status filter.
+        - name: user_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+          description: Omit or 0 for no user filter.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Values above 100 are clamped, not rejected.
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Order page (business code 200)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryOrderListResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [operations]
+      operationId: queryOrderListPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/reconcile/summary:
+    get:
+      tags: [operations]
+      operationId: reconcileSummary
+      summary: Count stuck orders and refunds
+      description: |
+        Monitoring view over the two in-flight states. The optional `date`
+        parameter is parsed by the controller (defaulting to today) but
+        **discarded by the service**, which always counts the whole table --
+        do not present this endpoint as date-scoped until that is fixed.
+        Requires the `reconcile` scope.
+      parameters:
+        - name: date
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+            format: date
+          example: "2026-09-18"
+      responses:
+        "200":
+          description: Summary counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconcileSummaryResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [operations]
+      operationId: reconcileSummaryPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/metrics/auth:
+    get:
+      tags: [operations]
+      operationId: authMetrics
+      summary: Authentication failure counters (JSON)
+      responses:
+        "200":
+          description: Counter snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthMetrics'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [operations]
+      operationId: authMetricsPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/metrics/auth.prom:
+    get:
+      tags: [operations]
+      operationId: authMetricsPrometheus
+      summary: Authentication failure counters (Prometheus text format)
+      responses:
+        "200":
+          description: Prometheus exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP pay_auth_missing_key_total Missing API key count
+                # TYPE pay_auth_missing_key_total counter
+                pay_auth_missing_key_total 0
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    options:
+      tags: [operations]
+      operationId: authMetricsPrometheusPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /api/pay/notify/wechat:
+    post:
+      tags: [callbacks]
+      operationId: wechatNotify
+      summary: WeChat Pay asynchronous notification
+      description: |
+        Authenticated by the WeChat platform certificate, not by an API key, so
+        this route declares no security scheme. The body is the channel's
+        notification envelope (`resource` is AES-256-GCM encrypted) and is
+        passed through verbatim after signature, timestamp and nonce checks --
+        the contract for it belongs to WeChat, not to this project, and may
+        change without a change here.
+
+        `event_type` must be `TRANSACTION.SUCCESS` or contain `REFUND`;
+        anything else is rejected with 400/40004. Accepted notifications answer
+        `code: SUCCESS`; verification and persistence failures answer
+        `code: FAIL` with HTTP 500 so WeChat retries.
+      security: []
+      parameters:
+        - name: Wechatpay-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: Wechatpay-Nonce
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: Wechatpay-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: Wechatpay-Serial
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WechatNotifyRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/CallbackAck'
+        "400":
+          description: Malformed envelope (codes 40002 invalid JSON, 40003 missing event_type, 40004 unknown event_type)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackAck'
+        "500":
+          description: Verification or persistence failure (code FAIL); WeChat retries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackAck'
+
+  /api/pay/notify/alipay:
+    post:
+      tags: [callbacks]
+      operationId: alipayNotify
+      summary: Alipay asynchronous notification
+      description: |
+        Alipay posts `application/x-www-form-urlencoded`, not JSON; `sign` is
+        verified over the remaining sorted parameters before any state change,
+        and a failed verification is rejected (P0-1). As with WeChat, the body
+        is the channel's agreed format rather than this project's contract.
+
+        Known deviation: Alipay expects the literal string `success` as the
+        acknowledgement. This server answers a JSON body instead and returns
+        HTTP 200 even when rejecting, which Alipay treats as accepted. Do not
+        build a retry-dependent integration on this response until that is
+        fixed; see `docs/api/pay-api-examples.md`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AlipayNotifyRequest'
+      responses:
+        "200":
+          description: JSON acknowledgement (SUCCESS on accept, FAIL on rejection)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackAck'
+
+  /healthz:
+    get:
+      tags: [host]
+      operationId: healthz
+      summary: Liveness probe
+      description: Unauthenticated; 200 while the event loop is running.
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [alive]
+        "503":
+          description: Dead (`reason` is `event_loop_null` or `not_running`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [dead]
+                  reason:
+                    type: string
+    options:
+      tags: [host]
+      operationId: healthzPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /readyz:
+    get:
+      tags: [host]
+      operationId: readyz
+      summary: Readiness probe (database and Redis)
+      description: |
+        Unauthenticated. Flaps are debounced: the cached last-good state is
+        reported until `FAILURE_THRESHOLD` consecutive probes fail.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+        "503":
+          description: Not ready, listing the failed dependency names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [not_ready]
+                  failed:
+                    type: array
+                    items:
+                      type: string
+    options:
+      tags: [host]
+      operationId: readyzPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /health:
+    get:
+      tags: [host]
+      operationId: healthDeprecated
+      summary: Readiness probe (deprecated alias of /readyz)
+      deprecated: true
+      description: |
+        Same behaviour as `/readyz` plus `Deprecation: true` and
+        `Sunset: 2026-08-28` response headers. Kept for hosts that have not
+        migrated their probes.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+        "503":
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [not_ready]
+                  failed:
+                    type: array
+                    items:
+                      type: string
+    options:
+      tags: [host]
+      operationId: healthDeprecatedPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+  /metrics:
+    get:
+      tags: [host]
+      operationId: combinedMetrics
+      summary: Prometheus exposition (base metrics plus pay auth counters)
+      description: |
+        Restricted to loopback by `drogon::LocalHostFilter`. The example host
+        fetches the Drogon `PromExporter` plugin page (configured as
+        `/metrics/base`, which is registered by Drogon itself and therefore
+        not part of this document's route-parity check) and appends the pay
+        auth counters; when the base page is unreachable it answers only the
+        pay counters behind a `# NOTE base metrics unavailable` header.
+      security: []
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+        "403":
+          description: Request did not originate from loopback
+    options:
+      tags: [host]
+      operationId: combinedMetricsPreflight
+      summary: CORS preflight
+      security: []
+      responses:
+        "200":
+          description: Empty preflight answer
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Keys come from `custom_config.pay.api_keys`, `PAY_API_KEY`, or the
+        comma-separated `PAY_API_KEYS`. When no key is configured at all every
+        protected route answers 503 `api key not configured` -- an unconfigured
+        server fails closed. Scopes (`order_query`, `refund`, `refund_query`,
+        `reconcile`) are matched from `api_key_scopes` per key, falling back to
+        `api_key_default_scopes`; a key that is present in `api_key_scopes` but
+        lacks the needed scope is refused with 403, and an unlisted key is
+        judged against the defaults.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        `Authorization: Bearer <key>` is accepted interchangeably with
+        `X-Api-Key`; the same key list and scope rules apply.
+
+  parameters:
+    IdempotencyKey:
+      name: X-Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional replay key; `Idempotency-Key` is accepted as a synonym. Reuse
+        with a changed body answers 409, and a replay of a completed request
+        returns the stored snapshot.
+      schema:
+        type: string
+        maxLength: 128
+
+  responses:
+    BadRequest:
+      description: Malformed body, missing field, or invalid amount format
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missing-field:
+              value:
+                code: 400
+                message: "Missing required fields: order_no and amount"
+            bad-amount:
+              value:
+                code: 40001
+                message: "Invalid amount format. Expected positive number with up to 2 decimal places (e.g. 100.00)"
+    Unauthorized:
+      description: |
+        Missing or unknown API key. The auth layer answers **plain text**, not
+        JSON: `missing api key` or `invalid api key`. `/api/pay/create` is the
+        exception -- a key that is present but carries no `user_id` answers a
+        JSON `401 User ID required` from the controller.
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: invalid api key
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Valid key, scope not allowed (plain text `api key scope not allowed`)
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: api key scope not allowed
+    NotFound:
+      description: No order or refund for the supplied number (business codes 1004 / 1404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: |
+        Idempotency key already bound to a different request body, or still in
+        progress (business code 1409). `/api/pay/create` and `/api/qrpay/create`
+        currently signal the same collision with code 1004, which maps to HTTP
+        404 -- treat a 404 on a retried create as a possible conflict.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Database or gateway failure (business codes 1002 / 1003 / 1500 / 1005)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadGateway:
+      description: The payment channel returned a business failure (business code 1502)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: |
+        Either the auth layer has no keys configured (`api key not configured`,
+        plain text) or the channel client is not ready (business code 1501).
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: api key not configured
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    CallbackAck:
+      description: Notification acknowledgement
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CallbackAck'
+
+  schemas:
+    Amount:
+      type: string
+      pattern: "^\d+(\.\d{1,2})?$"
+      example: "9.99"
+      description: |
+        Decimal money in **yuan**, up to two fractional digits, stored verbatim
+        in `VARCHAR(32)` columns. Cent integers and JSON numbers are rejected.
+
+    OrderStatus:
+      type: string
+      enum: [CREATED, PAYING, PAID, REFUNDED, CLOSED, FAILED]
+      description: |
+        `pay_order.status`. `CREATED` is the DDL default; `/create` reserves the
+        order as `PAYING`; a verified channel success moves it to `PAID`, a
+        completed refund to `REFUNDED`, and a closed/revoked/expired trade to
+        `CLOSED` or `FAILED`.
+
+    PaymentStatus:
+      type: string
+      enum: [INIT, PROCESSING, SUCCESS, FAIL, FAILED]
+      description: |
+        `pay_payment.status`. Both `FAIL` (WeChat mapping, `PayUtils.cc`) and
+        `FAILED` (Alipay `TRADE_CLOSED`, `PaymentService.cc`) occur in the
+        current code; treat them as one terminal failure state and do not rely
+        on the spelling until the two channels are aligned.
+
+    RefundStatus:
+      type: string
+      enum: [REFUND_INIT, REFUNDING, REFUND_SUCCESS, REFUND_FAIL]
+      description: |
+        `pay_refund.status`. The parent order only moves to `REFUNDED` once the
+        refund reaches `REFUND_SUCCESS`.
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: |
+            Business code. Transport-relevant values: 400/40001 input,
+            1001/1400 invalid request, 1004/1404 not found, 1409 idempotency
+            conflict, 1002/1003/1500 internal, 1501 channel not ready, 1502
+            channel business failure.
+        message:
+          type: string
+
+    CallbackAck:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          enum: [SUCCESS, FAIL]
+          description: Channel-facing acknowledgement, deliberately a string rather than the numeric business code.
+        message:
+          type: string
+        detail:
+          type: string
+          description: WeChat failure detail.
+
+    WechatNotifyRequest:
+      type: object
+      description: |
+        WeChat Pay notification envelope; `resource` is an AEAD_AES_256_GCM
+        encrypted transaction/refund document. Fields beyond `event_type` are
+        channel-defined and pass through unchanged.
+      required: [event_type]
+      properties:
+        id:
+          type: string
+        create_time:
+          type: string
+          format: date-time
+        resource_type:
+          type: string
+          example: encrypt-resource
+        event_type:
+          type: string
+          description: "`TRANSACTION.SUCCESS`, or any value containing `REFUND`."
+        summary:
+          type: string
+        resource:
+          type: object
+          properties:
+            algorithm:
+              type: string
+              example: AEAD_AES_256_GCM
+            ciphertext:
+              type: string
+            nonce:
+              type: string
+            associated_data:
+              type: string
+
+    AlipayNotifyRequest:
+      type: object
+      description: |
+        Form fields Alipay posts to the notify URL. `sign_type` and `sign`
+        authenticate the set; the rest are copied into the status-sync path.
+      properties:
+        out_trade_no:
+          type: string
+        trade_no:
+          type: string
+        trade_status:
+          type: string
+          enum: [WAIT_BUYER_PAY, TRADE_SUCCESS, TRADE_FINISHED, TRADE_CLOSED]
+        total_amount:
+          $ref: '#/components/schemas/Amount'
+        app_id:
+          type: string
+        seller_id:
+          type: string
+        notify_time:
+          type: string
+        notify_type:
+          type: string
+        notify_id:
+          type: string
+        charset:
+          type: string
+        sign_type:
+          type: string
+          example: RSA2
+        sign:
+          type: string
+
+    CreatePaymentRequest:
+      type: object
+      required: [order_no, amount, user_id]
+      properties:
+        order_no:
+          type: string
+          maxLength: 64
+          description: Merchant order number; must be unique.
+        amount:
+          $ref: '#/components/schemas/Amount'
+        currency:
+          type: string
+          default: CNY
+          maxLength: 8
+        description:
+          type: string
+          description: Order title written to `pay_order.title`.
+        notify_url:
+          type: string
+          format: url
+          description: Channel-facing callback URL; must be https, or http loopback for local testing.
+        channel:
+          type: string
+          enum: [alipay, wechat]
+          default: alipay
+        user_id:
+          type: integer
+          format: int64
+        scene_info:
+          type: object
+          description: Channel-specific scene payload, forwarded verbatim.
+
+    CreatePaymentResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: Payment created successfully
+        data:
+          type: object
+          properties:
+            order_no:
+              type: string
+            payment_no:
+              type: string
+            status:
+              $ref: '#/components/schemas/OrderStatus'
+            code_url:
+              type: string
+              description: WeChat only - `weixin://` scheme URL for QR rendering.
+            prepay_id:
+              type: string
+              description: WeChat only - id to sign for the client SDK.
+            qr_code:
+              type: string
+              description: Alipay only - QR landing URL.
+            out_trade_no:
+              type: string
+              description: Alipay only - merchant trade number echoed back.
+            alipay_response:
+              type: object
+              description: Alipay only - raw channel document.
+            wechat_response:
+              type: object
+              description: WeChat only - raw channel document.
+
+    CreateQRPaymentRequest:
+      type: object
+      required: [order_no, amount, channel, user_id]
+      properties:
+        order_no:
+          type: string
+          maxLength: 64
+        amount:
+          $ref: '#/components/schemas/Amount'
+        channel:
+          type: string
+          enum: [alipay, wechat]
+        user_id:
+          type: integer
+        description:
+          type: string
+        product_name:
+          type: string
+          description: Becomes the channel `subject`; defaults to "Payment".
+
+    CreateQRPaymentResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 0 on success; 500/1005 are reported in-body with HTTP 200.
+        message:
+          type: string
+        data:
+          type: object
+          properties:
+            order_no:
+              type: string
+            qr_code:
+              type: string
+            out_trade_no:
+              type: string
+
+    QueryOrderResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 0 on a clean answer, 1 when the channel query degraded the data.
+        message:
+          type: string
+          example: Order found
+        data:
+          type: object
+          properties:
+            order_no:
+              type: string
+            amount:
+              $ref: '#/components/schemas/Amount'
+            currency:
+              type: string
+            status:
+              $ref: '#/components/schemas/OrderStatus'
+            channel:
+              type: string
+            title:
+              type: string
+            user_id:
+              type: integer
+              format: int64
+            trade_no:
+              type: string
+              description: Channel trade number, present after a successful channel sync.
+            wechat_response:
+              type: object
+            alipay_response:
+              type: object
+            wechat_query_error:
+              type: string
+              description: Present with `code: 1` when the WeChat query failed.
+            alipay_query_error:
+              type: string
+              description: Present with `code: 1` when the Alipay query failed.
+
+    CreateRefundRequest:
+      type: object
+      required: [order_no, amount]
+      properties:
+        order_no:
+          type: string
+          maxLength: 64
+        amount:
+          $ref: '#/components/schemas/Amount'
+          description: Must not exceed the unpaid remainder of the original payment.
+        reason:
+          type: string
+        notify_url:
+          type: string
+          format: url
+        funds_account:
+          type: string
+          description: Optional WeChat funds account to refund from.
+        payment_no:
+          type: string
+          description: Selects the payment when an order has more than one.
+        refund_no:
+          type: string
+          description: Caller-supplied refund number; generated when omitted.
+
+    CreateRefundResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: Refund created successfully
+        data:
+          type: object
+          properties:
+            refund_no:
+              type: string
+            order_no:
+              type: string
+            payment_no:
+              type: string
+            refund_amount:
+              $ref: '#/components/schemas/Amount'
+            status:
+              $ref: '#/components/schemas/RefundStatus'
+            channel_refund_no:
+              type: string
+            wechat_response:
+              type: object
+            alipay_response:
+              type: object
+
+    QueryRefundResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: Query refund successful
+        data:
+          type: object
+          properties:
+            refund_no:
+              type: string
+            order_no:
+              type: string
+            payment_no:
+              type: string
+            status:
+              $ref: '#/components/schemas/RefundStatus'
+            refund_amount:
+              $ref: '#/components/schemas/Amount'
+            channel_refund_no:
+              type: string
+            updated_at:
+              type: string
+              description: RFC 3339 UTC timestamp.
+            wechat_response:
+              type: object
+
+    QueryOrderListResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: Success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderSummary'
+
+    OrderSummary:
+      type: object
+      properties:
+        order_no:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        amount:
+          $ref: '#/components/schemas/Amount'
+        currency:
+          type: string
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        channel:
+          type: string
+        title:
+          type: string
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        paid_at:
+          type: string
+          description: Mirror of `updated_at`; the schema has no dedicated paid column.
+        payment_no:
+          type: string
+        trade_no:
+          type: string
+        response_payload:
+          type: string
+          description: Raw channel document, when the row has one.
+
+    ReconcileSummaryResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: Reconciliation summary
+        data:
+          type: object
+          properties:
+            paying_orders:
+              type: integer
+              format: int64
+              description: Orders still in `PAYING`.
+            refunding_refunds:
+              type: integer
+              format: int64
+              description: Refunds in `REFUND_INIT` or `REFUNDING`.
+            oldest_paying_updated:
+              type: string
+              description: Local-format timestamp of the longest-waiting paying order.
+            oldest_refund_updated:
+              type: string
+              description: Local-format timestamp of the longest-waiting refund.
+
+    AuthMetrics:
+      type: object
+      description: Process-lifetime counters; reset on restart, not persisted.
+      properties:
+        missing_key:
+          type: integer
+          format: int64
+        invalid_key:
+          type: integer
+          format: int64
+        scope_denied:
+          type: integer
+          format: int64
+        not_configured:
+          type: integer
+          format: int64

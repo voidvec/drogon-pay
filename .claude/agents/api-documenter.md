@@ -41,18 +41,27 @@ Claude 自动调用：当检测到控制器代码变更时
 
 ## Drogon 路由识别
 
-### 路由映射模式
-```cpp
-// 在控制器中识别这些模式
-void createPayment(const HttpRequestPtr &req,
-                   std::function<void(const HttpResponsePtr &)> &&callback);
-// 对应: POST /api/v1/payments
+### 本仓库的真实注册方式
 
-void queryPayment(const HttpRequestPtr &req,
-                  std::function<void(const HttpResponsePtr &)> &&callback,
-                  const std::string &id);
-// 对应: GET /api/v1/payments/{id}
+契约文件 `examples/pay-server/openapi.yaml` 由 `scripts/check_openapi_routes.py`
+与下列两处代码做双向比对，因此新增/改名路由必须同步改契约：
+
+```cpp
+// 1) 插件路由：PayPlugin::registerHttpHandlers 里以编程方式注册
+//    （静态库构建会丢掉 ADD_METHOD_TO 的自注册符号，所以不用宏）
+app.registerHandler(basePath_ + "/query",
+                    authed(payController_, &PayController::queryOrder),
+                    {drogon::Get, drogon::Options});
+// 对应: GET {base_path}/query，默认即 GET /api/pay/query，需要 API Key
+
+// 2) 宿主路由：examples/pay-server/controllers/*.h 使用宏
+ADD_METHOD_TO(HealthCheckController::healthz, "/healthz", Get, Options);
+// 对应: GET /healthz，不鉴权；/metrics 额外挂 drogon::LocalHostFilter
 ```
+
+`authed(...)` 包装 = 受 API Key 保护；`open(...)` 包装 = 公开（两个 notify 回调
+走渠道签名校验）。契约里对应的表达是 operation 级别的 `security`：受保护路由沿用
+全局 `security`，公开路由必须显式写 `security: []`——门禁会核对这一侧。
 
 ### 参数提取
 - **路径参数**: 从路由路径中提取（如 `{id}`）
@@ -94,131 +103,61 @@ void queryPayment(const HttpRequestPtr &req,
         description: API Key 无效
 ```
 
-### 支付标准端点
+### 本仓库的端点写法（取自真实契约）
 ```yaml
 paths:
-  /api/v1/payments:
+  /api/pay/create:
     post:
-      summary: 创建支付
-      description: 创建新的支付订单，支持支付宝和微信支付
+      operationId: createPayment
+      summary: Create a payment order
+      description: 受 API Key 保护，沿用 spec 顶层的全局 security
       parameters:
-        - name: X-Api-Key
-          in: header
-          required: true
-          schema:
-            type: string
-        - name: Idempotency-Key
-          in: header
-          required: false
-          schema:
-            type: string
-          description: 幂等性键，用于防止重复创建
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - channel
-                - order_no
-                - amount
-              properties:
-                channel:
-                  type: string
-                  enum: [alipay, wechat]
-                order_no:
-                  type: string
-                amount:
-                  type: integer
-                  description: 金额（分）
-                description:
-                  type: string
+              $ref: '#/components/schemas/CreatePaymentRequest'
       responses:
         '200':
-          description: 支付创建成功
+          description: 支付创建成功（业务 code 0）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
         '400':
-          description: 参数无效
-        '401':
-          description: API Key 无效
+          $ref: '#/components/responses/BadRequest'
         '409':
-          description: 订单号冲突
+          $ref: '#/components/responses/Conflict'
 
-  /api/v1/payments/{id}:
-    get:
-      summary: 查询支付
-      description: 根据订单号查询支付状态
-      parameters:
-        - name: X-Api-Key
-          in: header
-          required: true
-          schema:
-            type: string
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: 订单号
-      responses:
-        '200':
-          description: 查询成功
-        '404':
-          description: 订单不存在
-
-  /api/v1/refunds:
+  /api/pay/notify/wechat:
     post:
-      summary: 创建退款
-      description: 对已支付的订单发起退款
-      parameters:
-        - name: X-Api-Key
-          in: header
-          required: true
-          schema:
-            type: string
-        - name: Idempotency-Key
-          in: header
-          required: false
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - order_no
-                - amount
-              properties:
-                order_no:
-                  type: string
-                amount:
-                  type: integer
-                  description: 退款金额（分）
-                reason:
-                  type: string
+      operationId: wechatNotify
+      summary: WeChat Pay asynchronous notification
+      security: []          # 渠道签名鉴权，公开路由必须显式声明
       responses:
         '200':
-          description: 退款创建成功
-        '400':
-          description: 参数无效或订单不可退款
+          $ref: '#/components/responses/CallbackAck'
 
-  /api/v1/callbacks/{provider}:
-    post:
-      summary: 支付回调
-      description: 第三方支付平台异步通知回调
-      parameters:
-        - name: provider
-          in: path
-          required: true
-          schema:
-            type: string
-            enum: [alipay, wechat]
-      responses:
-        '200':
-          description: 回调接收成功
+components:
+  schemas:
+    Amount:
+      type: string
+      pattern: "^\d+(\.\d{1,2})?$"
+      example: "9.99"
+      description: 元为单位的十进制字符串，禁止分单位整数
 ```
+
+### 硬性约定
+
+- **金额**：`type: string` + 上述 pattern，单位元、最多两位小数。本仓库不存在
+  分/整数金额，写成 `type: integer` 会被契约评审判为错误（历史上
+  `openapi-update` 技能与本文档都写错过，已纠正）
+- **状态枚举**：大写的状态机常量，取值以 `TECH_SPECS.md` "订单状态机" 为准
+- **响应信封**：`{code, message, data?}`，成功 `code: 0`（订单列表为 `200`）
+- **401/403/503 鉴权类响应是纯文本**，不是 JSON（`AuthCheck.cc` 直接 setBody）
+- **notify 回调**：响应体是渠道约定体，文档必须注明"非本服务自有契约"
 
 ## 数据模型维护
 

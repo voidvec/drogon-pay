@@ -152,27 +152,31 @@
 
 ### [MUST] 订单状态机
 
+状态值以代码为准（`libs/drogon-pay/src/utils/PayUtils.cc` 的渠道状态映射与
+`services/*.cc` 的写入点），建表默认值见 `sql/001_init_pay_tables.sql`。
 两种支付创建路径使用不同的初始状态，状态转换规则如下：
 
 #### /api/pay/create 路径
 
 ```
-CREATED ──(channel API call)──> PAYING ──(callback SUCCESS)──> SUCCESS
+CREATED ──(channel API call)──> PAYING ──(callback SUCCESS)──> PAID
                                      │
-                                     └──(callback FAIL)──────> FAILED
+                                     ├──(callback FAIL)───────> FAILED
+                                     └──(channel CLOSED/REVOKED)──> CLOSED
 ```
 
 | 状态 | 含义 | 转换触发 |
 |------|------|----------|
 | `CREATED` | 订单已创建，支付记录已写入，等待渠道调用 | `PayOrder` INSERT 时设置 |
 | `PAYING` | 渠道调用成功，等待用户支付 | 渠道 API return success 时更新 |
-| `SUCCESS` | 支付成功 | 回调 `TRANSACTION.SUCCESS` |
+| `PAID` | 支付成功 | 回调 `TRANSACTION.SUCCESS` / `TRADE_SUCCESS` |
+| `CLOSED` | 渠道侧关闭或撤销 | 微信 `CLOSED`/`REVOKED`/`REFUND` |
 | `FAILED` | 支付失败 | 渠道 API return error 或回调失败 |
 
 #### /api/qrpay/create 路径
 
 ```
-PAYING ──(callback SUCCESS)──> SUCCESS
+PAYING ──(callback SUCCESS)──> PAID
    │
    └──(callback FAIL)─────────> FAILED
 ```
@@ -180,27 +184,54 @@ PAYING ──(callback SUCCESS)──> SUCCESS
 | 状态 | 含义 | 转换触发 |
 |------|------|----------|
 | `PAYING` | 二维码已生成，等待用户扫码支付 | `PayOrder` INSERT 时设置（注意：与 /api/pay/create 不同，无 `CREATED` 状态） |
-| `SUCCESS` | 支付成功 | 回调通知 |
+| `PAID` | 支付成功 | 回调通知 |
 | `FAILED` | 支付失败/超时 | 回调失败或订单过期 |
 
 > **设计说明**: `/api/qrpay/create` 在订单创建前已完成渠道调用（生成 QR 码），因此订单创建时即进入 `PAYING` 状态。`/api/pay/create` 先创建订单再调用渠道，因此使用 `CREATED` 作为中间状态。两种路径的状态差异在 `queryOrder`、`queryOrderList` 和 `reconcileSummary` 等查询/对账接口中均已正确处理。
 
+> 订单终态 `REFUNDED` 不属于支付创建路径：只有在退款达到 `REFUND_SUCCESS` 后，
+> 退款流程才把父订单置为 `REFUNDED`。
+
 #### 退款状态机
 
 ```
-REFUND_INIT ──(channel call)──> REFUND_PROCESSING ──(callback)──> REFUND_SUCCESS
-      │                              │                                │
-      └──(DB error)──────────────────┴──(callback FAIL)──────────────> REFUND_FAILED
+REFUND_INIT ──(channel call)──> REFUNDING ──(callback SUCCESS)──> REFUND_SUCCESS
+      │                             │
+      └──(channel/business error)───┴──────────────────────────> REFUND_FAIL
 ```
+
+| 状态 | 含义 |
+|------|------|
+| `REFUND_INIT` | 退款记录已写入，待渠道调用（建表默认值） |
+| `REFUNDING` | 渠道受理，等待退款结果 |
+| `REFUND_SUCCESS` | 退款成功，父订单随之变为 `REFUNDED` |
+| `REFUND_FAIL` | 退款失败，可重新发起 |
 
 #### Payment 记录状态
 
 | 状态 | 含义 |
 |------|------|
-| `INIT` | 支付记录已写入事务，待渠道调用 |
+| `INIT` | 支付记录已写入事务，待渠道调用（建表默认值） |
 | `PROCESSING` | 渠道调用成功，等待支付结果 |
 | `SUCCESS` | 支付成功（回调确认） |
 | `FAIL` | 渠道调用失败 |
+
+> **已知缺陷**: 微信映射产出 `FAIL`（`PayUtils.cc`），而支付宝
+> `TRADE_CLOSED` 分支产出 `FAILED`（`PaymentService.cc`）。两者语义相同，
+> 消费端暂时只能按"终态失败"处理；修复渠道映射一致性前不要依赖具体拼写。
+
+### [MUST] API 契约
+
+| 要求 | 说明 |
+|------|------|
+| 契约文件 | `examples/pay-server/openapi.yaml` 是 HTTP 表面的唯一契约来源 |
+| 路由一致性 | `scripts/check_openapi_routes.py` 双向比对代码注册的路由与契约，任一侧缺失即 CI 失败；例外必须写进 `EXCLUSIONS` 并给出 reason |
+| 金额表示 | 一律为**元为单位的十进制字符串**（`^\d+(\.\d{1,2})?$`），禁止分单位整数与 JSON number；落库列为 `VARCHAR(32)` |
+| 响应信封 | `{code, message, data?}`；成功 `code: 0`（订单列表为 `200`），查询类降级为 `code: 1` 并附 `*_query_error` |
+| 状态码语义 | 传输层错误用 HTTP 状态表达（400/401/403/404/409/500/502/503），业务细节用 `code` 表达；映射表见 `PayHandlers.cc` `mapErrorToHttpStatus` |
+| 回调响应 | `/notify/wechat`、`/notify/alipay` 的响应体是**渠道约定体**（微信 `{"code":"SUCCESS"}`；支付宝预期纯文本 `success`，当前实现返回 JSON，见 `docs/api/pay-api-examples.md`），不受本服务自有契约约束 |
+| 幂等 | 写操作接受 `X-Idempotency-Key`（同义 `Idempotency-Key`）；快照落盘先于响应，详见"幂等"相关规范 |
+| 变更顺序 | 先改契约，再改代码与文档；`docs/api/pay-api-examples.md` 只做示例，不重复定义字段类型 |
 
 ### [MUST] 敏感数据保护
 

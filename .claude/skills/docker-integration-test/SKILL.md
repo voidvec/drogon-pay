@@ -31,13 +31,16 @@ description: 在 Docker Compose 环境中执行支付系统的完整集成测试
 - API Key 认证测试
 
 ### 3. API 端点测试
-- `POST /api/v1/payments` - 创建支付
-- `GET /api/v1/payments/{id}` - 查询支付
-- `POST /api/v1/refunds` - 创建退款
-- `GET /api/v1/refunds/{id}` - 查询退款
-- `POST /api/v1/callbacks/{provider}` - 支付回调
-- `GET /health` - 健康检查
-- `GET /metrics` - Prometheus 指标
+- `POST /api/pay/create` - 创建支付
+- `GET /api/pay/query?order_no=...` - 查询支付
+- `POST /api/pay/refund` - 创建退款
+- `GET /api/pay/refund/query?refund_no=...` - 查询退款
+- `POST /api/pay/notify/{wechat|alipay}` - 支付回调（渠道签名，非 API Key）
+- `GET /healthz` / `GET /readyz` - 存活/就绪（`/health` 为已废弃别名）
+- `GET /metrics` - Prometheus 指标（仅回环地址）
+
+路径以 `examples/pay-server/openapi.yaml` 为准，`base_path` 可配置（默认
+`/api/pay`）；金额一律是**元为单位的十进制字符串**，如 `"9.99"`。
 
 ### 4. 数据库集成测试
 - PostgreSQL 连接验证
@@ -108,23 +111,23 @@ docker exec payserver /bin/bash -c "cd build && PayBackendTests.exe --output-on-
 
 ```bash
 # 1. 创建支付
-curl -s -X POST "http://localhost:5566/api/v1/payments" \
+curl -s -X POST "http://localhost:5566/api/pay/create" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: test-dev-key" \
-  -d '{"channel":"alipay","order_no":"E2E-TEST-001","amount":100,"description":"Integration test"}'
+  -d '{"channel":"alipay","order_no":"E2E-TEST-001","amount":"9.99","user_id":10001,"description":"Integration test"}'
 
 # 2. 查询支付
-curl -s -X GET "http://localhost:5566/api/v1/payments/E2E-TEST-001" \
+curl -s -X GET "http://localhost:5566/api/pay/query?order_no=E2E-TEST-001" \
   -H "X-Api-Key: test-dev-key"
 
 # 3. 创建退款
-curl -s -X POST "http://localhost:5566/api/v1/refunds" \
+curl -s -X POST "http://localhost:5566/api/pay/refund" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: test-dev-key" \
-  -d '{"order_no":"E2E-TEST-001","amount":100,"reason":"Test refund"}'
+  -d '{"order_no":"E2E-TEST-001","amount":"9.99","reason":"Test refund"}'
 
 # 4. 查询退款
-curl -s -X GET "http://localhost:5566/api/v1/refunds/E2E-TEST-001" \
+curl -s -X GET "http://localhost:5566/api/pay/refund/query?refund_no=E2E-TEST-001" \
   -H "X-Api-Key: test-dev-key"
 ```
 
@@ -132,18 +135,18 @@ curl -s -X GET "http://localhost:5566/api/v1/refunds/E2E-TEST-001" \
 
 ```bash
 # 使用相同 Idempotency-Key 发送两次请求
-curl -s -X POST "http://localhost:5566/api/v1/payments" \
+curl -s -X POST "http://localhost:5566/api/pay/create" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: test-dev-key" \
   -H "Idempotency-Key: idem-test-001" \
-  -d '{"channel":"alipay","order_no":"IDEM-TEST","amount":100,"description":"Idempotency test"}'
+  -d '{"channel":"alipay","order_no":"IDEM-TEST","amount":"9.99","user_id":10001,"description":"Idempotency test"}'
 
 # 第二次相同请求应返回相同结果
-curl -s -X POST "http://localhost:5566/api/v1/payments" \
+curl -s -X POST "http://localhost:5566/api/pay/create" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: test-dev-key" \
   -H "Idempotency-Key: idem-test-001" \
-  -d '{"channel":"alipay","order_no":"IDEM-TEST","amount":100,"description":"Idempotency test"}'
+  -d '{"channel":"alipay","order_no":"IDEM-TEST","amount":"9.99","user_id":10001,"description":"Idempotency test"}'
 ```
 
 ### 步骤 7: 性能基准测试
@@ -212,10 +215,10 @@ docker exec redis redis-cli ping
 ### 支付创建失败
 **诊断**:
 ```bash
-curl -v -X POST "http://localhost:5566/api/v1/payments" \
+curl -v -X POST "http://localhost:5566/api/pay/create" \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: test-dev-key" \
-  -d '{"channel":"alipay","order_no":"DIAG-TEST","amount":1,"description":"Diagnostic"}'
+  -d '{"channel":"alipay","order_no":"DIAG-TEST","amount":"1.00","user_id":10001,"description":"Diagnostic"}'
 docker-compose logs payserver | grep -i error
 ```
 **解决方案**:
