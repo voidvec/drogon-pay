@@ -81,6 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   service's contract). `docs/api/pay-api-examples.md` gains the two endpoints
   it never documented (`/api/pay/orders`, `/api/pay/reconcile/summary`) plus
   the Alipay callback.
+- **OpenAPI route gate** (`scripts/check_openapi_routes.py`, two
+  `static-analysis` steps): parses the `registerHandler`/`ADD_METHOD_TO`
+  call sites — including `basePath_ + "/x"` concatenation, the `qrPath`
+  variable and the ternary that pins `/api/qrpay/create` — and diffs the
+  resulting `METHOD /path` set against the spec paths in both directions,
+  then checks the auth posture of each pair (`authed()` routes may not be
+  documented as public, `OPTIONS` must be). A contract that merely omits a
+  route fails; so does an `EXCLUSIONS` entry without a reason and a `$ref`
+  with no definition. Stdlib-only, because the FAST gate must not depend on
+  PyYAML being present on the runner. The `openapi-update` skill was
+  rewritten around this gate (both mirrors).
 
 ### Changed
 

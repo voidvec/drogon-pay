@@ -145,6 +145,7 @@
 | 技术规范 | [TECH_SPECS.md](TECH_SPECS.md) | 架构、数据访问、安全规范 |
 | 项目概述 | [README.md](README.md) | 项目概述和快速开始 |
 | 部署文档 | [docs/deployment/](docs/deployment/) | 部署和运维指南 |
+| API 契约 | [examples/pay-server/openapi.yaml](examples/pay-server/openapi.yaml) | HTTP 表面唯一契约来源，CI 校验与代码路由一致 |
 | API 文档 | [docs/api/pay-api-examples.md](docs/api/pay-api-examples.md) | API 接口文档 |
 | 集成指南 | [docs/development/plugin_integration.md](docs/development/plugin_integration.md) | 宿主接入与自定义渠道开发 |
 
