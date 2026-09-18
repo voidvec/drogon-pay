@@ -169,7 +169,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `publish` now depends on that. The hand-run `gh release create` recipe is gone
   with it: `/release` describes the tag-and-watch-CI flow instead of telling you
   to `git log > CHANGELOG.md`, which would have thrown away the changelog and
-  left the release body blank.
+  left the release body blank. The workflow asks for `contents: read` and grants
+  `write` to `publish` alone, and its changelog extraction fails the job when it
+  yields nothing instead of publishing a release with a blank body.
 
 ### Fixed
 
