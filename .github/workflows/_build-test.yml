@@ -69,6 +69,11 @@ on:
         type: string
         required: true
 
+# Read-only: a called workflow never needs more than the checkout, and naming
+# it here keeps the grant explicit instead of inheriting an ambient default.
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: ${{ inputs.runs_on }}

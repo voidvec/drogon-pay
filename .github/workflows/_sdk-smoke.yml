@@ -35,6 +35,11 @@ on:
         required: false
         default: 120
 
+# Read-only, as in the other pipelines of this gate: the smoke job builds and
+# runs, it does not publish.
+permissions:
+  contents: read
+
 jobs:
   sdk-smoke:
     runs-on: ${{ inputs.runs_on }}

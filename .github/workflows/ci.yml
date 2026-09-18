@@ -45,6 +45,12 @@ concurrency:
 env:
   BUILD_TYPE: Release
 
+# Declared rather than inherited: every job here reads the checkout and writes
+# nothing back to the repository, so the token should never hold more than that
+# even if the organisation default changes underneath us.
+permissions:
+  contents: read
+
 jobs:
   # --- FAST gate --------------------------------------------------------------
   # Everything that can reject a patch without compiling a single translation

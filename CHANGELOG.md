@@ -176,6 +176,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depended on one FAST job, so the promoted tidy batch was advisory in
   practice: red on a check nothing depends on still merges. The `needs` edge
   makes it a blocker regardless of which contexts the branch ruleset requires.
+- **Every workflow now states what its token may do, and no workflow runs an
+  action that is not frozen.** `ci.yml`, `_build-test.yml`, `_sdk-smoke.yml`,
+  `coverage.yml` and `deploy.yml` declare `permissions: contents: read` at
+  workflow level instead of inheriting the repository default, and the
+  remaining floating refs (`coverage.yml`, `deploy.yml`, `secrets-scan.yml`)
+  are pinned to full commit SHAs with their tag in a comment — the same rule
+  the `ci.yml` pipeline already followed. Each SHA was resolved through the
+  tag ref API and cross-checked against the pins already in use, so the two
+  spellings of `actions/checkout` in this repository name one commit.
+  `secrets-scan.yml` keeps its inherited grants on purpose: gitleaks posts a
+  commit status, and narrowing it without a run to observe is how a security
+  gate goes quiet.
 
 ### Fixed
 
