@@ -208,12 +208,11 @@ jobs:
             preset_dir: build/macos-arm64
             conan_extra_settings: "-s arch=armv8"
             configure_extra_args: "-DDROGON_PAY_WERROR=ON"
-            # Flipped to true in the follow-up commit that adds the Homebrew
-            # Postgres/Redis leg; kept build-only here so the refactor itself
-            # stays independently revertable.
-            use_database: false
+            use_database: true
             ctest_timeout: 180
-            timeout_minutes: 90
+            # Build-only used to fit in 90; the Postgres/Redis provisioning and
+            # the suite itself need headroom on top of a cold-cache arm64 build.
+            timeout_minutes: 120
             check_name: macos-build
             log_artifact_name: macos-test-logs
     uses: ./.github/workflows/_build-test.yml

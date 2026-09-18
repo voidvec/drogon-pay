@@ -19,6 +19,7 @@ operational facts below apply to **any** coding agent working in this repo.
 |-------|---------|
 | Full suite (Linux) | `ctest --test-dir build/linux-release --output-on-failure` |
 | Full suite (Windows) | `ctest --test-dir build\windows-msvc -C Release --output-on-failure` |
+| Full suite (macOS) | `ctest --test-dir build/macos-arm64 --output-on-failure` |
 | Line coverage (Linux/gcc only) | `cmake --preset linux-coverage` + build + ctest, then `python3 scripts/measure_coverage.py --dir build/linux-coverage --report` — full recipe and ratchet rules in [TECH_SPECS.md](TECH_SPECS.md) "行覆盖率计量" |
 
 Test framework: Drogon `DROGON_TEST` (not gtest). Test target: `PayBackendTests`.
@@ -46,10 +47,11 @@ deleted. Do not add a new job to the legacy files — extend `ci.yml`.
 **The three MAIN check names are required status checks in the branch
 ruleset.** Never rename them (a rename silently removes merge protection);
 they are set by `matrix.check_name` in `ci.yml`, not inside the reusable
-workflows. Coverage of the DB-backed suite is provisioned per platform:
+workflows. Postgres/Redis for the DB-backed suite is provisioned per platform:
 Docker containers on Linux, the runner's own PostgreSQL service plus Memurai on
-Windows. `.github/workflows/legacy-source-build.yml` holds the pre-Conan
-build-Drogon-from-source rollback net and is dispatch-only.
+Windows, and a throwaway `initdb` cluster under `$RUNNER_TEMP` plus a daemonized
+`redis-server` on macOS. `.github/workflows/legacy-source-build.yml` holds the
+pre-Conan build-Drogon-from-source rollback net and is dispatch-only.
 
 ## Critical Constraints (always enforce)
 
