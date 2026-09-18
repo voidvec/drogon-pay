@@ -46,31 +46,17 @@ jobs:
       - name: Architecture guard
         run: python3 scripts/check_architecture.py
 
+      - name: Docs drift guard
+        run: python3 scripts/check_docs_drift.py
+
       # Hard gate: format-the-tree commit resolved all pre-existing drift.
-      # models/ is generated code and excluded (.clang-format-ignore requires
-      # clang-format >= 17, so exclude via find instead).
+      # models/ is generated code and excluded (same scope as
+      # .clang-format-ignore). Version pin lives in
+      # scripts/clang_format.py (PINNED_MAJOR), not in this workflow.
       - name: clang-format check
         env:
-          # Use the versioned binary directly. ubuntu-22.04's system
-          # /usr/bin/clang-format (v14) is NOT managed by update-alternatives,
-          # so the alias install in the previous step cannot override it.
-          CF: clang-format-22
-        run: |
-          echo "Checking clang-format compliance (excluding generated models/)..."
-          echo "clang-format: $("$CF" --version)"
-          fail=0
-          while IFS= read -r f; do
-            if ! "$CF" --dry-run --Werror "$f" >/dev/null 2>&1; then
-              echo "NOT FORMATTED: $f"
-              fail=1
-            fi
-          done < <(find libs/drogon-pay examples/pay-server tests \
-                     \( -name '*.h' -o -name '*.cc' \) -not -path '*/models/*')
-          if [ "$fail" -ne 0 ]; then
-            echo "::error::clang-format drift detected; run 'clang-format -i' on the listed files locally"
-            exit 1
-          fi
-          echo "All files format-clean."
+          CLANG_FORMAT_BIN: clang-format-22
+        run: python3 scripts/clang_format.py --check
 
       - name: Emoji detection
         run: |

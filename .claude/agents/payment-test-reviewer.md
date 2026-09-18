@@ -66,11 +66,11 @@ description: 审查 Drogon 支付插件测试迁移的正确性和一致性
 确保迁移后测试的完整性：
 
 - [ ] **测试名称**
-  - 确认：测试名称没有改变（例如 `TEST_F(PaymentTest, CreateOrderSuccess)`）
+  - 确认：测试名称没有改变（例如 `DROGON_TEST(PayPlugin_CreateOrderSuccess)`）
   - 原因：测试名称描述测试意图，不应因实现改变而改变
 
 - [ ] **断言保留**
-  - 确认：所有 ASSERT_* 和 EXPECT_* 宏保留
+  - 确认：所有 REQUIRE 和 CHECK 宏保留
   - 确认：断言的条件和期望值没有改变
 
 - [ ] **边缘情况**

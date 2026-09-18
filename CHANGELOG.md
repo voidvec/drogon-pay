@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
+  gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
+  rejects backticked paths that don't exist in governance docs, and bans
+  gtest vocabulary outside archived history.
+- **`scripts/clang_format.py`**: single pinned clang-format major (22) for
+  CI, the agent PostToolUse hook and pre-commit — previously three
+  consumers used three different versions (CI 22 / pre-commit 17 / bare
+  PATH `clang-format`), which produced spurious formatting drift.
+
 ### Changed
 
 - **Log levels standardized to the six-tier Drogon taxonomy**

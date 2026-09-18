@@ -45,10 +45,15 @@ Full technical spec: [TECH_SPECS.md](TECH_SPECS.md) | Claude-specific guide: [CL
 
 ## Claude Code Assets
 
+Tombstoned entries (`status: deprecated` in front matter) are retired
+authforge/OAuth2 leftovers kept as placeholders so tooling can detect they
+were deliberately removed; never revive their content.
+
 ### Agents
 - api-documenter (file: .claude/agents/api-documenter.md)
 - ci-monitor (file: .claude/agents/ci-monitor.md)
 - code-reviewer (file: .claude/agents/code-reviewer.md)
+- compliance-checker (file: .claude/agents/compliance-checker.md) [retired: superseded by security-reviewer]
 - payment-test-reviewer (file: .claude/agents/payment-test-reviewer.md)
 - performance-analyzer (file: .claude/agents/performance-analyzer.md)
 - security-reviewer (file: .claude/agents/security-reviewer.md)
@@ -62,18 +67,15 @@ Full technical spec: [TECH_SPECS.md](TECH_SPECS.md) | Claude-specific guide: [CL
 
 ### Skills
 - build-and-test (file: .claude/skills/build-and-test/SKILL.md)
-- ci-status (file: .claude/skills/ci-status/SKILL.md)
-- code-review (file: .claude/skills/code-review/SKILL.md)
-- cpp-project-file-cleanup (file: .claude/skills/cpp-project-file-cleanup/SKILL.md)
 - create-migration (file: .claude/skills/create-migration/SKILL.md)
 - db-reset (file: .claude/skills/db-reset/SKILL.md)
 - docker-integration-test (file: .claude/skills/docker-integration-test/SKILL.md)
 - docker-manage (file: .claude/skills/docker-manage/SKILL.md)
 - drogon-build (file: .claude/skills/drogon-build/SKILL.md)
+- e2e-test (file: .claude/skills/e2e-test/SKILL.md) [retired: superseded by docker-integration-test]
 - openapi-update (file: .claude/skills/openapi-update/SKILL.md)
 - orm-gen (file: .claude/skills/orm-gen/SKILL.md)
 - production-readiness-docs (file: .claude/skills/production-readiness-docs/SKILL.md)
 - project-conventions (file: .claude/skills/project-conventions/SKILL.md)
 - release (file: .claude/skills/release/SKILL.md)
-- wechat-notify (file: .claude/skills/wechat-notify/SKILL.md)
 </INSTRUCTIONS>

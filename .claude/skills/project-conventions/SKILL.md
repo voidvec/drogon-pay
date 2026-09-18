@@ -82,7 +82,11 @@ auto sharedCb = std::make_shared<std::function<void(const ResultType &)>>(
 
 ## Testing
 
-- Framework: Google Test via Drogon (`drogon_test.h`)
-- Coverage target: 80%+
-- Handle both storage modes: `MemoryPayStorage` and `PostgreSQL`
-- Test naming: `{Unit|Integration|Security}_{Module}_{Function}_{Scenario}`
+- 框架：Drogon 自带 `DROGON_TEST`（`#include <drogon/drogon_test.h>`）；
+  本仓库没有 gtest，`TEST_F`/`EXPECT_EQ` 宏不存在
+- 断言：`CHECK`（非致命）/ `REQUIRE`（致命）；异步回调用
+  `std::promise`/`future` 桥接，并以 `wait_for` + `REQUIRE(... == ready)` 兜底
+- 覆盖率：由 CI 棘轮基线守护，不写口头指标
+- 测试命名：`DROGON_TEST({Module}_{Scenario})`，如 `PayUtils_ParseAmountToFen`
+- 测试依赖真实 PostgreSQL/Redis（CI service 容器），测试进程监听独立的
+  `PAY_TEST_PORT`（默认 5567）
