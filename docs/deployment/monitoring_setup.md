@@ -1,7 +1,5 @@
 # 监控和告警配置指南
 
-**版本：** 1.0.0
-**更新时间：** 2026-04-13
 **目标环境：** Production
 
 ---
@@ -503,7 +501,3 @@ curl http://localhost:9093/api/v1/status
 - [Alertmanager配置指南](https://prometheus.io/docs/alerting/latest/alertmanager/)
 - [PromQL查询语言](https://prometheus.io/docs/prometheus/latest/querying/basics/)
 
----
-
-**监控配置版本：** 1.0.0
-**最后更新：** 2026-04-13

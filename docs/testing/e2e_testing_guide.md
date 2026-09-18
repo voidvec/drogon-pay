@@ -80,6 +80,12 @@ export API_KEY="your-api-key"
 ```
 默认: `test-api-key`
 
+> 这个默认值只是脚本侧的占位符：它必须**等于宿主进程 `PAY_API_KEY` 的值**，
+> 否则每个请求都会 401。宿主从 `./.env`（或进程环境）读 `PAY_API_KEY`，
+> `docker-compose.yml` 甚至在该变量缺失时直接拒绝启动，所以没有"万能测试 key"。
+> 把两边的值对上，且不要让口令出现在终端回显或命令行参数里：
+> `export API_KEY="$(awk -F= '/^PAY_API_KEY=/{print $2}' examples/pay-server/.env)"`
+
 ---
 
 ## 📝 测试流程

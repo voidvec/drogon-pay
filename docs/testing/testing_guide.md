@@ -57,8 +57,10 @@ Or through the dev wrappers, which pick the preset for you, refuse to run
 before a build exists, and refuse to call an empty suite a pass:
 `examples/pay-server/scripts/test.sh` (Windows:
 `examples\pay-server\scripts\test.bat`), with `-l` to list case names,
-`-r <ExactName>` to run one case, `-v` for per-test output and `-o` to also
-keep `test_results.log` in the build directory.
+`-r <ExactName>` to run one case and `-o` to also keep `test_results.log` in the
+build directory. Per-case output is on by default — both wrappers set
+`VERBOSE=1` before parsing arguments, so `-v` is accepted only for flag parity
+and there is no switch that turns the detail off.
 
 ### A single test
 
