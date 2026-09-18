@@ -4,7 +4,7 @@
 ///
 /// Calls WechatCallbackController::notify() directly with crafted HTTP
 /// requests. PayPlugin is auto-registered via config.json → app().loadConfig()
-/// in test_main.cc, so the controller can resolve the plugin via
+/// in tests/main.cc, so the controller can resolve the plugin via
 /// drogon::app().getPlugin<PayPlugin>().
 /// =============================================================================
 

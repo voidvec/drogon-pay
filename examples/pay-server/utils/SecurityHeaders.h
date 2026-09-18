@@ -1,6 +1,6 @@
 #pragma once
 
-/// Shared CORS + security header setup, used by both main.cc and test_main.cc.
+/// Shared CORS + security header setup, used by both main.cc and tests/main.cc.
 /// Extracting this ensures tests run against the same header configuration
 /// as production (P2-6.9 fix: security headers were not testable because
 /// setupCors() was only called in main()).

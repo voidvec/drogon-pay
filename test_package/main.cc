@@ -8,7 +8,7 @@
 //      {base_path}/query must NOT return 404 (it returns 401 here because no
 //      API key is configured - which proves the handler chain is wired up).
 //
-// Structure mirrors tests/test_main.cc: the app runs on a worker thread and
+// Structure mirrors tests/main.cc: the app runs on a worker thread and
 // the main thread performs synchronous checks, then asks the loop to quit.
 #include <drogon/drogon.h>
 #include <drogon_pay/PayPlugin.h>

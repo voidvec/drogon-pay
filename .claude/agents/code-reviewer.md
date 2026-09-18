@@ -127,7 +127,7 @@ Claude 自动调用：当代码变更需要审查时
 - `examples/pay-server/src/services/*.cc` - 业务逻辑服务
 - `examples/pay-server/src/plugins/*.cc` - 第三方支付客户端
 - `examples/pay-server/src/models/*.cc` - 数据模型（禁止手动编辑，仅 orm-gen 生成）
-- `tests/*.cc` - 测试文件
+- `tests/unit/*.cc`, `tests/integration/*.cc` - 测试文件
 
 ## 上下文
 

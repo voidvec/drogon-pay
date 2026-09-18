@@ -2849,7 +2849,6 @@ DROGON_TEST(PayPlugin_QueryRefund_WechatSuccess)
     refund.setUpdatedAt(trantor::Date::now());
     refundMapper.insert(refund);
 
-    const uint16_t port = 24080;
     Json::Value wechatConfig;
     wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
     auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);

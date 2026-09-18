@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   promote list only grows (0-finding checks first; `--report` prints hit
   counts for the next candidates), and unknown check names fail the gate
   instead of being silently dropped by clang-tidy.
+- **Test suites split into `tests/unit/` (pure logic) and
+  `tests/integration/` (HTTP/DB/Redis surface)**, guarded by
+  `scripts/check_test_layout.py` (CI `static-analysis` step): `*Test.cc`
+  naming, single `DROGON_TEST_MAIN` (`tests/main.cc`), no DROGON_TEST
+  outside `tests/`, explicit CMake registration. HTTP e2e smoke scripts
+  moved to `examples/pay-server/scripts/`. `tests/run_all_tests.ps1` and
+  `ultra_simple.ps1` were retired — ctest now runs the binary directly on
+  all three platforms. A full `DROGON_PAY_WERROR=ON` rebuild also exposed
+  (and fixed) pre-existing gate breaks in the test target: one unused
+  variable, missing `/utf-8`, and OpenSSL 3.0 deprecation warnings from
+  the test RSA fixtures (now suppressed target-wide).
 
 ### Changed
 
