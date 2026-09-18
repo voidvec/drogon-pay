@@ -15,6 +15,9 @@ option(DROGON_PAY_BUILD_TESTS "Build the drogon-pay test suite" ON)
 # CI builds with -DDROGON_PAY_WERROR=ON so first-party warnings fail the
 # build; the default stays OFF to keep local/consumer builds friction-free.
 option(DROGON_PAY_WERROR "Treat first-party compiler warnings as errors" OFF)
+# Set by the linux-coverage preset; adds gcov instrumentation to first-party
+# targets (see cmake/Coverage.cmake for the guards and exclusions).
+option(DROGON_PAY_COVERAGE "Instrument first-party targets for gcov" OFF)
 # CI historically passes -DBUILD_TESTS=ON; honor it as an alias so the flag
 # remains a real switch without touching workflow files.
 if(DEFINED BUILD_TESTS)
