@@ -14,7 +14,7 @@ Apply these rules to ALL C++ code generated or modified in this project. Loaded 
 |------|-------------|
 | Layer separation | Controllers (HTTP) -> Plugin/Service (business) -> Storage (data) -> Model (ORM) |
 | Drogon-first | Use Drogon built-ins over third-party libraries |
-| Plugin pattern | Core logic in `pay-server`, server wiring in `PayServer` |
+| Plugin pattern | Core logic in `libs/drogon-pay`, server wiring in `examples/pay-server` (`PayServer` target) |
 | ORM immutable | NEVER edit files in `models/` -- use `drogon_ctl` to regenerate |
 
 ## Async Programming
@@ -54,7 +54,13 @@ auto sharedCb = std::make_shared<std::function<void(const ResultType &)>>(
 
 - Always catch `const DrogonDbException &e` for DB operations
 - All async callbacks MUST handle failure path: `(*sharedCb)(errorResult)`
-- Log levels: `LOG_DEBUG` (dev), `LOG_INFO` (flow), `LOG_WARN` (issues), `LOG_ERROR` (failures)
+- Log levels (six-tier — full table in `TECH_SPECS.md` "日志分级规范"):
+  - `LOG_TRACE` — function I/O args, loop iterations, line-by-line (deep debug only)
+  - `LOG_DEBUG` — variable values, branch decisions, internal state, **per-request flow steps**
+  - `LOG_INFO` — **lifecycle/milestone events only** (startup/shutdown, channel registration, task completion). Do NOT use for per-request steps or variable dumps.
+  - `LOG_WARN` — recoverable/degraded: fire-and-forget helpers (ledger/idempotency snapshot) failing, config using defaults, resource near threshold
+  - `LOG_ERROR` — a single operation failed but the service stays up
+  - `LOG_FATAL` — process cannot continue (startup-exit); must be rare
 - NEVER log passwords, tokens, or secrets
 
 ## Code Style

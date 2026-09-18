@@ -3,7 +3,7 @@
 """Docs/AI-config drift guard (CI gate + local check).
 
 The authforge benchmark showed that hand-maintained agent inventories and
-spec docs rot within weeks. This gate makes the four historically-broken
+spec docs rot within weeks. This gate makes the five historically-broken
 invariants fail loudly:
 
   R1  AGENTS.md "Claude Code Assets" lists exactly what exists on disk
@@ -19,6 +19,11 @@ invariants fail loudly:
   R4  Migration versions cited in docs and skills must exist in sql/.
       Chains move forward; prose that quotes "001-004" after 005 lands is
       a runbook that will be copy-pasted into a deploy.
+  R5  A file present under both .claude/ and .codex/ must be byte-identical.
+      .codex is a mirror of .claude for a second agent, not a fork; three of
+      its files had quietly drifted to pre-refactor paths, a retired layering
+      line and the old four-tier log table, so that agent was enforcing rules
+      the code no longer has.
 
 Exit code 0 = all rules pass; 1 = violations (printed one per line).
 """
@@ -263,16 +268,52 @@ def check_migration_versions() -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------- R5
+
+TWIN_ROOTS = (REPO_ROOT / ".claude", REPO_ROOT / ".codex")
+
+
+def _twin_rels(root: Path) -> set[str]:
+    if not root.is_dir():
+        return set()
+    return {p.relative_to(root).as_posix() for p in root.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts}
+
+
+def check_twin_parity() -> list[str]:
+    """Rule 5 — a name held by both agent trees must hold the same bytes.
+
+    Only the intersection is policed: `.claude/agents/*.md` legitimately has no
+    codex twin (codex keeps one `.toml` of its own), and a file in one tree is
+    that tool's business. What may not happen is a copy that drifts, because
+    nothing re-reads it — the drift is invisible until an agent follows a rule
+    the code stopped having months ago.
+    """
+    errors: list[str] = []
+    claude, codex = TWIN_ROOTS
+    for rel in sorted(_twin_rels(claude) & _twin_rels(codex)):
+        a = (claude / rel).read_bytes()
+        b = (codex / rel).read_bytes()
+        if a != b:
+            errors.append(
+                f"[rule5 twin-parity] .codex/{rel} differs from .claude/{rel} "
+                f"({len(b)} vs {len(a)} bytes). .codex is a mirror, not a fork: "
+                f"edit the .claude copy and `cp` it over in the same commit"
+            )
+    return errors
+
+
 def main() -> int:
     violations = (check_asset_inventory() + check_doc_paths()
-                  + check_gtest_vocabulary() + check_migration_versions())
+                  + check_gtest_vocabulary() + check_migration_versions()
+                  + check_twin_parity())
     if violations:
         print(f"Docs drift guard FAILED ({len(violations)} violation(s)):")
         for v in violations:
             print("  " + v)
         return 1
-    print("Docs drift guard passed (4 rules: inventory, dead-paths, "
-          "gtest-vocab, migration-versions).")
+    print("Docs drift guard passed (5 rules: inventory, dead-paths, "
+          "gtest-vocab, migration-versions, twin-parity).")
     return 0
 
 

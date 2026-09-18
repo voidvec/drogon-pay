@@ -23,22 +23,28 @@ JOIN-in-a-single-query is forbidden — split into multiple queries (or
 `Criteria::In`). Capture `auto sharedCb = shared_from_this()` in the callback to
 avoid use-after-free.
 
-## Mapper 构造异常防护
+## Guarding `Mapper` construction
 
-`Mapper<Model>(dbClient)` 构造可能因 `DbClient` 内部状态异常（连接断开、
-之前操作失败导致连接处于不一致状态等）而抛出 `std::exception`。在异步
-回调中未捕获会逃逸到 Drogon 事件循环并导致进程终止（SIGABRT/SIGSEGV）。
+`Mapper<Model>(dbClient)` can throw `std::exception` on construction itself — a
+dropped connection, or a client left in a bad state by a previous operation. An
+uncaught throw inside an async callback escapes into the Drogon event loop and
+takes the process down.
 
-**要求 1：每个 `Mapper<...>(dbClient)` 构造语句所在的代码块 MUST 包裹在
-`try { ... } catch (const std::exception &e) { ... } catch (...) { ... }`
-中。** 不分位置——顶级代码、嵌套在 `findOne`/`findBy` 回调内部的
-`Mapper` 构造各自需要独立的 `try-catch`，外层保护不到内层异步回调。
+**Requirement 1: the block that constructs a `Mapper<...>` MUST sit inside
+`try { ... } catch (const std::exception &e) { ... } catch (...) { ... }`.**
+This is per construction site, not per function: a `Mapper` built inside a
+`findOne` / `findBy` callback needs its own guard, because the enclosing
+`try` cannot catch anything thrown on a later event-loop turn.
 
-**要求 2：catch 块 MUST 调用 `(*sharedCb)(errorResult)` 将失败传递给上层
-回调。** 禁止仅 `LOG_ERROR` 后 return（上层静默丢失数据）。
-`errorResult` 根据回调类型选择：`StringListCallback → ({})`、
-`AccessTokenCallback/RefreshTokenCallback → (std::nullopt)`、
-`VoidCallback → ()`。
+**Requirement 2: the `catch` block MUST report the failure through the same
+callback the success path uses.** `LOG_ERROR` followed by `return` leaves the
+caller waiting for a response that never arrives. Use the shape the call site
+already has — `reportMapperFailure()` in
+`libs/drogon-pay/src/services/CallbackService.cc` (a channel callback answering
+the channel's own FAIL body), `sharedCb->call(...)` where the service wrapped
+the callback in `pay::utils::OnceCallback` (`CheckResult{status=Error}` for
+`StatusCallback`, `false` for `UpdateCallback`), `(*sharedCb)(...)` for a plain
+captured `std::function`, and `{}` / an empty result for the value-shaped ones.
 
 ## The raw-SQL exemptions (and only these)
 

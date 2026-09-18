@@ -118,7 +118,7 @@ echo "✅ Models backed up to $backup_dir"
 ```powershell
 # Windows PowerShell
 # 检查 PayServer 目录结构
-cd d:\work\development\Repos\cpp\projects\pay-plugin\pay-server
+cd d:\work\development\Repos\cpp\projects\pay-plugin\libs\drogon-pay\src
 
 # 创建 models 目录（如果不存在）
 if (!(Test-Path "models")) {
