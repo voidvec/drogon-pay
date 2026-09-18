@@ -16,8 +16,9 @@ copies `config.json`, `.env` and `certs/` next to the binaries.
 | macOS | same as Linux | `macos-arm64` (Release), `macos-debug` |
 
 Flags are identical in both twins: `-debug` / `-release` (default Release).
-`test.bat` / `test.sh` additionally take `-l` (list), `-r <pattern>`,
-`-v` (verbose), `-o` (also write `test_results.log`).
+`test.bat` / `test.sh` additionally take `-l` (list exact case names),
+`-r <ExactName>` (run one case), `-v` (verbose), `-o` (also write
+`test_results.log`).
 
 ```powershell
 examples\pay-server\scripts\build.bat            REM Release
@@ -26,7 +27,7 @@ examples\pay-server\scripts\build.bat -debug     REM Debug
 
 ```bash
 bash examples/pay-server/scripts/build.sh        # Release
-bash examples/pay-server/scripts/test.sh -r Idempotency
+bash examples/pay-server/scripts/test.sh -r PayIdempotency_RedisSetNx
 ```
 
 Output paths differ only because MSVC is a multi-config generator:
@@ -53,7 +54,10 @@ command line carries a password; the test listener runs on 5567
 (`PAY_TEST_PORT`) to avoid hijacking a running PayServer on 5566.
 
 Do not assume a gtest-style filter flag: this project tests with Drogon
-`DROGON_TEST`, and filtering happens through ctest (`-R`).
+`DROGON_TEST`. Do not filter with `ctest -R` either — one ctest entry covers the
+whole suite, so a name pattern matches nothing and ctest still exits 0. Use
+`test.bat` / `test.sh -r <ExactName>` (or the binary's own `-r`), which fail
+loudly when the case does not exist.
 
 ## Manual configure (only when a preset does not fit)
 
