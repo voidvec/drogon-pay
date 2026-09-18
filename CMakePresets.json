@@ -32,6 +32,24 @@
       }
     },
     {
+      "name": "linux-coverage",
+      "inherits": "conan-base",
+      "displayName": "Linux Debug + gcov (Conan)",
+      "description": "conan install . --output-folder=build/linux-coverage -s build_type=Debug -s compiler.cppstd=17 --build=missing",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/linux-coverage",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DROGON_PAY_COVERAGE": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/linux-coverage/build/generators/conan_toolchain.cmake"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "windows-msvc",
       "inherits": "conan-base",
       "displayName": "Windows MSVC (Conan)",
@@ -86,6 +104,10 @@
     {
       "name": "linux-release",
       "configurePreset": "linux-release"
+    },
+    {
+      "name": "linux-coverage",
+      "configurePreset": "linux-coverage"
     },
     {
       "name": "windows-msvc",

@@ -29,3 +29,10 @@ target_link_libraries(PayServer PRIVATE pay_host_core pay_core)
 include(Warnings)
 pay_apply_warnings(pay_host_core)
 pay_apply_warnings(PayServer)
+
+# Opt-in gcov instrumentation (DROGON_PAY_COVERAGE). PayServer must be
+# instrumented too: it links the same instrumented pay_host_core objects and
+# needs the gcov runtime at link time.
+include(Coverage)
+pay_apply_gcov(pay_host_core)
+pay_apply_gcov(PayServer)

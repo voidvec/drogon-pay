@@ -81,6 +81,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE OPENSSL_SUPPRESS_DEPRECATED)
 include(Warnings)
 pay_apply_warnings(${PROJECT_NAME})
 
+# Opt-in gcov instrumentation (DROGON_PAY_COVERAGE); as the executable this
+# is where the gcov runtime gets linked in.
+include(Coverage)
+pay_apply_gcov(${PROJECT_NAME})
+
 # All platforms run the executable directly from its output directory so
 # ./config.json and ./.env (copied POST_BUILD above) resolve. The single
 # no-flag run executes every DROGON_TEST case in one process and the

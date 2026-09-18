@@ -110,6 +110,12 @@ endif()
 include(Warnings)
 pay_apply_warnings(drogon-pay)
 
+# Opt-in gcov instrumentation (DROGON_PAY_COVERAGE). drogon_pay_models is
+# deliberately not instrumented — generated code is excluded from the
+# coverage metric anyway (see scripts/measure_coverage.py).
+include(Coverage)
+pay_apply_gcov(drogon-pay)
+
 # ------------------------------------------------------------------------------
 # Install & export: find_package(DrogonPay) -> DrogonPay::DrogonPay
 # ------------------------------------------------------------------------------
