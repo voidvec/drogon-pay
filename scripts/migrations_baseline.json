@@ -1,8 +1,8 @@
 {
   "000_drop_pay_tables.sql": "a22b4903b487bbb3c208fcb37ec3bd017eac7514110c7bfa5727ccc75444feeb",
-  "001_init_pay_tables.sql": "d3fa6fe7cefa11e74defbde3a94b35700db91d7ad804cc8d5ec1f976c49530fe",
+  "001_init_pay_tables.sql": "80197c71a0a95d43925a183340bca857185b9d2711659146e997f3e2fa61e4dd",
   "002_add_indexes.sql": "990b592e25c946096e003bfa7ed182153c83e959b44c8585f2566a9d08c532c5",
-  "003_refund_unique_constraint.sql": "ddd40c96cd2ca9a7aa3d94ea0d112cff3c6b67388b088f385e7b0a54dc54b13d",
-  "004_ledger_fk.sql": "62c850de62d537823a0bf6dbfe7d76be02f12fd13c4758d24ff43945ac4a361e",
-  "_readme": "sha256 of every sql/*.sql frozen when migrate_db.py landed. check_migrations.py fails if a pinned file changes; add an entry with --write-missing once a new migration has shipped."
+  "003_refund_unique_constraint.sql": "904f431a52e721ad69b1e556af6d4514462e23c39c5d104cb872403ca1538ddf",
+  "004_ledger_fk.sql": "ef07300a82dddd65822546349cbff10b12bd49e25cebb3eb8f2411e1037f202c",
+  "_readme": "sha256 of every sql/*.sql frozen when migrate_db.py landed. check_migrations.py fails if a pinned file changes; add an entry with --write-missing once a new migration has shipped. Digests are of the committed bytes, which are LF on every platform because .gitattributes pins eol=lf: re-pinning from a CRLF working copy would make rule3 fail on the Linux runner while passing locally."
 }
