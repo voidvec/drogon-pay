@@ -115,6 +115,11 @@ openssl.cnf
 # Local AI tool caches
 .codebuddy/
 .qoder/
+.codegraph/
+.zcode/
+graphify-out/
+docs/superpowers/
+.video_agent/
 
 # vs Code Settings
 .vscode/settings.local.json
