@@ -1,5 +1,8 @@
 name: Windows CI
 
+# MIGRATION WINDOW: superseded by ci.yml + _build-test.yml. Both pipelines run
+# side by side until ci.yml has produced one fully green run on the same commit
+# as this file; then this workflow is deleted.
 on:
   push:
     branches: ["master"]

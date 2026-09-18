@@ -1,21 +1,18 @@
 name: macOS CI
 
+# MIGRATION WINDOW: superseded by ci.yml + _build-test.yml. Both pipelines run
+# side by side until ci.yml has produced one fully green run on the same commit
+# as this file; then this workflow is deleted. The legacy build-Drogon-from-
+# source rollback job moved out to legacy-source-build.yml (dispatch-only).
 on:
   push:
     branches: ["master"]
   pull_request:
     branches: ["master"]
   workflow_dispatch:
-    inputs:
-      legacy-source-build:
-        description: "Run the legacy build-Drogon-from-source path (rollback safety net, kept for one release cycle)"
-        type: boolean
-        default: false
 
 env:
   BUILD_TYPE: Release
-  # Only used by the legacy source-build job below.
-  DROGON_VERSION: "v1.9.13"
 
 jobs:
   # Primary path: Conan-managed dependencies + CMake presets, mirroring the
@@ -63,86 +60,5 @@ jobs:
           name: macos-test-logs
           path: |
             ${{github.workspace}}/build/macos-arm64/Testing/
-            ${{github.workspace}}/logs/
-          retention-days: 7
-
-  # --- Legacy rollback path (kept for one release cycle) ---
-  # Pre-Conan pipeline that builds Drogon from source with brew-provided
-  # dependencies. Trigger manually via workflow_dispatch with
-  # legacy-source-build=true if the Conan path regresses. Remove after the
-  # Conan path has been stable for a full release cycle.
-  build-and-test-legacy:
-    name: macos-build-legacy
-    if: github.event_name == 'workflow_dispatch' && inputs.legacy-source-build
-    runs-on: macos-14
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Drogon dependencies
-        run: |
-          # Update Homebrew
-          brew update
-
-          # Install core dependencies (no databases needed for build-only)
-          brew install git cmake
-          brew install jsoncpp
-          brew install ossp-uuid
-          brew install zlib
-          brew install openssl@3 libpq hiredis
-
-      - name: Build Drogon
-        run: |
-          git clone --depth 1 --branch ${{ env.DROGON_VERSION }} https://github.com/drogonframework/drogon
-          cd drogon
-          git submodule update --init --recursive
-          mkdir build && cd build
-          export PostgreSQL_ROOT="$(brew --prefix libpq)"
-          cmake .. \
-            -G "Unix Makefiles" \
-            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
-            -DCMAKE_CXX_EXTENSIONS=OFF \
-            -DCMAKE_CXX_FLAGS="-std=c++17" \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
-            -DCMAKE_FIND_FRAMEWORK=LAST \
-            -DBUILD_EXAMPLES=OFF \
-            -DBUILD_MYSQL=OFF \
-            -DBUILD_POSTGRESQL=ON \
-            -DBUILD_REDIS=ON \
-            -DBUILD_TESTING=OFF
-          make -j$(sysctl -n hw.ncpu)
-
-      - name: Install Drogon
-        run: |
-          cd drogon/build
-          sudo make install
-
-      - name: Configure Project CMake
-        run: |
-          export PostgreSQL_ROOT="$(brew --prefix libpq)"
-          cmake -S . -B build -G "Unix Makefiles" \
-            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
-            -DCMAKE_CXX_EXTENSIONS=OFF \
-            -DCMAKE_CXX_FLAGS="-std=c++17" \
-            -DBUILD_TESTS=ON \
-            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
-            -DCMAKE_FIND_FRAMEWORK=LAST
-
-      - name: Build
-        run: cmake --build build --config ${{env.BUILD_TYPE}}
-
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-legacy-test-logs
-          path: |
-            ${{github.workspace}}/build/Testing/
             ${{github.workspace}}/logs/
           retention-days: 7

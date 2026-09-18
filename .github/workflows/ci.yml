@@ -1,9 +1,31 @@
-name: Linux CI
+name: CI
 
-# MIGRATION WINDOW: superseded by ci.yml + _build-test.yml. Both pipelines run
-# side by side until ci.yml has produced one fully green run on the same commit
-# as this file; then this workflow is deleted. The legacy build-Drogon-from-
-# source rollback jobs moved out to legacy-source-build.yml (dispatch-only).
+# Single entry point for the merge pipeline. Three gates, chained by
+# `needs` so a cheap failure never buys an expensive one:
+#
+#   FAST    static-analysis  (source-only guards, no compiler, 10 min)
+#           clang-tidy       (configure-only; runs in parallel, needs nothing)
+#      |
+#      v
+#   MAIN    build-test       (_build-test.yml x {linux, windows, macos})
+#      |
+#      v
+#   RELEASE sdk-smoke        (_sdk-smoke.yml x {linux, windows}, conan create)
+#
+# Check-name contract: the branch ruleset requires exactly
+# `linux-build-and-test`, `windows-build-and-test` and `macos-build`. Those
+# strings are produced here by `matrix.check_name`, not by the reusable
+# workflow's internal job name, so renaming anything inside _build-test.yml
+# cannot silently unrequire a check. Verify with:
+#   gh api repos/:owner/:repo/rulesets/<id> --jq '.rules[]
+#     | select(.type=="required_status_checks")
+#     | .parameters.required_status_checks[].context'
+#
+# During the migration window the legacy ci-linux/ci-windows/ci-macos/
+# conan-create workflows still run side by side with this one; they are removed
+# once this pipeline has produced one fully green run on the same commit.
+# `secrets-scan.yml` and `deploy.yml` stay independent on purpose.
+
 on:
   push:
     branches: ["master"]
@@ -11,16 +33,24 @@ on:
     branches: ["master"]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BUILD_TYPE: Release
 
 jobs:
+  # --- FAST gate --------------------------------------------------------------
+  # Everything that can reject a patch without compiling a single translation
+  # unit. Name kept from ci-linux.yml because contributors and docs cite it.
   static-analysis:
+    name: static-analysis
     runs-on: ubuntu-22.04
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # .clang-format uses options introduced in clang-format 16+ (e.g.
       # BraceWrapping.AfterControlStatement: Always, AfterCaseLabel: true),
@@ -96,17 +126,18 @@ jobs:
           fi
           echo "No old Plugin API usage found."
 
+  # --- FAST gate, parallel ----------------------------------------------------
   # Two-tier clang-tidy policy (see scripts/clang_tidy_gate.py): .clang-tidy
   # stays advisory for agents/devs; this job enforces the PROMOTED_CHECKS
-  # batch as a HARD gate via --warnings-as-errors. Configure-only: tidy
-  # parses sources straight from compile_commands.json, no object build.
+  # batch as a HARD gate via --warnings-as-errors. Configure-only: tidy parses
+  # sources straight from compile_commands.json, no object build.
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Conan
         run: |
@@ -114,7 +145,7 @@ jobs:
           conan profile detect --force
 
       - name: Cache Conan packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.conan2/p
           key: ${{ runner.os }}-conan2-${{ hashFiles('conanfile.py', 'conan.lock') }}
@@ -143,109 +174,78 @@ jobs:
           CLANG_TIDY_BIN: clang-tidy-22
         run: python3 scripts/clang_tidy_gate.py
 
-  # Primary path: Conan-managed dependencies + CMake presets, mirroring the
-  # Windows CI and local developer workflow. Drogon/OpenSSL/jsoncpp come from
-  # the lockfile-pinned Conan graph instead of an ad-hoc source build.
-  build-and-test:
-    name: linux-build-and-test
-    runs-on: ubuntu-22.04
-    # Cold Conan cache builds drogon/openssl from source, which can take a while
-    timeout-minutes: 90
+  # --- MAIN gate --------------------------------------------------------------
+  build-test:
+    name: ${{ matrix.check_name }}
+    needs: static-analysis
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runs_on: ubuntu-22.04
+            cmake_preset: linux-release
+            preset_dir: build/linux-release
+            configure_extra_args: "-DDROGON_PAY_WERROR=ON"
+            use_database: true
+            ctest_timeout: 120
+            timeout_minutes: 90
+            check_name: linux-build-and-test
+            log_artifact_name: linux-test-logs
+          - platform: windows
+            runs_on: windows-2022
+            cmake_preset: windows-msvc
+            preset_dir: build/windows-msvc
+            configure_extra_args: "-DDROGON_PAY_WERROR=ON"
+            use_database: true
+            ctest_timeout: 180
+            timeout_minutes: 120
+            check_name: windows-build-and-test
+            log_artifact_name: windows-test-logs
+          - platform: macos
+            runs_on: macos-14
+            cmake_preset: macos-arm64
+            preset_dir: build/macos-arm64
+            conan_extra_settings: "-s arch=armv8"
+            configure_extra_args: "-DDROGON_PAY_WERROR=ON"
+            # Flipped to true in the follow-up commit that adds the Homebrew
+            # Postgres/Redis leg; kept build-only here so the refactor itself
+            # stays independently revertable.
+            use_database: false
+            ctest_timeout: 180
+            timeout_minutes: 90
+            check_name: macos-build
+            log_artifact_name: macos-test-logs
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      platform: ${{ matrix.platform }}
+      runs_on: ${{ matrix.runs_on }}
+      cmake_preset: ${{ matrix.cmake_preset }}
+      preset_dir: ${{ matrix.preset_dir }}
+      build_type: Release
+      conan_extra_settings: ${{ matrix.conan_extra_settings }}
+      configure_extra_args: ${{ matrix.configure_extra_args }}
+      use_database: ${{ matrix.use_database }}
+      ctest_timeout: ${{ matrix.ctest_timeout }}
+      timeout_minutes: ${{ matrix.timeout_minutes }}
+      log_artifact_name: ${{ matrix.log_artifact_name }}
 
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: 123456
-          POSTGRES_DB: pay_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Conan
-        run: |
-          pip install conan
-          conan profile detect --force
-
-      # --- Conan dependency cache ---
-      # Same policy as ci-windows.yml: cache the package store so drogon and
-      # friends are only rebuilt from source when the lockfile changes.
-      - name: Cache Conan packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.conan2/p
-          key: ${{ runner.os }}-conan2-${{ hashFiles('conanfile.py', 'conan.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-conan2-
-
-      - name: Install dependencies (Conan)
-        run: conan install . --output-folder=build/linux-release -s build_type=${{env.BUILD_TYPE}} -s compiler.cppstd=17 --build=missing
-
-      - name: Configure (cmake --preset)
-        run: cmake --preset linux-release -DDROGON_PAY_WERROR=ON
-
-      - name: Build (cmake --build --preset)
-        run: cmake --build --preset linux-release -j $(nproc)
-
-      - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
-
-      - name: Wait for services
-        run: |
-          echo "Waiting for Postgres..."
-          for i in $(seq 1 15); do
-            PGPASSWORD=123456 pg_isready -h localhost -U test && break
-            echo "  Postgres not ready yet (attempt $i/15)..."
-            sleep 2
-          done
-          echo "Waiting for Redis..."
-          for i in $(seq 1 15); do
-            redis-cli -h localhost ping && break
-            echo "  Redis not ready yet (attempt $i/15)..."
-            sleep 2
-          done
-
-      - name: Initialize Database
-        env:
-          PGPASSWORD: 123456
-        run: |
-          psql -h localhost -U test -d pay_test -f sql/001_init_pay_tables.sql
-          psql -h localhost -U test -d pay_test -f sql/002_add_indexes.sql
-
-      - name: Test
-        working-directory: ${{github.workspace}}/build/linux-release
-        env:
-          PAY_REDIS_PASSWORD: ""
-          PAY_DB_HOST: "127.0.0.1"
-          PAY_REDIS_HOST: "127.0.0.1"
-          PAY_DB_PASSWORD: "123456"
-          PAY_API_KEY: "test_key_123456"
-        run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure --timeout 120
-
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-test-logs
-          path: |
-            ${{github.workspace}}/build/linux-release/Testing/
-            ${{github.workspace}}/logs/
-          retention-days: 7
+  # --- RELEASE gate -----------------------------------------------------------
+  sdk-smoke:
+    name: ${{ matrix.check_name }}
+    needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runs_on: ubuntu-22.04
+            check_name: sdk-smoke-linux
+          - platform: windows
+            runs_on: windows-2022
+            check_name: sdk-smoke-windows
+    uses: ./.github/workflows/_sdk-smoke.yml
+    with:
+      platform: ${{ matrix.platform }}
+      runs_on: ${{ matrix.runs_on }}
+      timeout_minutes: 120
