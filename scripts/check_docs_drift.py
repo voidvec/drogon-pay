@@ -3,7 +3,7 @@
 """Docs/AI-config drift guard (CI gate + local check).
 
 The authforge benchmark showed that hand-maintained agent inventories and
-spec docs rot within weeks. This gate makes the five historically-broken
+spec docs rot within weeks. This gate makes the seven historically-broken
 invariants fail loudly:
 
   R1  AGENTS.md "Claude Code Assets" lists exactly what exists on disk
@@ -24,6 +24,13 @@ invariants fail loudly:
       its files had quietly drifted to pre-refactor paths, a retired layering
       line and the old four-tier log table, so that agent was enforcing rules
       the code no longer has.
+  R6  No hand-maintained version / date stamps in live docs. Four runbooks
+      carried "**版本：** 1.0.0 / **最后更新：** 2026-04-13" long after both
+      were wrong; git owns those facts, prose must not copy them.
+  R7  The five documented cross-platform entry scripts must exist as .sh AND
+      .bat, the .sh side must be executable in the git index, and any other
+      script in that directory must be declared single-platform (with a
+      reason) — the doc's "every script has twins" claim was false.
 
 Exit code 0 = all rules pass; 1 = violations (printed one per line).
 """
@@ -31,6 +38,7 @@ Exit code 0 = all rules pass; 1 = violations (printed one per line).
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -303,17 +311,152 @@ def check_twin_parity() -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------- R6
+
+R6_ROOTS = [AGENTS_MD, REPO_ROOT / "CLAUDE.md", REPO_ROOT / "TECH_SPECS.md",
+            REPO_ROOT / "CONTRIBUTING.md", REPO_ROOT / "README.md",
+            REPO_ROOT / "README.zh-CN.md"]
+R6_DIRS = [REPO_ROOT / "docs"]
+R6_SKIP_DIRS = ("docs/history/", "docs/superpowers/")
+# "**版本：** 1.0.0", "**更新时间：** 2026-04-13", "**文档版本**: v2.1",
+# "**Last updated:** …" — a bolded label naming a version or a date, with the
+# colon either inside the bold run (**版本：**) or after it (**文档版本**:), so
+# ordinary prose ("the **release** version") stays quiet.
+R6_STAMP_RE = re.compile(
+    r"\*\*[^*\n]{0,12}(?:版本|更新时间|最后更新)[^*\n]{0,4}[:：]\s*\*\*"
+    r"|\*\*[^*\n]{0,12}(?:版本|更新时间|最后更新)\s*\*\*\s*[:：]"
+    r"|\*\*(?:[Dd]ocument(?:ation)?|[Pp]roject|[Ll]ibrary)?\s*[Vv]ersion\s*\*\*\s*[:：]"
+    r"|\*\*(?:Last\s+)?[Uu]pdated\s*\*\*\s*[:：]"
+)
+# Release notes templates legitimately print a version heading.
+R6_ALLOW_LINE_RE = re.compile(r"Release Notes|no-version-stamps|规则会拒掉戳记")
+
+
+def check_version_stamps() -> list[str]:
+    """Rule 6 — live prose may not restate a version or a last-updated date.
+
+    Four runbooks carried "**版本：** 1.0.0 / **最后更新：** 2026-04-13" long
+    after both were wrong, and the dates were the worse half: a reader trusts
+    a stale stamp precisely because it looks maintained. git owns those facts.
+    """
+    errors: list[str] = []
+    files: list[Path] = [p for p in R6_ROOTS if p.is_file()]
+    for root in R6_DIRS:
+        if root.is_dir():
+            files += sorted(root.rglob("*.md"))
+    for f in files:
+        rel = f.relative_to(REPO_ROOT).as_posix()
+        if any(rel.startswith(p) for p in R6_SKIP_DIRS):
+            continue
+        for lineno, line in enumerate(
+            f.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
+            if R6_ALLOW_LINE_RE.search(line) or not R6_STAMP_RE.search(line):
+                continue
+            errors.append(
+                f"[rule6 no-version-stamps] {rel}:{lineno}: hand-maintained "
+                f"version/date stamp — delete it and let `git log -- {rel}` "
+                f"carry that fact"
+            )
+    return errors
+
+
+# ---------------------------------------------------------------- R7
+
+SCRIPT_DIR = REPO_ROOT / "examples" / "pay-server" / "scripts"
+# The entry points a developer is told to run; each must exist on both sides.
+REQUIRED_PAIRS = ("build", "test", "setup_database", "deploy", "check_config")
+# Deliberately single-platform, with the reason TECH_SPECS documents. A new
+# script that is not paired has to appear here, which forces the doc table to
+# stay complete instead of silently growing orphans.
+SINGLE_PLATFORM_SCRIPTS = {
+    "full_test.bat": "Windows-only orchestrator over the other .bat files",
+    "generate_models.bat": "drogon_ctl confirmation wrapper; not ported yet",
+    "run_server.bat": "convenience launcher (POSIX: cd + ./PayServer)",
+    "healthcheck.sh": "POSIX curl probe; unused by any doc (see TECH_SPECS)",
+    "e2e_test.sh": "HTTP smoke; PowerShell twin is e2e_test.ps1, not a .bat",
+    "e2e_test.ps1": "HTTP smoke; Bash twin is e2e_test.sh",
+}
+
+
+def _index_modes(dir_path: Path) -> dict[str, str]:
+    """`git ls-files -s` for a directory: {path: '100755' | '100644'}.
+
+    Index mode, not filesystem mode: the local checkout runs with
+    core.fileMode=false, so only what git recorded is meaningful cross-platform.
+    A directory outside the repo has no index entry, so it reads as empty.
+    """
+    try:
+        rel = dir_path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return {}
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-s", "--", rel],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return {}
+    modes: dict[str, str] = {}
+    for line in out.splitlines():
+        meta, _, path = line.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 1 and path:
+            modes[path.strip()] = parts[0]
+    return modes
+
+
+def check_script_twins() -> list[str]:
+    """Rule 7 — the documented twin set is the actual twin set."""
+    errors: list[str] = []
+    if not SCRIPT_DIR.is_dir():
+        return [f"[rule7 twin-scripts] {SCRIPT_DIR} missing"]
+    on_disk = {p.name for p in SCRIPT_DIR.iterdir()
+               if p.is_file() and p.suffix in {".sh", ".bat", ".ps1"}}
+    for base in REQUIRED_PAIRS:
+        for suffix in (".sh", ".bat"):
+            if f"{base}{suffix}" not in on_disk:
+                errors.append(
+                    f"[rule7 twin-scripts] {base}{suffix} is missing: entry "
+                    f"scripts must exist on both platforms (TECH_SPECS "
+                    f'"开发脚本跨平台对齐")'
+                )
+    paired = {f"{b}.{s}" for b in REQUIRED_PAIRS for s in ("sh", "bat")}
+    for name in sorted(on_disk - paired - set(SINGLE_PLATFORM_SCRIPTS)):
+        errors.append(
+            f"[rule7 twin-scripts] {name} in {SCRIPT_DIR} "
+            f"is neither a required pair nor declared single-platform: give it "
+            f"a twin, or add it to SINGLE_PLATFORM_SCRIPTS with a reason and "
+            f"document it in TECH_SPECS"
+        )
+    for name in sorted(set(SINGLE_PLATFORM_SCRIPTS) - on_disk):
+        errors.append(
+            f"[rule7 twin-scripts] SINGLE_PLATFORM_SCRIPTS lists {name}, which "
+            f"is no longer on disk — drop the entry (and the TECH_SPECS row)"
+        )
+    modes = _index_modes(SCRIPT_DIR)
+    for path, mode in sorted(modes.items()):
+        if path.endswith(".sh") and mode != "100755":
+            errors.append(
+                f"[rule7 twin-scripts] {path} is {mode} in the git index; a "
+                f"clone cannot `./` it — run `git update-index --chmod=+x {path}`"
+            )
+    return errors
+
+
 def main() -> int:
     violations = (check_asset_inventory() + check_doc_paths()
                   + check_gtest_vocabulary() + check_migration_versions()
-                  + check_twin_parity())
+                  + check_twin_parity() + check_version_stamps()
+                  + check_script_twins())
     if violations:
         print(f"Docs drift guard FAILED ({len(violations)} violation(s)):")
         for v in violations:
             print("  " + v)
         return 1
-    print("Docs drift guard passed (5 rules: inventory, dead-paths, "
-          "gtest-vocab, migration-versions, twin-parity).")
+    print("Docs drift guard passed (7 rules: inventory, dead-paths, "
+          "gtest-vocab, migration-versions, twin-parity, no-version-stamps, "
+          "twin-scripts).")
     return 0
 
 
