@@ -131,7 +131,8 @@ std::string ConfigLoader::getEnvValue(const std::string &placeholder)
     return envValue ? std::string(envValue) : "";
 }
 
-std::string ConfigLoader::parseEnvVarName(const std::string &placeholder, const std::string &key)
+std::string ConfigLoader::
+  parseEnvVarName(const std::string &placeholder, const std::string & /*key*/)
 {
     // For "__env_var__" (no explicit name), convert key to env var format
     // Example: "app_id" -> "ALIPAY_SANDBOX_APP_ID"

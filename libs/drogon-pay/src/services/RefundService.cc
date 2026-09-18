@@ -1259,8 +1259,8 @@ void RefundService::proceedWithInsert(
 
 void RefundService::invokeRefundChannel(
   const CreateRefundRequest &request,
-  const std::string &idempotencyKey,
-  const std::string &requestHash,
+  const std::string & /*idempotencyKey*/,
+  const std::string & /*requestHash*/,
   const std::string &refundNo,
   const std::string &orderNo,
   const std::string &paymentNo,

@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI, the agent PostToolUse hook and pre-commit — previously three
   consumers used three different versions (CI 22 / pre-commit 17 / bare
   PATH `clang-format`), which produced spurious formatting drift.
+- **`DROGON_PAY_WERROR` build option** (`cmake/Warnings.cmake`,
+  `pay_apply_warnings()`): opt-in hard warning bar (/W4 /WX on MSVC,
+  -Wall -Wextra -Werror elsewhere) applied to first-party targets only
+  (library, example host, tests) and PRIVATE so consumers are unaffected.
+  All three CI platforms configure with it ON. The drogon_ctl-generated
+  ORM models were split into a `drogon_pay_models` OBJECT library that
+  keeps the advisory profile — generated code must not be hand-edited to
+  satisfy the gate.
 
 ### Changed
 

@@ -8,8 +8,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Drogon CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
 option(DROGON_PAY_BUILD_EXAMPLES "Build the example host server (examples/pay-server)" ON)
 option(DROGON_PAY_BUILD_TESTS "Build the drogon-pay test suite" ON)
+# CI builds with -DDROGON_PAY_WERROR=ON so first-party warnings fail the
+# build; the default stays OFF to keep local/consumer builds friction-free.
+option(DROGON_PAY_WERROR "Treat first-party compiler warnings as errors" OFF)
 # CI historically passes -DBUILD_TESTS=ON; honor it as an alias so the flag
 # remains a real switch without touching workflow files.
 if(DEFINED BUILD_TESTS)
