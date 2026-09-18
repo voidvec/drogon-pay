@@ -2,9 +2,6 @@
 #include <drogon/drogon_test.h>
 #include <drogon/nosql/RedisClient.h>
 #include <drogon/utils/Utilities.h>
-#include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/rsa.h>
 #include "models/PayOrder.h"
 #include "models/PayPayment.h"
 #include "models/PayRefund.h"
@@ -13,8 +10,6 @@
 #include "channels/WechatChannel.h"
 #include "utils/PayUtils.h"
 #include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <future>
 #include <thread>
 #include "TestConfigHelper.h"
@@ -65,82 +60,6 @@ bool pingRedis(const drogon::nosql::RedisClientPtr &client)
         return false;
     }
     return pingFuture.get();
-}
-
-bool writeTempPrivateKey(const std::filesystem::path &path)
-{
-    EVP_PKEY *pkey = EVP_PKEY_new();
-    if (!pkey)
-    {
-        return false;
-    }
-
-    RSA *rsa = RSA_new();
-    BIGNUM *bn = BN_new();
-    if (!rsa || !bn)
-    {
-        if (bn)
-        {
-            BN_free(bn);
-        }
-        if (rsa)
-        {
-            RSA_free(rsa);
-        }
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-
-    if (BN_set_word(bn, RSA_F4) != 1 || RSA_generate_key_ex(rsa, 2048, bn, nullptr) != 1)
-    {
-        BN_free(bn);
-        RSA_free(rsa);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-
-    if (EVP_PKEY_assign_RSA(pkey, rsa) != 1)
-    {
-        BN_free(bn);
-        RSA_free(rsa);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    BN_free(bn);
-
-    std::ofstream out(path.string(), std::ios::binary);
-    if (!out)
-    {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-
-    BIO *bio = BIO_new(BIO_s_mem());
-    if (!bio)
-    {
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-    if (PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr) != 1)
-    {
-        BIO_free(bio);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-
-    BUF_MEM *buf = nullptr;
-    BIO_get_mem_ptr(bio, &buf);
-    if (!buf || !buf->data || buf->length == 0)
-    {
-        BIO_free(bio);
-        EVP_PKEY_free(pkey);
-        return false;
-    }
-
-    out.write(buf->data, static_cast<std::streamsize>(buf->length));
-    BIO_free(bio);
-    EVP_PKEY_free(pkey);
-    return static_cast<bool>(out);
 }
 }  // namespace
 
@@ -417,6 +336,7 @@ DROGON_TEST(PayPlugin_QueryRefund_WechatQueryError)
 
     const auto result = resultFuture.get();
     const auto error = errorFuture.get();
+    CHECK(!error);  // a failed channel query is degraded data, not a service error
 
     // Should successfully return refund data from database
     // even though WeChat query will fail due to invalid config

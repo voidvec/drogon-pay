@@ -178,6 +178,8 @@ DROGON_TEST(PayPlugin_QueryOrder_WechatQueryError)
     REQUIRE(errorFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
 
     const auto error = errorFuture.get();
+    CHECK(!error);
+
     const auto result = resultFuture.get();
 
     // Should successfully return order data from database
