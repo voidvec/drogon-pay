@@ -86,7 +86,7 @@ docker-compose ps
 docker-compose logs payserver
 
 # 验证端口可用性
-curl -f http://localhost:5566/health || exit 1
+curl -f http://localhost:5566/healthz || exit 1
 ```
 
 ### 步骤 3: 数据库初始化验证
@@ -102,10 +102,16 @@ docker exec postgres psql -U postgres -d pay_test -c "\d pay_refund"
 
 ### 步骤 4: 后端单元测试
 
+**不在容器里跑**：runtime 镜像里只有 `/app/PayServer` 和 `/app/config.json`
+（`examples/pay-server/Dockerfile` 的 runtime 阶段明确不装测试二进制），也没有
+`build/` 目录，所以 `docker exec payserver ... PayBackendTests` 跑不起来。C++ 套件
+在宿主上跑，与 compose 环境无关：
+
 ```bash
-# 在容器中运行 C++ 测试
-docker exec payserver /bin/bash -c "cd build && PayBackendTests.exe --output-on-failure -V"
+ctest --test-dir build/linux-release --output-on-failure   # 或 scripts/test.sh
 ```
+
+本 skill 覆盖的是**HTTP 层**：下面的步骤 5 起直接打 compose 起来的 5566。
 
 ### 步骤 5: 支付 API 集成测试
 
@@ -162,11 +168,28 @@ docker exec postgres psql -U postgres -d pay_test -c \
 
 ## 测试报告生成
 
+报告器只**读** `test-results/` 里的 JSON，不自己发请求，所以先跑生产者再跑报告器：
+
 ```bash
+# 1. 打全链路 HTTP 用例，写 test-results/pay_e2e_results.json
+python .claude/skills/docker-integration-test/scripts/pay_e2e_test.py
+# 2. 渲染 HTML
 python .claude/skills/docker-integration-test/scripts/generate_report.py \
   --test-results ./test-results \
   --output ./test-results/docker-integration-test-report.html
 ```
+
+`pay_e2e_test.py` 的连接参数走环境变量：`PAY_BASE_URL`（默认
+`http://localhost:5566`）与 `PAY_API_KEY`（**必须**与宿主进程里的值一致，
+否则整批 401；`docker-compose.yml` 在该变量缺失时直接拒绝启动）。
+
+### 本 skill 目录下的脚本
+
+| 脚本 | 状态 | 说明 |
+|------|------|------|
+| `scripts/pay_e2e_test.py` | 入口 | 全链路 HTTP 用例 + 写 JSON 结果 |
+| `scripts/generate_report.py` | 入口 | 把 `test-results/*.json` 渲染成 HTML |
+| `scripts/run_docker_tests.sh` | **遗留、无引用** | 只做一次健康探测，且探的是已废弃别名 `/health`（现役是 `/healthz`）；没有任何文档或脚本调用它，也没有可执行位。要么改造成 `pay_e2e_test.py` 的前置门并补上引用，要么删除——别把它当入口跑 |
 
 报告包含：
 - 总体测试概览（通过率、总耗时）

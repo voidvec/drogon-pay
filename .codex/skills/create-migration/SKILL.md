@@ -46,11 +46,11 @@ python scripts/migrate_db.py --status      # what the database has recorded
 python scripts/migrate_db.py --dry-run     # what the next run would apply
 ```
 
-Never hand-write `psql -f sql/...` in a workflow or script. Five copies of that
-list used to exist and they had already drifted: one applied only two of the
-four versions, and the deploy scripts globbed a `sql/` path that the plugin
-refactor had moved, so their "Run migrations" step applied nothing while
-reporting success.
+Never hand-write `psql -f sql/...` in a workflow or script. Six copies of that
+list used to exist and they had already drifted: the two in the CI workflows
+applied only two of the four versions, and the deploy scripts globbed a `sql/`
+path that the plugin refactor had moved, so their "Run migrations" step applied
+nothing while reporting success.
 
 ## File Template
 

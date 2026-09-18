@@ -28,6 +28,12 @@ tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub
 每个 PR 跑一次）；`--tag vX.Y.Z` 额外要求 tag 等于三处声明，且 `CHANGELOG.md` 已有
 `## [x.y.z]` 段。
 
+检查器**不看文档**，所以还有一类人肉同步点：`README.md`、`README.zh-CN.md`、
+`docs/development/plugin_integration.md` 里那 6 处 `drogon-pay/1.0.0` 是**已发布包的
+引用示例**（消费者 `self.requires(...)` 抄的就是它）。它们指的是上一个已 tag 的版本，
+所以下一次 `release.yml` 发布成功后，必须在同一个发布 PR 里把它们改成新版本号——
+漏掉的话文档会让人 `requires` 一个根本还没发布的包。
+
 ## 发布流程
 
 ### 1. 前置确认
@@ -135,4 +141,5 @@ git tag -d v1.1.0
 - [ ] `CHANGELOG.md` 已有该版本段且日期正确
 - [ ] release.yml 的 `sdk-smoke`（Linux + Windows）通过
 - [ ] GitHub Release 已创建、正文来自 CHANGELOG 版本段
-- [ ] `README.md` 与 `docs/` 里的版本/安装引用已同步（若有）
+- [ ] `README.md`、`README.zh-CN.md`、`docs/development/plugin_integration.md` 里
+      6 处 `drogon-pay/<version>` 已改成刚发布的版本号

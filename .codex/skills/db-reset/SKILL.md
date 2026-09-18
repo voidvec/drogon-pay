@@ -65,9 +65,13 @@ python scripts/migrate_db.py --status          # every version reads "applied"
 psql -h 127.0.0.1 -U test -d pay_test -c '\dt' # pay_* tables + schema_migrations
 ```
 
-Then the suite:
+Then the suite — through the wrapper, or from the binary's own directory (it
+loads `./config.json` and `./.env` from the current directory, and
+`build.bat` copies both next to the executable; the repository root has
+neither):
 ```powershell
-build\windows-msvc\tests\Release\PayBackendTests.exe
+examples\pay-server\scripts\test.bat
+# or: cd build\windows-msvc\tests\Release && .\PayBackendTests.exe
 ```
 
 ## ORM Model Regeneration

@@ -17,8 +17,8 @@ copies `config.json`, `.env` and `certs/` next to the binaries.
 
 Flags are identical in both twins: `-debug` / `-release` (default Release).
 `test.bat` / `test.sh` additionally take `-l` (list exact case names),
-`-r <ExactName>` (run one case), `-v` (verbose), `-o` (also write
-`test_results.log`).
+`-r <ExactName>` (run one case), `-o` (also write `test_results.log`), and
+`-v`, which is accepted for parity only — both wrappers already set `VERBOSE=1`.
 
 ```powershell
 examples\pay-server\scripts\build.bat            REM Release

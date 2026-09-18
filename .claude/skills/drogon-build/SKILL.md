@@ -55,8 +55,14 @@ in the root `CMakePresets.json`.
 ```powershell
 # From the repository root
 cd build\windows-msvc\examples\pay-server\Release
-.\PayServer.exe -c config.json
+.\PayServer.exe
 ```
+
+The binary takes **no** command line arguments (`examples/pay-server/main.cc`
+declares `main()` with no `argc/argv`); it always reads `./config.json` and
+`./.env` from the current directory, which is why the `cd` above is required.
+`build.bat` copies both files next to the executable, so running
+`PayServer.exe -c <path>` from anywhere else silently loads the wrong config.
 
 ## Build Troubleshooting
 
