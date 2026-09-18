@@ -302,6 +302,7 @@ DROGON_TEST(PayPlugin_WechatCallback_WechatClientNotReady)
 
     const auto result = resultFuture.get();
     const auto error = errorFuture.get();
+    CHECK(error);  // the not-ready path reports 1400 alongside the FAIL body
 
     CHECK(result["code"].asString() == "FAIL");
     CHECK(result["message"].asString() == "wechat client not ready");

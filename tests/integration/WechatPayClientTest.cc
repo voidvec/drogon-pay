@@ -245,35 +245,6 @@ bool signMessage(const std::string &message, EVP_PKEY *pkey, std::string &signat
     signatureB64 = drogon::utils::base64Encode(signature);
     return true;
 }
-
-bool writePrivateKey(const std::filesystem::path &path, EVP_PKEY *pkey)
-{
-    if (!pkey)
-    {
-        return false;
-    }
-    BIO *bio = BIO_new(BIO_s_mem());
-    if (!bio)
-    {
-        return false;
-    }
-    if (PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr) != 1)
-    {
-        BIO_free(bio);
-        return false;
-    }
-    BUF_MEM *buf = nullptr;
-    BIO_get_mem_ptr(bio, &buf);
-    if (!buf || !buf->data || buf->length == 0)
-    {
-        BIO_free(bio);
-        return false;
-    }
-    std::ofstream out(path.string(), std::ios::binary);
-    out.write(buf->data, static_cast<std::streamsize>(buf->length));
-    BIO_free(bio);
-    return out.good();
-}
 }  // namespace
 
 DROGON_TEST(WechatPayClient_DecryptResource)
