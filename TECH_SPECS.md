@@ -144,6 +144,15 @@ python3 scripts/migrate_db.py                  # 应用缺口
 | 凭据来源 | 脚本不写口令。`test.sh`/`test.bat` 不设任何 `DB_*` 变量，真实测试凭据由 `build.*` 复制到二进制旁边的 `.env` 提供，进程环境优先 |
 | 变更要求 | 改一个孪生体必须在同一提交里改另一个；只加 `.bat` 会让 Linux/macOS 开发者按文档抄命令时踩到未覆盖路径 |
 
+### [MUST] CI 工作流治理
+
+| 规范项 | 要求 |
+|--------|------|
+| 单一入口 | `ci.yml` 是唯一入口，FAST(`static-analysis`+`clang-tidy`) → MAIN(`_build-test.yml`) → RELEASE(`_sdk-smoke.yml`) 全部用 `needs` 串联；缺 `needs` 边的检查只是建议性信号，它红了也照样能合进去 |
+| 检查名契约 | 三个 required check 名由 `ci.yml` 的 `matrix.check_name` 生成，改名等于悄悄解除分支保护 |
+| 行动固定 | 所有 `uses:` 钉到完整 commit SHA，并注释该 SHA 对应的 tag；浮动 major tag 让未经评审的上游变更决定门禁结论 |
+| 最小权限 | 工作流级显式声明 `permissions: contents: read`，只有 `release.yml` 的 `publish` job 拿 `write`；`.github/workflows/secrets-scan.yml` 因 gitleaks 需要回写 commit status 暂未收窄 |
+
 ### [MUST] 错误处理
 
 | 错误类型 | 处理要求 |
