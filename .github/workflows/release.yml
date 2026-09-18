@@ -1,8 +1,10 @@
 name: Release
 
-# Tag-driven release pipeline (Phase 6): pushing a `v*` tag re-validates the
-# Conan recipe + test_package from the consumer's point of view, then publishes
-# a GitHub Release whose body is the matching CHANGELOG.md section.
+# Tag-driven release pipeline: a `v*` tag must prove it is a real release
+# (version declared consistently + CHANGELOG section written) before any
+# build time is spent, then re-validate the packaged library the way an
+# external consumer uses it, and only then publish a GitHub Release whose
+# body is that CHANGELOG section.
 on:
   push:
     tags:
@@ -12,44 +14,54 @@ permissions:
   contents: write
 
 jobs:
-  validate:
-    runs-on: windows-2022
-    timeout-minutes: 120
+  # Cheap, instant gate first: fail the release before a Conan build can burn
+  # an hour discovering the tag does not match the tree.
+  version-check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install Conan
-        run: |
-          pip install conan
-          conan profile detect --force
+      # Asserts the tag equals the version declared in CMakeLists.txt /
+      # conanfile.py / pay-admin package.json AND that CHANGELOG.md already
+      # carries a `## [x.y.z]` section. Missing section = hard fail, so the
+      # publish step below can rely on it existing.
+      - name: Version sync + changelog section
+        run: python3 scripts/check_version_sync.py --tag "$GITHUB_REF_NAME"
 
-      # Same cache key scheme as ci-windows.yml / conan-create.yml so all
-      # three workflows share the dependency store.
-      - name: Cache Conan packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.conan2/p
-          key: ${{ runner.os }}-conan2-${{ hashFiles('conanfile.py', 'conan.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-conan2-
-
-      - name: conan create (recipe + test_package)
-        run: conan create . --build=missing -s build_type=Release -s compiler.cppstd=17
+  # Consumer-view validation, from the same reusable workflow the RELEASE gate
+  # of ci.yml uses — the release path is not a second, weaker definition of
+  # "this package works" (the old copy here only ran Windows-only and never
+  # exercised the plugin routes).
+  sdk-smoke:
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runs_on: ubuntu-22.04
+          - platform: windows
+            runs_on: windows-2022
+    uses: ./.github/workflows/_sdk-smoke.yml
+    with:
+      platform: ${{ matrix.platform }}
+      runs_on: ${{ matrix.runs_on }}
+      timeout_minutes: 120
 
   publish:
-    needs: validate
+    needs: sdk-smoke
     runs-on: ubuntu-22.04
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Extract the CHANGELOG section for this tag (e.g. tag v1.0.0 ->
-      # "## [1.0.0]" block) to use as the release body. Falls back to a
-      # pointer at CHANGELOG.md when the section is missing.
+      # "## [1.0.0]" block) to use as the release body. version-check above
+      # has already proven the section exists.
       - name: Extract changelog section
-        id: changelog
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v ver="$VERSION" '
@@ -57,10 +69,6 @@ jobs:
             grab && /^## \[/ { exit }
             grab { print }
           ' CHANGELOG.md > release_notes.md
-          if [ ! -s release_notes.md ]; then
-            echo "No CHANGELOG section found for $VERSION; using fallback." >&2
-            echo "See [CHANGELOG.md](CHANGELOG.md) for details." > release_notes.md
-          fi
 
       - name: Create GitHub Release
         env:

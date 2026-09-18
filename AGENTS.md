@@ -89,9 +89,12 @@ The version is declared three times and never derived: `project(drogon-pay
 VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level
 `"version"` in `examples/pay-admin/package.json`. `scripts/check_version_sync.py`
 enforces it: the FAST gate runs it with no arguments, which requires the three
-declarations to agree. Never hand-write a version into a deploy/config comment:
-those strings were the drift source and have been deleted. Bumping = three
-declarations + a new CHANGELOG section, then tag.
+declarations to agree, and the `version-check` job that opens
+`.github/workflows/release.yml` re-runs it with `--tag "$GITHUB_REF_NAME"`, which
+also requires the tag to equal them and `CHANGELOG.md` to carry a `## [x.y.z]`
+section. Never hand-write a version into a deploy/config comment: those strings
+were the drift source and have been deleted. Bumping = three declarations + a new
+CHANGELOG section, then tag.
 
 ## Critical Constraints (always enforce)
 

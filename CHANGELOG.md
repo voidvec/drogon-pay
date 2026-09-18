@@ -155,6 +155,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `clearReservation` path remains `LOG_ERROR` and is the recommended
     alert anchor. See `docs/development/logging_standards.md`.
 
+- **The `v*` release pipeline is now a gate, not a formality.** `release.yml`
+  opens with a `version-check` job (five minutes, no compiler) that fails a tag
+  whose version is not what the tree declares or whose `CHANGELOG.md` section was
+  never written, replaces its Windows-only `conan create` step with the same
+  `_sdk-smoke.yml` the RELEASE gate of `ci.yml` uses — so the tag path exercises
+  the plugin routes on Linux and Windows instead of only building on one — and
+  `publish` now depends on that. The hand-run `gh release create` recipe is gone
+  with it: `/release` describes the tag-and-watch-CI flow instead of telling you
+  to `git log > CHANGELOG.md`, which would have thrown away the changelog and
+  left the release body blank.
+
 ### Fixed
 
 - **Documentation contradicted the code on money, statuses and routes.**

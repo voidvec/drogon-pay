@@ -351,7 +351,7 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 | 规范项 | 要求 |
 |--------|------|
 | 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言三处一致 |
-| 打 tag | `python3 scripts/check_version_sync.py --tag v1.2.3`：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段 |
+| 打 tag | `release.yml` 的 `version-check` job 以 `--tag "$GITHUB_REF_NAME"` 再跑一次：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段，缺段硬失败（先于任何构建，不浪费一个 Conan 编译周期） |
 | 禁止复述 | 配置/部署/告警文件的注释里不得再写版本号字符串——历史上那 6 处注释就是漂移源，已删除 |
 | 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 → 提交 PR → 合并后打 tag |
 
