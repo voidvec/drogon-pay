@@ -1,120 +1,58 @@
 ---
 name: openapi-update
-description: 当支付 API 端点发生变化时更新 OpenAPI 规范
+description: 当支付 API 端点发生变化时同步 API 契约文档（OpenAPI spec 由治理阶段引入，当前以路由表+文档为准）
 ---
 
-# OpenAPI 规范更新技能
+# API 契约同步技能
 
-当支付控制器端点发生变化时更新 OpenAPI 3.0 规范文档。
+当支付路由发生变化时，保持 API 契约文档与代码一致。
 
-## 使用方法
+## 当前状态（重要）
 
-- Claude 自动调用：当检测到 `libs/drogon-pay/src/handlers/` 中的路由变更时
-- 用户调用：`/openapi-update`
+本仓库**尚无** `openapi.yaml`。API 契约的事实来源是：
+
+1. 代码路由表：`libs/drogon-pay/src/PayPlugin.cc`（`registerHandler` 注册）
+   与宿主 `examples/pay-server/controllers/*.h`（`ADD_METHOD_TO`）
+2. 端点文档：`docs/api/pay-api-examples.md`
+
+OpenAPI 规范文件由 API 治理阶段落地（路径将是
+`examples/pay-server/openapi.yaml`，并配 CI 校验门禁）。在它存在之前，
+**不要**让任何流程读写一个不存在的 spec 文件。
+
+## 真实端点清单
+
+插件路由（`base_path` 默认 `/api/pay`，鉴权 `X-API-Key` Header）：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/pay/create` | 创建支付 |
+| POST | `/api/qrpay/create` | 二维码支付创建（注意：固定前缀，不随 base_path） |
+| GET | `/api/pay/query` | 查询订单 |
+| POST | `/api/pay/refund` | 创建退款 |
+| GET | `/api/pay/refund/query` | 查询退款 |
+| GET | `/api/pay/orders` | 订单列表 |
+| GET | `/api/pay/reconcile/summary` | 对账摘要 |
+| GET | `/api/pay/metrics/auth` | 支付统计（JSON） |
+| GET | `/api/pay/metrics/auth.prom` | 支付统计（Prometheus 文本） |
+| POST | `/api/pay/notify/wechat` | 微信支付回调（渠道约定响应） |
+| POST | `/api/pay/notify/alipay` | 支付宝回调（渠道约定响应） |
+
+宿主路由：`/healthz`、`/readyz`、`/health`（`HealthCheckController`）、
+`/metrics`（`MetricsController`）。
 
 ## 工作流程
 
-1. **分析当前控制器**
-   - 读取 `libs/drogon-pay/src/handlers/*.cc`
-   - 识别所有路由端点和参数
+1. 对比代码与文档：从 `PayPlugin.cc` 与宿主 controllers 提取路由，与
+   `docs/api/pay-api-examples.md` 的端点清单比对，双向补齐缺失
+2. 状态机语义：`/api/pay/create`（CREATED→PAYING）与 `/api/qrpay/create`
+   （直接 PAYING）的差异见 `TECH_SPECS.md` 订单状态机一节，文档变更时同步
+3. 若 `docs/api/pay-api-examples.md` 缺少端点（历史上缺
+   `/api/pay/orders` 与 `/api/pay/reconcile/summary`），补充请求/响应示例
 
-2. **比较现有 OpenAPI 规范**
-   - 读取 `openapi.yaml`
-   - 检查是否有新的端点
-   - 检查是否有参数变更
-   - 检查是否有响应格式变更
+## 约定
 
-3. **更新 OpenAPI 规范**
-   - 添加新的端点定义
-   - 更新现有端点的参数
-   - 更新响应模型
-   - 确保符合 OpenAPI 3.0 规范
-
-4. **验证规范**
-   - 检查 YAML 语法
-   - 验证所有引用是否有效
-   - 确保端点路径与代码一致
-
-### 验证脚本
-
-```powershell
-# 检查 YAML 语法
-try {
-    $yaml = Get-Content "openapi.yaml" -Raw
-    Write-Host "YAML syntax valid"
-} catch {
-    Write-Host "YAML syntax error: $_"
-    exit 1
-}
-
-# 检查必需字段
-$requiredFields = @("openapi", "info", "paths", "components")
-foreach ($field in $requiredFields) {
-    if ($yaml -match "$field:") {
-        Write-Host "Field '$field' found"
-    } else {
-        Write-Host "Required field '$field' missing"
-        exit 1
-    }
-}
-```
-
-## 需要检查的关键端点
-
-### 支付端点
-- `POST /api/v1/payments` - 创建支付
-- `GET /api/v1/payments/{id}` - 查询支付
-- `POST /api/v1/refunds` - 创建退款
-- `GET /api/v1/refunds/{id}` - 查询退款
-
-### 回调端点
-- `POST /api/v1/callbacks/alipay` - 支付宝回调
-- `POST /api/v1/callbacks/wechat` - 微信支付回调
-
-### 管理端点
-- `GET /health` - 健康检查
-- `GET /metrics` - Prometheus 指标
-- `GET /api/v1/metrics/payments` - 支付统计
-
-### 对账端点
-- `POST /api/v1/reconcile` - 触发对账
-- `GET /api/v1/reconcile/summary` - 对账摘要
-
-## 输出格式
-
-更新后的 `openapi.yaml` 文件应包含：
-- 正确的 OpenAPI 3.0 版本
-- 所有端点的完整文档
-- 请求参数 schema（含 `X-Api-Key` Header）
-- 响应格式定义
-- 错误响应示例
-- 认证方式说明
-
-## 注意事项
-
-- 保持 YAML 缩进一致（2 个空格）
-- 所有端点需要包含描述文字
-- 参数需要标注是否必需
-- 提供请求和响应示例
-- 更新版本号当有重大变更
-- 金额字段标注单位为"分"
-
-## 版本控制集成
-
-```bash
-# 更新规范后提交到 Git
-git add openapi.yaml
-git commit -m "docs: update OpenAPI specification for endpoint changes"
-
-# 如果有重大变更，更新 API 版本号
-# 在 openapi.yaml 的 info.version 字段中递增版本
-```
-
-## 文档同步
-
-```bash
-# 确保相关文档也同步更新
-# - docs/api_reference.md
-# - README.md 中的 API 端点示例
-# - 技术文档中的接口描述
-```
+- 金额字段一律整数、单位"分"
+- notify 回调的成功响应是**渠道要求的约定体**（微信
+  `{"code":"SUCCESS"}` / 支付宝 `success` 文本），不是本服务自有契约，
+  文档中必须注明
+- 变更提交：`docs(api): ...`，并在 `CHANGELOG.md` `[Unreleased]` 记录

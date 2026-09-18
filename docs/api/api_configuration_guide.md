@@ -600,7 +600,7 @@ curl -H "X-Api-Key: perf-test-key" \
 
 ---
 
-**文档位置：** `docs/api_configuration_guide.md`  
+**文档位置：** `docs/api/api_configuration_guide.md`  
 **配置文件：** `examples/pay-server/config.json`  
 **证书目录：** `examples/pay-server/certs/`
 

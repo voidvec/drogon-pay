@@ -5,96 +5,109 @@ description: Generates Drogon-compatible C++ tests for the Pay Plugin project. F
 
 # Test Writer Agent
 
-Generates Drogon-compatible C++ tests for the Pay Plugin project. Focuses on payment processing coverage gaps and regression protection.
+Generates C++ tests for the Pay Plugin project using the Drogon-native
+`DROGON_TEST` framework. Focuses on payment coverage gaps and regression
+protection.
 
 ## When to Use
 
-Automatically after code changes that lack sufficient test coverage, or on manual request.
+Automatically after code changes that lack sufficient test coverage, or on
+manual request.
 
 ## Test Framework & Patterns
 
 ### Framework
-- Drogon test framework: `#include <drogon/drogon_test.h>`
-- Test macro: `DROGON_TEST(TestName)`
-- Main entry: `PayBackendTests.exe` built from `tests/`
 
-### Service-Oriented Architecture
-Tests use Service API, not Plugin API:
+- Header: `#include <drogon/drogon_test.h>` (NOT gtest — there is no
+  `TEST_F`/`EXPECT_EQ` in this repo)
+- Test macro: `DROGON_TEST(Module_Scenario)` — one macro per case, no fixture
+  classes
+- Assertions: `CHECK(expr)` (non-fatal), `REQUIRE(expr)` (fatal),
+  `CHECK_FALSE`, `CHECK_EQ`/`CHECK_THROWS` also exist but this repo mostly
+  uses `CHECK`/`REQUIRE` with explicit comparisons
+- Runner: single binary `PayBackendTests` built from `tests/`
+  (`test_main.cc` boots the Drogon app; tests run against the configured
+  test port, see `TestConfigHelper.h`)
+
+### Async callback pattern (the house style)
+
+Services are callback-based; tests bridge with `std::promise`/`future` and a
+timeout, mirroring `tests/CreatePaymentIntegrationTest.cc`:
+
 ```cpp
-auto paymentService = factory->getPaymentService();
-auto refundService = factory->getRefundService();
-auto callbackService = factory->getCallbackService();
-auto idempotencyService = factory->getIdempotencyService();
+DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
+{
+    // ... build request, wire test doubles (plugin.setTestClients(...)) ...
+
+    std::promise<Json::Value> resultPromise;
+    std::promise<std::error_code> errorPromise;
+
+    auto paymentService = plugin.paymentService();
+    paymentService->createPayment(
+      request,
+      apiKey,
+      [&resultPromise, &errorPromise](const Json::Value &result,
+                                      const std::error_code &error) {
+          resultPromise.set_value(result);
+          errorPromise.set_value(error);
+      }
+    );
+
+    auto resultFuture = resultPromise.get_future();
+    auto errorFuture = errorPromise.get_future();
+    REQUIRE(resultFuture.wait_for(std::chrono::seconds(5)) ==
+            std::future_status::ready);
+    CHECK(!errorFuture.get());
+}
 ```
 
-### Payment-Specific Test Patterns
+In production code (not tests) callbacks are captured as
+`auto sharedCb = std::make_shared<CallbackType>(std::move(cb));` and lambdas
+capture `[sharedCb]` — never `[this]` or `[&var]`.
+
+### Service API
+
+Tests use the Service API, never the legacy Plugin API:
+
 ```cpp
-// Payment creation test
-TEST_F(PaymentTest, CreatePayment_AlipaySuccess) {
-    PaymentRequest request;
-    request.setOrderNo("TEST-001");
-    request.setAmount(100);  // 1.00 yuan in cents
-    request.setChannel("alipay");
-
-    auto response = paymentService->createPayment(request, "test-dev-key",
-        [&](const PaymentResponse& resp) {
-            EXPECT_EQ(resp.status(), "pending");
-        });
-}
-
-// Idempotency test
-TEST_F(IdempotencyTest, DuplicateRequest_ReturnsSameResponse) {
-    // First request creates, second returns cached response
-}
+auto paymentService = plugin.paymentService();
+auto refundService = plugin.refundService();
 ```
 
 ## Checklist
 
 Before writing tests, verify:
 - [ ] Existing tests in the same module for pattern consistency
-- [ ] Test covers both success and error paths (API Key invalid, payment not found, refund amount exceeds paid)
-- [ ] Async callbacks properly capture test context
-- [ ] No hardcoded credentials or environment-specific values
+- [ ] Success AND error paths (invalid API key, payment not found, refund
+      amount exceeds paid)
+- [ ] Every async callback path is bounded by a `wait_for` timeout +
+      `REQUIRE(... == ready)` so a dropped callback fails, never hangs
+- [ ] DB rows inserted by the test are deleted at the end of the case
+- [ ] No hardcoded credentials or environment-specific values (use
+      `PAY_API_KEY=test_key_123456` style env defaults already in CI)
 - [ ] Idempotency behavior tested for payment create and refund
-- [ ] CMakeLists.txt updated if new test files added
-
-## Key Assertions
-
-- `EXPECT_EQ(val1, val2)` - non-fatal equality assertion
-- `ASSERT_EQ(val1, val2)` - fatal equality assertion
-- `EXPECT_TRUE(condition)` / `ASSERT_TRUE(condition)`
-- `EXPECT_THROW(statement, exception_type)`
+- [ ] `tests/CMakeLists.txt` updated if a new test file is added
 
 ## Naming Convention
 
-`TEST_F({Module}Test, {Function}_{Scenario})`
+`DROGON_TEST({Module}_{Scenario})` — module is the class/service under test,
+scenario describes the expectation:
 
-Examples:
-- `TEST_F(PaymentTest, CreatePayment_AlipaySuccess)`
-- `TEST_F(PaymentTest, CreatePayment_InvalidApiKey_Returns401)`
-- `TEST_F(RefundTest, Refund_AmountExceedsPaid_ReturnsError)`
-- `TEST_F(CallbackTest, WechatCallback_ValidSignature_Success)`
-- `TEST_F(IdempotencyTest, DuplicatePayment_ReturnsCachedResponse)`
-- `TEST_F(ReconciliationTest, DailySummary_ValidRange_Success)`
-
-## Directory Structure
-
-| Type | Location | Purpose |
-|------|----------|---------|
-| Unit | `tests/` | Service logic tests |
-| Integration | `tests/` | End-to-end flow tests |
-| Security | `tests/` | Auth/validation tests |
-| Performance | `tests/` | Load/stress tests |
+- `PayUtils_ParseAmountToFen`
+- `PayPlugin_CreatePayment_IdempotencySnapshot`
+- `RefundQuery_AmountExceedsPaid_ReturnsError`
+- `PayIdempotency_DbUniqueKey`
+- `RouteRegistration_PayEndpointsRespond`
 
 ## Quick Reference
 
 ```bash
-# Run all tests
-build/windows-msvc/tests/Release/PayBackendTests.exe
+# Run the whole suite (ctest, cross-platform)
+ctest --test-dir build/windows-msvc -C Release --output-on-failure
 
-# Run specific test
-build/windows-msvc/tests/Release/PayBackendTests.exe
+# Run one case by name
+build/windows-msvc/tests/Release/PayBackendTests.exe -r PayUtils_ParseAmountToFen
 
-# List all tests
-build/windows-msvc/tests/Release/PayBackendTests.exe
+# Linux/macOS
+ctest --test-dir build/linux-release --output-on-failure
 ```

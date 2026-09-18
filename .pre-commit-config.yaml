@@ -2,7 +2,10 @@
 # Install: pip install pre-commit && pre-commit install
 repos:
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v17.0.6
+    # MUST stay on the same major as scripts/clang_format.py:PINNED_MAJOR (=22)
+    # and the CI job in .github/workflows/ci-linux.yml. v17 vs v22 disagree on
+    # formatting for real; a third version here would re-create that drift.
+    rev: v22.1.8
     hooks:
       - id: clang-format
         types_or: [c++, c]

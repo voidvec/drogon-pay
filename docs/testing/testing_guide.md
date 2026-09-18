@@ -93,6 +93,7 @@ Tests run automatically on:
 
 ## Test Data Management
 
-- Use a test database schema (run `sql/000` reset + `001`–`004` setup)
+- Use a test database schema (run `sql/000_drop_pay_tables.sql` reset, then
+  `sql/001_init_pay_tables.sql` … `sql/004_ledger_fk.sql` setup)
 - The test config points at a throwaway database; isolate per CI run
 - External provider calls are stubbed via test channels (no real network)
