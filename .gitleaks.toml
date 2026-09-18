@@ -11,4 +11,7 @@ regexes = [
   '''test_key_123456''',
   '''PLACEHOLDER_32_CHARACTER_KEY==''',
   '''query-only-key''',
+  # docs/api/pay-api-examples.md spells the header this way in every curl
+  # sample; gitleaks' curl-auth-header rule matches on shape, not intent.
+  '''YOUR_API_KEY''',
 ]

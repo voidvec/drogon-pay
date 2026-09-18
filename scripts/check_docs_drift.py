@@ -9,10 +9,13 @@ invariants fail loudly:
   R1  AGENTS.md "Claude Code Assets" lists exactly what exists on disk
       under .claude/{agents,rules,skills}/ (tombstones must be listed,
       annotated with [retired]).
-  R2  Repo paths written in backticks in the governance docs must exist
-      (a doc may not point at a file that isn't there; forward refs to
-      files a later governance phase delivers need an explicit entry in
-      PENDING_PATHS below).
+  R2  Repo paths written in backticks in the governance docs must be
+      resolvable — tracked in the index, or claimed by .gitignore when the
+      prose describes something the build or the operator provisions (a
+      generated certs/ dir, .env). Forward refs to files a later governance
+      phase delivers need an explicit entry in PENDING_PATHS below. "On my
+      disk" is not the test: the original exists() check passed on a laptop
+      and failed on CI for exactly that reason.
   R3  No gtest vocabulary outside docs/history/ and CHANGELOG.md — the
       suite is Drogon DROGON_TEST; gtest examples in agent docs were
       actively misleading (see 2026-09 drift audit).
@@ -126,8 +129,51 @@ PENDING_PATHS: dict[str, str] = {
 }
 
 
+def _tracked_files() -> set[str]:
+    """Every path in the index. This, not the working tree, is what a CI
+    checkout can see."""
+    proc = subprocess.run(
+        ["git", "ls-files", "--cached"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return set(proc.stdout.split())
+
+
+def _git_ignored(probes: set[str]) -> set[str]:
+    """The subset that .gitignore claims. A doc citing one of these is
+    describing something the operator or the build provisions (`.env`, a
+    generated `certs/`, `build/`), which no checkout will ever contain."""
+    if not probes:
+        return set()
+    payload = ("\n".join(sorted(probes)) + "\n").encode("utf-8")
+    proc = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=str(REPO_ROOT),
+        input=payload,
+        capture_output=True,
+    )
+    # Bytes in, bytes out: passing `encoding` would flip this into text mode,
+    # whose newline translation sends CRLF to git and silently stops every
+    # path matching.
+    return set(proc.stdout.decode("utf-8", errors="replace").split())
+
+
 def check_doc_paths() -> list[str]:
-    errors: list[str] = []
+    """R2, resolved against the index rather than the working tree.
+
+    The first version called Path.exists(), which is a laptop-only truth: it
+    passed here because the gitignored build/, .env and certs/ were on disk,
+    and failed on the first CI run because a checkout has none of them. Both
+    the index and .gitignore are versioned, so this now answers the same way
+    everywhere.
+    """
+    tracked = _tracked_files()
+    candidates: list[tuple[str, int, str, str]] = []
+    probes: set[str] = set()
     for doc in R2_DOCS:
         if not doc.is_file():
             continue
@@ -143,16 +189,25 @@ def check_doc_paths() -> list[str]:
                     continue
                 token = token.rstrip(":").strip("/")
                 probe = token.replace("\\", "/")
-                if probe in PENDING_PATHS:
+                if probe in PENDING_PATHS or probe.endswith(SECRET_EXTS):
                     continue
-                if probe.endswith(SECRET_EXTS):
-                    continue
-                if not (REPO_ROOT / probe).exists():
-                    errors.append(
-                        f"[rule2 dead-path] {rel_doc}:{lineno}: `{token}` does "
-                        f"not exist (add to PENDING_PATHS with a reason if "
-                        f"this is a deliberate forward reference)"
-                    )
+                candidates.append((rel_doc, lineno, token, probe))
+                probes.add(probe)
+
+    ignored = _git_ignored(probes)
+    errors: list[str] = []
+    for rel_doc, lineno, token, probe in candidates:
+        if probe in ignored:
+            continue
+        in_index = probe in tracked or any(
+            p.startswith(probe + "/") for p in tracked
+        )
+        if not in_index:
+            errors.append(
+                f"[rule2 dead-path] {rel_doc}:{lineno}: `{token}` is neither "
+                f"tracked nor gitignored (add to PENDING_PATHS with a reason "
+                f"if this is a deliberate forward reference)"
+            )
     return errors
 
 

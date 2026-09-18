@@ -272,6 +272,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. `CONTRIBUTING.md`, `TECH_SPECS.md` and the `create-migration` skill
   (both mirrors) now state the checked version, with that commit as the
   reference for anyone who wants to re-verify it.
+- **The dead-path rule was green on a laptop and red on CI.** R2 of
+  `scripts/check_docs_drift.py` resolved backticked paths with
+  `Path.exists()`, so on a development machine it accepted documentation
+  pointing at `build/`, `examples/pay-server/.env` and
+  `examples/pay-server/certs` — three things that exist only as untracked,
+  gitignored output. A fresh CI checkout has none of them and the guard failed
+  on its first run there. It now resolves each citation against the git index
+  (a tracked file or a tracked directory prefix) plus the set `git
+  check-ignore` claims, both of which are versioned facts, so the answer no
+  longer depends on what happens to be on disk. The plumbing had its own
+  laptop/CI split: passing `encoding=` to `subprocess.run` enables text mode,
+  whose newline translation fed CRLF to `git check-ignore --stdin` and made
+  every path look unignored, and the writer thread's exception left the git
+  child blocked on stdin. That call now speaks bytes in both directions.
+- **`YOUR_API_KEY` was flagged as a leaked secret.** The `curl-auth-header`
+  rule matches on shape, and every curl sample in
+  `docs/api/pay-api-examples.md` writes `-H "X-Api-Key: YOUR_API_KEY"`. The
+  placeholder joins the existing allowlist in `.gitleaks.toml` (which already
+  carries `test_key_123456`, `PLACEHOLDER_32_CHARACTER_KEY==` and
+  `query-only-key`) rather than the documentation being rewritten to dodge a
+  shape match.
 - **Documentation contradicted the code on money, statuses and routes.**
   Writing the contract surfaced four stale claims, now corrected against the
   implementation:
