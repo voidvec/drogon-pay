@@ -10,8 +10,11 @@ on:
     tags:
       - "v*"
 
+# Least privilege: only `publish` writes. Checking out a tag and running a
+# consumer smoke need read access, and giving every job `contents: write` is how
+# a compromised build step gets release-modifying rights it never needed.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Cheap, instant gate first: fail the release before a Conan build can burn
@@ -54,21 +57,30 @@ jobs:
     needs: sdk-smoke
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Extract the CHANGELOG section for this tag (e.g. tag v1.0.0 ->
-      # "## [1.0.0]" block) to use as the release body. version-check above
-      # has already proven the section exists.
+      # "## [1.0.0]" block) to use as the release body. version-check above has
+      # already proven the section exists; index() rather than a regex keeps a
+      # version's dots literal, and the -s test means a silently-empty extraction
+      # fails the job instead of publishing a notes-less release.
       - name: Extract changelog section
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { grab = 1; print; next }
+            BEGIN { want = "## [" ver "]" }
+            index($0, want) == 1 { grab = 1; print; next }
             grab && /^## \[/ { exit }
             grab { print }
           ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "release_notes.md is empty: CHANGELOG.md has no '## [$VERSION]' heading" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release
         env:
