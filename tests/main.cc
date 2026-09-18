@@ -31,6 +31,19 @@ int main(int argc, char **argv)
             {
                 listener["port"] = pay::test_util::testPort();
             }
+            // The same isolation has to cover custom_config: /metrics proxies
+            // to *this process's* /metrics/base, and the copied config points
+            // at 5566, so a case that scraped /metrics would silently read a
+            // locally running dev PayServer's counters instead of its own.
+            const bool hasCustomMetricsUrl =
+              processedConfig.isMember("custom_config") &&
+              processedConfig["custom_config"].isMember("pay") &&
+              processedConfig["custom_config"]["pay"].isMember("metrics_base_url");
+            if (hasCustomMetricsUrl)
+            {
+                processedConfig["custom_config"]["pay"]["metrics_base_url"] =
+                  pay::test_util::testBaseUrl() + "/metrics/base";
+            }
             app().loadConfigJson(std::move(processedConfig));
         }
     }
