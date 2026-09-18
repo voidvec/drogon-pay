@@ -1,0 +1,179 @@
+name: coverage
+
+# Runs the Debug+gcov build and gates line coverage per directory bucket
+# against scripts/coverage_baseline.json (ratchet, see
+# scripts/measure_coverage.py for the anti-thrash rules).
+#
+# The baseline is meant to be seeded from a full green run of THIS job: the
+# numbers are gcc/CI-container specific, and a partial local run (e.g. a
+# suite that died early) still produces valid-looking JSON with buckets near
+# 0%, which would then be pinned as the floor.
+#
+# Deliberately narrow trigger: a cold Conan cache Debug build compiles
+# drogon/openssl from source, so this only runs when coverage-relevant
+# paths change (or manually), not on every docs commit.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'libs/**'
+      - 'examples/pay-server/**'
+      - 'tests/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'conanfile.py'
+      - 'conan.lock'
+      - 'scripts/measure_coverage.py'
+      - 'scripts/coverage_baseline.json'
+      - '.github/workflows/coverage.yml'
+  pull_request:
+    paths:
+      - 'libs/**'
+      - 'examples/pay-server/**'
+      - 'tests/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'conanfile.py'
+      - 'conan.lock'
+      - 'scripts/measure_coverage.py'
+      - 'scripts/coverage_baseline.json'
+      - '.github/workflows/coverage.yml'
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Debug
+
+jobs:
+  coverage:
+    name: linux-coverage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: 123456
+          POSTGRES_DB: pay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conan
+        run: |
+          pip install conan
+          conan profile detect --force
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: ${{ runner.os }}-conan2-debug-${{ hashFiles('conanfile.py', 'conan.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-conan2-debug-
+
+      - name: Install dependencies (Conan, Debug)
+        run: conan install . --output-folder=build/linux-coverage -s build_type=Debug -s compiler.cppstd=17 --build=missing
+
+      - name: Configure (cmake --preset linux-coverage)
+        run: cmake --preset linux-coverage
+
+      - name: Build
+        run: cmake --build --preset linux-coverage -j $(nproc)
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for Postgres (SELECT 1 probe)..."
+          ok=""
+          for i in $(seq 1 30); do
+            if PGPASSWORD=123456 psql -h localhost -U test -d pay_test -c 'SELECT 1' >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            echo "  Postgres not ready yet (attempt $i/30)..."; sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::Postgres never became ready"; exit 1; }
+          echo "Waiting for Redis..."
+          ok=""
+          for i in $(seq 1 15); do
+            redis-cli -h localhost ping >/dev/null 2>&1 && { ok=yes; break; }
+            echo "  Redis not ready yet (attempt $i/15)..."; sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::Redis never became ready"; exit 1; }
+
+      - name: Initialize Database
+        env:
+          PGPASSWORD: 123456
+        run: |
+          for f in sql/001_init_pay_tables.sql sql/002_add_indexes.sql sql/003_refund_unique_constraint.sql sql/004_ledger_fk.sql; do
+            psql -h localhost -U test -d pay_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run tests (produces .gcda)
+        working-directory: ${{github.workspace}}/build/linux-coverage
+        env:
+          PAY_REDIS_PASSWORD: ""
+          PAY_DB_HOST: "127.0.0.1"
+          PAY_REDIS_HOST: "127.0.0.1"
+          PAY_DB_PASSWORD: "123456"
+          PAY_API_KEY: "test_key_123456"
+        run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure --timeout 300
+
+      # gcda count 0 means the tests silently skipped (or instrumentation
+      # fell out of the build) — a coverage report built on that is a false
+      # green, so hard-fail before measuring anything.
+      - name: Export gcov data
+        run: |
+          cd ${{github.workspace}}/build/linux-coverage
+          n_gcda=$(find . -name '*.gcda' | wc -l)
+          echo "gcda files: $n_gcda"
+          if [ "$n_gcda" -eq 0 ]; then
+            echo "::error::no .gcda files produced — coverage would be fake-green; failing"
+            exit 1
+          fi
+          for d in $(find . -name '*.gcda' -printf '%h\n' | sort -u); do
+            (cd "$d" && gcov -i -p -j "$(nproc)" ./*.gcda > /dev/null)
+          done
+          echo "json chunks: $(find . -name '*.gcov.json.gz' | wc -l)"
+
+      - name: Coverage report (step summary)
+        working-directory: ${{github.workspace}}
+        run: |
+          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/measure_coverage.py --dir build/linux-coverage --report | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage ratchet gate
+        working-directory: ${{github.workspace}}
+        run: python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-gcov-json
+          path: build/linux-coverage/**/*.gcov.json.gz
+          if-no-files-found: error
+          retention-days: 7

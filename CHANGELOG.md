@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (and fixed) pre-existing gate breaks in the test target: one unused
   variable, missing `/utf-8`, and OpenSSL 3.0 deprecation warnings from
   the test RSA fixtures (now suppressed target-wide).
+- **Line-coverage pipeline** (`cmake/Coverage.cmake` +
+  `DROGON_PAY_COVERAGE` + `linux-coverage` preset +
+  `scripts/measure_coverage.py` + `.github/workflows/coverage.yml`):
+  Debug+gcov instrumented build (GCC/Clang only, models excluded), ctest
+  run against service containers, then per-directory buckets
+  (handlers/services/channels/utils/core + host-*) gated by a ratchet
+  baseline (`scripts/coverage_baseline.json`, 0.5pp tolerance, small-bucket
+  exemption, line-collapse detection, SEED on first run). The
+  `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
+  verbal percentage.
 
 ### Changed
 
