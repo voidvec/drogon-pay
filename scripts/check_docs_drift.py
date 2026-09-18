@@ -102,9 +102,11 @@ SECRET_EXTS = (".pem", ".key", ".crt", ".p12", ".pfx")
 
 # Forward references: governance-phase deliverables that docs may cite
 # before they land. Each entry needs a reason; prune as phases complete.
-PENDING_PATHS = {
-    "scripts/measure_coverage.py": "delivered by coverage phase",
-    "scripts/coverage_baseline.json": "delivered by coverage phase",
+PENDING_PATHS: dict[str, str] = {
+    # The coverage pipeline (measure_coverage.py + coverage.yml) landed, but
+    # this file is written by the first green CI run, not by hand: seeding it
+    # from a partial local run would pin fake floors.
+    "scripts/coverage_baseline.json": "SEEDed by coverage.yml on its first green run",
 }
 
 

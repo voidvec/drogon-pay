@@ -240,6 +240,29 @@ REFUND_INIT ──(channel call)──> REFUND_PROCESSING ──(callback)──
 | 测试隔离 | 测试之间相互独立 |
 | Mock 使用 | 第三方支付服务使用 Mock |
 
+### [MUST] 行覆盖率计量（gcov 棘轮）
+
+覆盖率只在 Linux/gcc 下计量（MSVC 无 gcov），Windows 构建传 `DROGON_PAY_COVERAGE=ON` 时插桩函数为空操作。
+
+```bash
+conan install . --output-folder=build/linux-coverage -s build_type=Debug -s compiler.cppstd=17 --build=missing
+cmake --preset linux-coverage && cmake --build --preset linux-coverage -j"$(nproc)"
+ctest --test-dir build/linux-coverage --output-on-failure     # 跑测试才会落 .gcda
+for d in $(find build/linux-coverage -name '*.gcda' -printf '%h\n' | sort -u); do
+  (cd "$d" && gcov -i -p -j"$(nproc)" ./*.gcda >/dev/null)
+done
+python3 scripts/measure_coverage.py --dir build/linux-coverage --report    # 分桶报表
+python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘轮门禁
+```
+
+| 约束 | 说明 |
+|------|------|
+| 统计范围 | `handlers` / `services` / `channels` / `utils` / `core` + `host-*`；生成的 ORM models 与 tests 目录**不计入** |
+| 基线来源 | `scripts/coverage_baseline.json` 必须由 CI（`.github/workflows/coverage.yml`）一次全绿运行生成；本地半途中断的运行会把虚假的低值钉成地板 |
+| 容忍度 | 单桶下降 >0.5pp 判失败；<150 行的小桶只报表不门禁 |
+| 塌缩检测 | 某桶可计量行数缩水 >50% 直接判失败（视为覆盖率数据丢失，而非改进） |
+| 缺基线 | 视为首次 SEED：写入基线并通过，基线提交本身即审计线索 |
+
 ---
 
 ## 六、部署规范
