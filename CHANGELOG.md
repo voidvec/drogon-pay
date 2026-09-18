@@ -254,14 +254,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<fstream>` and `<atomic>` includes that only they used; the target-level
   OpenSSL 3.0 deprecation suppression stays, because the live minting still
   calls the legacy `RSA_*` API.
-- **The first clang-only diagnosis this gate produced.**
-  `AlipaySandboxClient::sendRequest`'s response lambda captured `this` and never
-  used it (the `timeoutMs_` read sits in the *argument list after* the lambda,
-  which is the enclosing function's, not the capture's), which
-  `-Wunused-lambda-capture` — clang-only, part of `-Wall` — fails the macOS lane
-  on while GCC and MSVC both pass. The capture is gone. That asymmetry is the
-  reason the `DROGON_PAY_WERROR` bar runs on three compilers rather than one:
-  each of the three owns a class of defect the other two cannot see.
+- **The first clang-only class this gate produced: fifteen dead `this`
+  captures.** `AlipaySandboxClient::sendRequest`'s response lambda was the one
+  the macOS log named — it captured `this` and never used it (the `timeoutMs_`
+  read sits in the *argument list after* the lambda, which belongs to the
+  enclosing function, not to the capture). `-Wunused-lambda-capture` is clang
+  only, part of `-Wall`, and GCC and MSVC both let it pass, so the same local
+  compile database was replayed through `clang++ -fsyntax-only -Wall -Wextra`
+  over every translation unit. That found fourteen more, all in the service
+  layer: three commit callbacks in `CallbackService`, eight in `PaymentService`
+  (`proceedCreatePayment`, `createQRPayment`, and the WeChat/Alipay status-sync
+  pairs), three in `RefundService`. None of the fifteen lambdas touched a
+  member — where a transaction is involved the `dbClient_` read happens *before*
+  `newTransactionAsync`, outside the callback — so each capture was a bare
+  `this` alias with nothing behind it. Removing one is also a small lifetime
+  win: an uncaptured `this` cannot be dereferenced by a later edit by accident.
+
+  The sweep had to be re-run to a fixpoint, which is the part worth remembering:
+  after the first ten were stripped, clang reported four *new* sites
+  (`CallbackService:2565`, `PaymentService:1841`/`:2283`,
+  `RefundService:1913`) that the same command had not printed a minute earlier.
+  A `-Wunused-lambda-capture` report is therefore not a complete inventory of a
+  file in one pass — treat the first run as a work queue, not a verdict. All
+  three compilers then agreed on the result: MSVC rebuilt clean, the WSL
+  `g++ -fsyntax-only -Werror` sweep over all 47 units came back with nothing but
+  the six generated models' advisory `-Wunused-parameter`, and the local clang
+  sweep ended at zero. Test counts were unchanged at 149 cases / 1455 assertions,
+  confirming no behaviour moved.
+
+  That asymmetry is the reason the `DROGON_PAY_WERROR` bar runs on three
+  compilers rather than one: each of the three owns a class of defect the other
+  two cannot see.
 
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet

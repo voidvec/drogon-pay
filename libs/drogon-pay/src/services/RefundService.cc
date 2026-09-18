@@ -1600,8 +1600,7 @@ void RefundService::updateRefundWithSuccess(
                                                 Mapper<PayOrderModel> orderUpdater(dbClient_);
                                                 orderUpdater.update(
                                                   order,
-                                                  [this,
-                                                   refundNo,
+                                                  [refundNo,
                                                    refundStatus,
                                                    refundId,
                                                    result,
@@ -1911,8 +1910,7 @@ void RefundService::syncRefundStatusFromWechat(
               const auto paymentNo = refund.getValueOfPaymentNo();
               const auto refundAmount = refund.getValueOfAmount();
 
-              dbClient_->newTransactionAsync([this,
-                                              refundStatus,
+              dbClient_->newTransactionAsync([refundStatus,
                                               refundId,
                                               refundNo,
                                               result,
@@ -1941,8 +1939,7 @@ void RefundService::syncRefundStatusFromWechat(
                       Mapper<PayRefundModel> refundUpdater(transPtr);
                       refundUpdater.update(
                         refund,
-                        [this,
-                         refundStatus,
+                        [refundStatus,
                          orderNo,
                          paymentNo,
                          refundAmount,
