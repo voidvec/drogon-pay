@@ -26,8 +26,10 @@ ARGS=(--env-file examples/pay-server/.env --db "$PGDATABASE")
 if [ "${1:-}" = "--keep-data" ]; then
     echo "Applying pending migrations into existing $PGDATABASE..."
 else
+    # migrate_db.py enforces this as the loopback-only dev reset it is: the
+    # repeated name here is not the safety check, the host rule is.
     ARGS+=(--reset-schema --confirm-drop "$PGDATABASE")
-    echo "Resetting the public schema of $PGDATABASE, then applying the chain..."
+    echo "Resetting the public schema of $PGDATABASE on ${PGHOST:-127.0.0.1}, then applying the chain..."
 fi
 
 "$PY" scripts/migrate_db.py "${ARGS[@]}"
