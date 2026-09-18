@@ -55,6 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exemption, line-collapse detection, SEED on first run). The
   `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
   verbal percentage.
+- **Drift guard rules 6 and 7** (`scripts/check_docs_drift.py`), which turn
+  this round of documentation fixes into something that cannot silently rot
+  again. Rule 6 (`no-version-stamps`) rejects a `**版本：**` /
+  `**Last updated:**` line in any live governance document: a stamp is a
+  second copy of a fact CI already checks elsewhere, so 18 of them went away
+  (four header/footer pairs in each of the four operations and deployment
+  guides, plus the `CLAUDE.md` / `TECH_SPECS.md` footers, which now defer to
+  `git log`). Verified by pointing the rule at `git show HEAD:` of the four
+  stamped documents (it reports exactly the 16 deleted guide lines) and at the
+  cleaned tree (it reports nothing). Rule 7 (`twin-scripts`) requires the five
+  entry points (`build`/`test`/`setup_database`/`deploy`/`check_config`) to
+  exist as a `.sh` + `.bat` pair, refuses an undeclared orphan script in
+  `examples/pay-server/scripts/` (declare it single-platform with a reason and
+  a `TECH_SPECS.md` row instead), drops a stale declaration whose file is gone,
+  and fails when a `.sh` is indexed `100644` because a clone could not `./` it.
+  Each of the three failure modes was exercised against a temporary scripts
+  directory that is then removed.
 - **Single-entry CI pipeline** (`.github/workflows/ci.yml` + reusable
   `_build-test.yml` / `_sdk-smoke.yml`): FAST (`static-analysis`, parallel
   `clang-tidy`) → MAIN (`build-test` matrix over linux/windows/macos) →
@@ -193,6 +210,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The docs described a command line the server does not have.**
+  `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
+  `CLAUDE.md`, `docs/operations/operations_manual.md` and the `drogon-build`
+  skill showed `./PayServer --port 5567 --config config2.json`. PayServer
+  discards every argument without complaint, so the four-instance recipe in
+  the operations manual started four processes all binding 5566 — the exact
+  port-hijacking the isolated test port exists to prevent. The manual now runs
+  one process per deployment directory, each reading its own `config.json`,
+  and the docs state plainly that the working directory (not a flag) decides
+  which `config.json` and `.env` are read.
+- **The test guide recommended a filter that cannot fail.**
+  `tests/CMakeLists.txt` registers a single ctest case (`PayBackendTests`), so
+  `ctest -R SomeCase` matches nothing and exits 0: the "selected the one test I
+  wanted" workflow was really "ran nothing and called it green". `CLAUDE.md`
+  and `docs/testing/testing_guide.md` now send single-case work to the test
+  binary's own `-l` / `-r`, and say where the run actually happens — the
+  binary's directory, since that is the `WORKING_DIRECTORY` ctest uses and the
+  only place `config.json` resolves.
+- **Health checks polled an endpoint whose sunset date had passed.**
+  `/health` is a deprecated alias of `/readyz` and answers with
+  `Deprecation: true` plus `Sunset: 2026-08-28`, a date already behind us.
+  `deploy/ops/restart_service.sh` and `deploy/ops/restore_db.sh` gated a
+  rollout on it, and `docker-integration-test` probed it too; all three now use
+  `/readyz`, and `CLAUDE.md`'s endpoint table spells out the difference
+  (`/healthz` = process alive, `/readyz` = dependencies reachable). Removing
+  the alias itself is a breaking change and belongs to a version bump, so it
+  stays served for now.
+- **A Debug build was said to be impossible.** `docs/deployment/deployment_guide.md`
+  warned that building in Debug "causes link errors". Each preset directory
+  carries its own Conan dependency tree, so Debug links Debug dependencies — and
+  `coverage.yml` builds and tests exactly that (Debug + gcov) whenever
+  coverage-relevant paths change, which would have been dead on arrival had the
+  claim been true.
+- **The container test step described a binary that is not in the image.**
+  The `docker-integration-test` skill had a step running the test suite inside
+  the service container; the runtime image contains `/app/PayServer` and
+  `/app/config.json` and nothing else. It now says to exercise the image over
+  HTTP and run the suite on the host, and names the script that actually
+  produces the report it references. `run_docker_tests.sh` is documented as the
+  orphan it is: unreferenced, probing the deprecated `/health`, no exec bit.
+- **A test could have read the dev server's counters.** `tests/main.cc`
+  rewrote each `listeners[]` entry to the isolated test port but left
+  `custom_config.pay.metrics_base_url` at the copied config's `5566`, and
+  `/metrics` proxies to *this process's* `/metrics/base` — so any case that
+  scraped metrics would have silently collected a locally running PayServer's
+  numbers while believing its own. The base URL is rewritten to the test port
+  alongside the listeners.
+- **Version facts were described as one list, not three kinds.**
+  `check_version_sync.py` compares three declarations (`CMakeLists.txt`,
+  `conanfile.py`, `pay-admin/package.json`); the six `drogon-pay/1.0.0`
+  references in the READMEs and `plugin_integration.md` are *published* package
+  versions that only move with a release, and documentation version stamps are
+  now banned outright. `TECH_SPECS.md` 「版本号一致性」 tabulates those three
+  categories, and the `release` skill lists the six text references as a
+  manual checklist item so they stop being mistaken for a guard that broke.
+- **The migration-history claim understated itself.** The docs said three
+  hard-coded file lists had drifted; `git show 043c5ed^` has six, of which the
+  two in the CI workflows applied only `001` + `002`, and the two in the deploy
+  scripts globbed a directory that had moved and printed success after applying
+  nothing. `CONTRIBUTING.md`, `TECH_SPECS.md` and the `create-migration` skill
+  (both mirrors) now state the checked version, with that commit as the
+  reference for anyone who wants to re-verify it.
 - **Documentation contradicted the code on money, statuses and routes.**
   Writing the contract surfaced four stale claims, now corrected against the
   implementation:
