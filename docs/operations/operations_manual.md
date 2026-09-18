@@ -1,7 +1,5 @@
 # 运维手册
 
-**版本：** 1.0.0
-**更新时间：** 2026-04-13
 **目标环境：** Production
 
 ---
@@ -596,7 +594,9 @@ sudo systemctl start payplugin
 
 4. **验证服务**
 ```bash
-curl http://localhost:5566/health
+# /readyz 会真的打一次 DB/Redis；/healthz 只证明进程活着。
+# 不要再用 /health：它是已废弃别名，Sunset 头写的 2026-08-28 已经过期。
+curl -f http://localhost:5566/readyz
 ```
 
 #### 数据库迁移回滚
@@ -762,12 +762,26 @@ server {
 
 **部署多个实例：**
 
-1. **准备配置文件**（每个实例不同端口）
-2. **启动多个实例**
+`PayServer` **不解析命令行参数**（`examples/pay-server/main.cc` 里是 `int main()`，
+没有 `argc/argv`）：它固定读**当前工作目录**下的 `./config.json` 和 `./.env`。
+所以端口、监听地址、凭据的差异全部来自 cwd，实例之间的隔离靠目录，不靠 flag——
+写 `./PayServer --port 5567` 不会报错，但那个参数会被静默丢掉，三个进程会去抢
+同一个 5566。
+
+1. **每个实例一个目录**，各放一份自己的 `config.json`（端口不同）与 `.env`
 ```bash
-./PayServer --port 5566 --config config1.json &
-./PayServer --port 5567 --config config2.json &
-./PayServer --port 5568 --config config3.json &
+for p in 5566 5567 5568; do
+  mkdir -p "/srv/pay-$p"
+  cp build/linux-release/examples/pay-server/.env "/srv/pay-$p/"
+  sed "s/5566/$p/" build/linux-release/examples/pay-server/config.json \
+      > "/srv/pay-$p/config.json"
+  cp build/linux-release/examples/pay-server/PayServer "/srv/pay-$p/"
+done
+```
+
+2. **从各自目录启动**（cwd 决定读哪份 config）
+```bash
+(cd /srv/pay-5566 && ./PayServer &) ; (cd /srv/pay-5567 && ./PayServer &)
 ```
 
 3. **配置负载均衡器**（Nginx、HAProxy等）
@@ -889,7 +903,3 @@ std::string db_name = "pay_production_shard_" + std::to_string(shard_id);
 - 使用SSD存储
 - 增加内存
 
----
-
-**运维手册版本：** 1.0.0
-**最后更新：** 2026-04-13

@@ -1,7 +1,5 @@
 # Pay Plugin 部署指南
 
-**版本：** 1.0.0  
-**更新时间：** 2026-04-13  
 **目标环境：** Production
 
 ---
@@ -130,7 +128,11 @@ cmake --build --preset linux-release -j$(nproc)
 
 **重要：** 
 - ⚠️ 生产构建必须使用 **Release** 模式！
-- ⚠️ Debug模式会导致链接错误（Drogon是Release编译的）
+- ⚠️ Debug 是开发/覆盖率用的：脚本的 `-debug` 走 `linux-debug` / `macos-debug` /
+  `windows-msvc-debug`，每个预设目录有**自己**的 Conan 依赖树（`conan install
+  --output-folder=build/<preset> -s build_type=<cfg>`），所以 Debug 目标链接的是
+  Debug 依赖，不会和 Release 的混链。`.github/workflows/coverage.yml` 跑的就是
+  Debug + gcov。
 - ⚠️ 优先使用平台脚本（`build.sh` / `build.bat`），其次才是 CMake preset，不要手写裸 CMake 命令
 
 ### 3. 验证编译
@@ -353,7 +355,3 @@ sudo journalctl -u payplugin -f
 - 增加数据库连接数
 - 启用缓存
 
----
-
-**部署指南版本：** 1.0.0  
-**最后更新：** 2026-04-13

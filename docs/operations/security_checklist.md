@@ -1,7 +1,5 @@
 # 安全检查清单和加固指南
 
-**版本：** 1.0.0
-**更新时间：** 2026-04-13
 **目标环境：** Production
 
 ---
@@ -444,7 +442,3 @@ git secrets --add 'api_key.*=.*'
 - [Drogon Framework Security Best Practices](https://drogon.docs.cybernostics.co.uk/)
 - [OpenSSL Security Best Practices](https://www.openssl.org/docs/manmaster/man7/openssl-security.html)
 
----
-
-**安全检查清单版本：** 1.0.0
-**最后更新：** 2026-04-13
