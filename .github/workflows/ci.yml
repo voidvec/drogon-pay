@@ -4,13 +4,18 @@ name: CI
 # `needs` so a cheap failure never buys an expensive one:
 #
 #   FAST    static-analysis  (source-only guards, no compiler, 10 min)
-#           clang-tidy       (configure-only; runs in parallel, needs nothing)
+#           clang-tidy       (configure-only; runs in parallel with the above)
 #      |
 #      v
 #   MAIN    build-test       (_build-test.yml x {linux, windows, macos})
 #      |
 #      v
 #   RELEASE sdk-smoke        (_sdk-smoke.yml x {linux, windows}, conan create)
+#
+# Both FAST jobs feed MAIN on purpose. A check that nothing depends on still
+# turns red, but red on an unrequired check merges anyway, so tidy's promoted
+# batch would be advisory in practice; the `needs` edge is what makes it a
+# blocker, independent of which contexts the ruleset happens to require.
 #
 # Check-name contract: the branch ruleset requires exactly
 # `linux-build-and-test`, `windows-build-and-test` and `macos-build`. Those
@@ -197,7 +202,7 @@ jobs:
   # --- MAIN gate --------------------------------------------------------------
   build-test:
     name: ${{ matrix.check_name }}
-    needs: static-analysis
+    needs: [static-analysis, clang-tidy]
     strategy:
       fail-fast: false
       matrix:
