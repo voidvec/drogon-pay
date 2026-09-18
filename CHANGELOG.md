@@ -225,6 +225,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PayIdempotency` include and model alias that only they used. The behaviour
   was already correct; nothing that wrote a snapshot was removed.
 
+- **Three dropped test assertions, and the compiler that was missing them.**
+  `PayPlugin_QueryOrder_WechatQueryError`, `PayPlugin_QueryRefund_WechatQueryError`
+  and `PayPlugin_WechatCallback_WechatClientNotReady` each fetched the
+  callback's `std::error_code` into a local and never asserted on it, so the
+  contract those cases exist to pin (a degraded channel query still reports
+  *no service error*; the not-ready path *does* report 1400) went unwatched.
+  GCC's `-Wunused-but-set-variable`, which MSVC does not implement, caught all
+  three — the Linux log named one, and a local `g++ -fsyntax-only -Werror` sweep
+  over the whole compile database (compiling needs no database, so WSL is a
+  usable stand-in for this) named the other two, whose translation units the CI
+  build had never reached before it stopped. All three now
+  carry the `CHECK` their sibling cases in the same file have always had, and
+  each one passes on the first run — the behaviour was right, only the watch
+  was missing. A CI log stops at the first failing translation unit, so the
+  same class was hunted rather than waited for: counting occurrences of every
+  file-local function name turned up two more orphans, `writeTempPrivateKey` in
+  `RefundQueryTest.cc` and `writePrivateKey` in `WechatPayClientTest.cc` — three
+  copies of an OpenSSL RSA key-minting helper across the `CreatePayment`,
+  `RefundQuery` and `WechatPayClient` tests, none of them called by anything;
+  the live key minting is `generateKeyAndCert` in the two WeChat suites. The
+  sweep then reported no remaining `-Wunused-function` in any of the 41
+  first-party translation units (the six generated `src/models/*.cc` files live
+  in their own OBJECT library, deliberately advisory-only, where
+  `-Wunused-parameter` is reported but not fatal). Deleting the helpers also
+  removed the
+  `<openssl/*>`, `<filesystem>`,
+  `<fstream>` and `<atomic>` includes that only they used; the target-level
+  OpenSSL 3.0 deprecation suppression stays, because the live minting still
+  calls the legacy `RSA_*` API.
+- **The first clang-only diagnosis this gate produced.**
+  `AlipaySandboxClient::sendRequest`'s response lambda captured `this` and never
+  used it (the `timeoutMs_` read sits in the *argument list after* the lambda,
+  which is the enclosing function's, not the capture's), which
+  `-Wunused-lambda-capture` — clang-only, part of `-Wall` — fails the macOS lane
+  on while GCC and MSVC both pass. The capture is gone. That asymmetry is the
+  reason the `DROGON_PAY_WERROR` bar runs on three compilers rather than one:
+  each of the three owns a class of defect the other two cannot see.
+
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
   `CLAUDE.md`, `docs/operations/operations_manual.md` and the `drogon-build`
