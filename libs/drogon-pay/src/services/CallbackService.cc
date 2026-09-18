@@ -1178,8 +1178,7 @@ void CallbackService::handlePaymentCallback(
                                                                                                orderNo,
                                                                                                transPtr,
                                                                                                idempotencyKey,
-                                                                                               plaintext,
-                                                                                               this]() {
+                                                                                               plaintext]() {
                                                                                                   LOG_DEBUG
                                                                                                     << "[CallbackService] Manually "
                                                                                                        "committing transaction for "
@@ -2562,8 +2561,7 @@ void CallbackService::handleRefundCallback(
                                                                                           signature,
                                                                                           serialNo,
                                                                                           idempotencyKey,
-                                                                                          plaintext,
-                                                                                          this]() {
+                                                                                          plaintext]() {
                                                               PayCallbackModel callbackRow;
                                                               callbackRow.setPaymentNo(paymentNo);
                                                               callbackRow.setRawBody(body);
@@ -2585,8 +2583,7 @@ void CallbackService::handleRefundCallback(
                                                                     [cbPtr,
                                                                      transPtr,
                                                                      idempotencyKey,
-                                                                     plaintext,
-                                                                     this](
+                                                                     plaintext](
                                                                       const PayCallbackModel &
                                                                     ) {
                                                                         LOG_DEBUG

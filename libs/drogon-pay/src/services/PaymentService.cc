@@ -873,8 +873,7 @@ void PaymentService::proceedCreatePayment(
                                                                               );
                                                                             orderUpdater.update(
                                                                               order,
-                                                                              [this,
-                                                                               request,
+                                                                              [request,
                                                                                paymentNo,
                                                                                result,
                                                                                sharedCb](
@@ -1455,13 +1454,9 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
 
                     orderMapper.insert(
                       newOrder,
-                      [this,
-                       orderNo,
-                       data,
-                       sharedCb,
-                       idempotencyService,
-                       idempotencyKey,
-                       requestHash](const PayOrderModel &order) {
+                      [orderNo, data, sharedCb, idempotencyService, idempotencyKey, requestHash](
+                        const PayOrderModel &order
+                      ) {
                           LOG_DEBUG
                             << "[PaymentService] Order saved successfully: order_no=" << orderNo
                             << ", db_id=" << order.getValueOfId();
@@ -1843,8 +1838,7 @@ void PaymentService::syncOrderStatusFromWechat(
                 const auto paymentNo = payment.getValueOfPaymentNo();
 
                 // Use transaction for atomic updates
-                dbClient_->newTransactionAsync([this,
-                                                orderNo,
+                dbClient_->newTransactionAsync([orderNo,
                                                 orderStatus,
                                                 paymentStatus,
                                                 transactionId,
@@ -1876,7 +1870,7 @@ void PaymentService::syncOrderStatusFromWechat(
                             );
                             orderMapper.findOne(
                               orderCriteria,
-                              [this, orderStatus, paymentNo, callback, transPtr, transDb](
+                              [orderStatus, paymentNo, callback, transPtr, transDb](
                                 PayOrderModel order
                               ) {
                                   if (order.getValueOfStatus() != "PAID")
@@ -2014,7 +2008,7 @@ void PaymentService::syncOrderStatusFromWechat(
                       "SET status = $1, channel_trade_no = $2, response_payload = $3 "
                       "WHERE payment_no = $4 "
                       "AND status IN ('INIT', 'PROCESSING') RETURNING 1",
-                      [this, orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
+                      [orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
                         const Result &casResult
                       ) {
                           if (casResult.size() == 0)
@@ -2285,8 +2279,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                 const auto paymentNo = payment.getValueOfPaymentNo();
 
                 // Use transaction for atomic updates
-                dbClient_->newTransactionAsync([this,
-                                                orderNo,
+                dbClient_->newTransactionAsync([orderNo,
                                                 orderStatus,
                                                 paymentStatus,
                                                 transactionId,
@@ -2318,7 +2311,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                             );
                             orderMapper.findOne(
                               orderCriteria,
-                              [this, orderStatus, paymentNo, callback, transPtr, transDb](
+                              [orderStatus, paymentNo, callback, transPtr, transDb](
                                 PayOrderModel order
                               ) {
                                   if (order.getValueOfStatus() != "PAID")
@@ -2457,7 +2450,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                       "SET status = $1, channel_trade_no = $2, response_payload = $3 "
                       "WHERE payment_no = $4 "
                       "AND status IN ('INIT', 'PROCESSING') RETURNING 1",
-                      [this, orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
+                      [orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
                         const Result &casResult
                       ) {
                           if (casResult.size() == 0)
