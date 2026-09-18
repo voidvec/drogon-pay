@@ -106,40 +106,34 @@ git clone https://github.com/lucaswang420/drogon-pay.git
 cd drogon-pay
 ```
 
-### 2. 安装依赖（Conan，在仓库根目录执行）
+### 2. 安装依赖并编译（一条命令，脚本内部跑 Conan + preset）
 
+**Linux / macOS:**
 ```bash
-# Windows
-conan install . --output-folder=build/windows-msvc -s build_type=Release -s compiler.cppstd=17 --build=missing
-
-# Linux
-conan install . --output-folder=build/linux-release -s build_type=Release -s compiler.cppstd=17 --build=missing
+examples/pay-server/scripts/build.sh          # Release；-debug 走 linux-debug / macos-debug
 ```
-
-### 3. 编译项目
 
 **Windows:**
-```bash
-# 快捷方式（内部封装 conan install + preset 构建）
-examples\pay-server\scripts\build.bat
-
-# 或直接使用 preset
-cmake --preset windows-msvc
-cmake --build --preset windows-msvc
+```powershell
+examples\pay-server\scripts\build.bat         # Release；-debug 走 windows-msvc-debug
 ```
 
-**Linux:**
+两个脚本逐参数对齐，内部依次执行 `conan install` → `cmake --preset` →
+`cmake --build --preset`，最后把 `config.json` / `.env` / `certs/` 复制到二进制旁边：
+
 ```bash
+# 需要自定义配置时再展开成手工形式
+conan install . --output-folder=build/linux-release -s build_type=Release -s compiler.cppstd=17 --build=missing
 cmake --preset linux-release
 cmake --build --preset linux-release -j$(nproc)
 ```
 
 **重要：** 
-- ⚠️ 必须使用 **Release** 模式编译！
+- ⚠️ 生产构建必须使用 **Release** 模式！
 - ⚠️ Debug模式会导致链接错误（Drogon是Release编译的）
-- ⚠️ 优先使用 CMake preset 或 `examples\pay-server\scripts\build.bat`，不要手写裸 CMake 命令
+- ⚠️ 优先使用平台脚本（`build.sh` / `build.bat`），其次才是 CMake preset，不要手写裸 CMake 命令
 
-### 4. 验证编译
+### 3. 验证编译
 
 ```bash
 # 检查可执行文件
