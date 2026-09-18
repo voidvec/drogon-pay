@@ -49,11 +49,17 @@
 
 | 测试类型 | 命令 |
 |----------|------|
+| 全量测试（推荐入口） | `examples\pay-server\scripts\test.bat`（Linux/macOS：`test.sh`） |
 | 全量测试（ctest） | `ctest --test-dir build\windows-msvc -C Release --output-on-failure` |
-| 直接运行测试可执行 | `build\windows-msvc\tests\Release\PayBackendTests.exe` |
-| 完整测试脚本 | `examples\pay-server\scripts\test.bat` |
+| 直接运行测试可执行 | 先 `cd build\windows-msvc\tests\Release` 再 `.\PayBackendTests.exe` |
+| 单个用例 | `examples\pay-server\scripts\test.bat -l` 列名字，`-r <ExactName>` 跑一个 |
 
-测试框架为 Drogon 自带 `DROGON_TEST`（非 gtest）；测试目标: `PayBackendTests.exe` | 运行位置: 仓库根目录
+测试框架为 Drogon 自带 `DROGON_TEST`（非 gtest）；测试目标 `PayBackendTests`，
+整个套件只注册**一条** ctest 用例，所以 `ctest -R Foo` 匹配不到任何东西却仍
+exit 0——单用例过滤走脚本的 `-r`（它直接驱动二进制，名字不存在会 exit 1）。
+**运行位置是二进制自己的目录，不是仓库根**：`tests/main.cc` 只读 cwd 下的
+`./config.json` 与 `./.env`，这两个文件由 `build.bat` / `build.sh` 复制到二进制
+旁边；仓库根没有它们。
 
 ---
 
@@ -133,14 +139,22 @@
 
 | 平台 | 构建 | 测试 | 启动 |
 |------|------|------|------|
-| Windows | `examples\pay-server\scripts\build.bat` | `examples\pay-server\scripts\test.bat` | `.\build\windows-msvc\examples\pay-server\Release\PayServer.exe -c examples\pay-server\config.json` |
-| Linux/macOS | `cmake --preset linux-release && cmake --build --preset linux-release` | `ctest --test-dir build/linux-release` | `./build/linux-release/examples/pay-server/PayServer -c examples/pay-server/config.json` |
+| Windows | `examples\pay-server\scripts\build.bat` | `examples\pay-server\scripts\test.bat` | `cd build\windows-msvc\examples\pay-server\Release` 后 `.\PayServer.exe` |
+| Linux | `examples/pay-server/scripts/build.sh` | `examples/pay-server/scripts/test.sh` | `cd build/linux-release/examples/pay-server && ./PayServer` |
+| macOS | 同 Linux（脚本自动选 `macos-arm64`） | 同 Linux | `cd build/macos-arm64/examples/pay-server && ./PayServer` |
+
+`PayServer` **不接受任何命令行参数**（`examples/pay-server/main.cc` 的 `main()`
+没有 `argc/argv`）：配置固定读 cwd 下的 `./config.json`，密钥固定读 cwd 下的
+`./.env`，这两个文件由 `build.{bat,sh}` 复制到二进制旁边。所以启动必须先
+`cd` 到输出目录；写 `PayServer -c <path>` 不会报错，但 `-c` 会被静默忽略、
+加载的仍是 cwd 那份 config。真实凭据只经环境变量或 `.env`（已 gitignore）注入。
 
 | 监控端点 | 说明 |
 |----------|------|
-| `GET /healthz` / `GET /readyz` | 存活/就绪检查（宿主） |
-| `GET /health` | 健康检查（宿主） |
-| `GET /metrics` | Prometheus 指标（宿主） |
+| `GET /healthz` | 存活检查（宿主，进程活着即 200） |
+| `GET /readyz` | 就绪检查（宿主，真打 DB/Redis） |
+| `GET /health` | **已废弃**，`/readyz` 的别名，带 `Deprecation: true` + `Sunset: 2026-08-28` 响应头；新探针一律用 `/healthz`/`/readyz` |
+| `GET /metrics` | Prometheus 指标（宿主，仅回环地址） |
 | `GET /api/pay/metrics/auth` | 支付统计（JSON） |
 | `GET /api/pay/metrics/auth.prom` | 支付统计（Prometheus 文本） |
 
@@ -159,4 +173,5 @@
 
 ---
 
-**文档版本**: v2.1 | **最后更新**: 2026-09-18 | **维护者**: Pay Plugin 开发团队
+**维护者**: Pay Plugin 开发团队（版本与改动日期以 `git log -- CLAUDE.md` 为准，不
+手写戳记——`check_docs_drift.py` 的 `no-version-stamps` 规则会拒掉戳记）

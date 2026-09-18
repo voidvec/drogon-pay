@@ -102,8 +102,11 @@ bytes. The practical rules (see `TECH_SPECS.md` "迁移工程化" and the
 `/create-migration` skill for the full checklist):
 
 - Never write `psql -f sql/...` in a workflow or script — add the file to `sql/`
-  and the executor picks it up. Three hardcoded lists used to exist and one
-  silently skipped two migrations.
+  and the executor picks it up. Six copies of that list used to exist and they
+  had already drifted: the two in the CI workflows ran only `001`+`002` and
+  silently skipped the other two versions, while the deploy scripts globbed a
+  `sql/` path the plugin refactor had moved, so they applied nothing and still
+  logged success.
 - New migrations must be idempotent and non-destructive;
   `python scripts/check_migrations.py` enforces that plus naming and an
   unbroken version chain, and CI runs it as a hard gate.

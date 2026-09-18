@@ -101,7 +101,7 @@
 
 | 规范项 | 要求 |
 |--------|------|
-| 唯一执行器 | 任何工作流/脚本都不得自己写 `psql -f sql/...` 或 `for f in sql/*.sql`；曾经有三份硬编码清单，其中一份静默漏掉两条迁移 |
+| 唯一执行器 | 任何工作流/脚本都不得自己写 `psql -f sql/...` 或 `for f in sql/*.sql`。历史口径（`git show 043c5ed^` 可复核）：这样的清单曾有**六**份（`ci-linux.yml`、`ci-windows.yml`、旧 `coverage.yml`、`setup_database.bat`、`deploy.bat`、`deploy.sh`），其中 CI 两份只列了 001+002（四条版本静默漏两条），deploy 两份 glob 的是插件化改造后已搬走的 `sql/` 路径，于是一条都没应用却打印成功 |
 | 版本记账 | `schema_migrations(version, filename, sha256, applied_at)`；每条迁移与它的记账行在**同一事务**内提交，失败即整体回滚 |
 | 不可变 | 已应用的版本内容一旦被改：`migrate_db.py`（比对 `sha256`）与 `scripts/check_migrations.py`（比对 `scripts/migrations_baseline.json`）双双 exit 1；要改历史只能同一 PR 里手改基线 JSON。基线条目永久豁免内容规则，所以 `--write-missing` 钉新文件前会先跑这些规则，不合格就拒绝写入 |
 | 重置助手 | `sql/000_*.sql` 不属于版本链，执行器跳过它；开发库重置走 `setup_database.{sh,bat}`（`--reset-schema --confirm-drop <db>`），且**仅允许 loopback 主机**——远端主机是 staging/生产所在地，`--confirm-drop` 由脚本自动填写，真正拦住误用的是这条主机规则 |
@@ -133,9 +133,20 @@ python3 scripts/migrate_db.py                  # 应用缺口
 
 ### [MUST] 开发脚本跨平台对齐
 
-`examples/pay-server/scripts/` 下的每个开发脚本都有 `.sh` / `.bat` 两个孪生体
-（`build` / `test` / `setup_database` / `deploy`），二者**逐参数对齐**：同样的选项、
-同样的默认值、同样的退出码语义。
+面向开发者的**入口脚本**必须成对：`build` / `test` / `setup_database` /
+`deploy` / `check_config` 各有 `.sh` 与 `.bat` 两个孪生体，二者**逐参数对齐**：
+同样的选项、同样的默认值、同样的退出码语义。`check_docs_drift.py` 的
+`twin-scripts` 规则守着这个集合，少一边就红。
+
+其余脚本**有意**不成对，别按上面的规则去找它们：
+
+| 脚本 | 平台 | 原因 |
+|------|------|------|
+| `full_test.bat` | 仅 Windows | 它只是依次 `call` 另外四个 `.bat`（setup_database → generate_models → build → test）的编排壳；跨平台编排由 CI 承担 |
+| `generate_models.bat` | 仅 Windows | `drogon_ctl create model` 的交互确认壳，尚未移植；模型生成规范见 `/orm-gen` |
+| `run_server.bat` | 仅 Windows | 便利启动器（`cd` 到 `build\windows-msvc\...\Release` 再跑）；POSIX 侧一行 `cd && ./PayServer` 就够，见 `/build-and-test` |
+| `healthcheck.sh` | 仅 POSIX | 手工 curl 探针，**当前无任何文档/脚本引用它**；容器侧健康检查由 `docker-compose.yml` 的 `curl -f http://localhost:5566/healthz` 承担。要恢复使用就先在 `/docs` 里给出调用场景，否则删除 |
+| `e2e_test.sh` + `e2e_test.ps1` | 两端 | 刻意是 bash 与 **PowerShell**，不是 bash 与 cmd：脚本要用到数组与 `[[ ]]`，cmd 表达不了 |
 
 | 规范项 | 要求 |
 |--------|------|
@@ -354,16 +365,22 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 
 ### [MUST] 版本号一致性
 
-版本号只**声明**、不派生，且只允许出现在三处：`CMakeLists.txt` 的
+版本号只**声明**、不派生，**声明源只有三处**：`CMakeLists.txt` 的
 `project(drogon-pay VERSION x.y.z …)`、`conanfile.py` 的 `version = "x.y.z"`、
-`examples/pay-admin/package.json` 的顶层 `"version"`。
+`examples/pay-admin/package.json` 的顶层 `"version"`。`check_version_sync.py`
+只读这三处；文档里出现的版本号一律不受它管辖，因此把它们另立两类并各自动作：
+
+| 类别 | 位置 | 处理 |
+|------|------|------|
+| 声明源 | 上面三处 | 同一提交里一起改；三处不一致门禁就红 |
+| 已发布包引用 | `README.md`、`README.zh-CN.md`、`docs/development/plugin_integration.md` 里的 6 处 `drogon-pay/1.0.0` | 指的是**已发布**的那一版（`## [1.0.0] - 2026-07-31` 已打 tag），不是开发中的下一版；下一次发布 PR 必须同步改这三份文件，`check_version_sync.py` 挡不住它 |
+| 禁止复述 | 其余一切：配置/部署/告警文件的注释、文档页眉页脚的"版本/最后更新"戳 | 不得出现版本号或手工日期。历史 6 处 `# Version: 1.0.0` 注释已删；`docs/deployment/*`、`docs/operations/*` 四份文档的 16 行版本/日期戳（每份头尾各 4 行）也已删，git 才是真相，`check_docs_drift.py` 的 `no-version-stamps` 规则挡住回潮 |
 
 | 规范项 | 要求 |
 |--------|------|
 | 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言三处一致 |
 | 打 tag | `release.yml` 的 `version-check` job 以 `--tag "$GITHUB_REF_NAME"` 再跑一次：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段，缺段硬失败（先于任何构建，不浪费一个 Conan 编译周期） |
-| 禁止复述 | 配置/部署/告警文件的注释里不得再写版本号字符串——历史上那 6 处注释就是漂移源，已删除 |
-| 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 → 提交 PR → 合并后打 tag |
+| 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 + 已发布包引用 → 提交 PR → 合并后打 tag |
 
 ### [MUST] 日志分级规范
 
@@ -396,4 +413,5 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 
 ---
 
-**文档版本**: v1.1 | **最后更新**: 2026-09-18 | **维护者**: Pay Plugin 开发团队
+**维护者**: Pay Plugin 开发团队（版本与改动日期以 `git log -- TECH_SPECS.md` 为准，
+不手写戳记——`check_docs_drift.py` 的 `no-version-stamps` 规则会拒掉戳记）
