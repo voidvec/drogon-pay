@@ -8,7 +8,9 @@ set -e  # Exit on error
 # Configuration
 # ============================================================================
 SERVICE_NAME="${SERVICE_NAME:-payserver}"
-HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-http://localhost:5566/health}"
+# /readyz (not the deprecated /health alias, whose Sunset header already reads
+# 2026-08-28): the restart is only done once DB/Redis are actually reachable.
+HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-http://localhost:5566/readyz}"
 MAX_WAIT="${MAX_WAIT:-60}"
 
 # ============================================================================
