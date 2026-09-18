@@ -11,8 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
   gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
-  rejects backticked paths that don't exist in governance docs, and bans
-  gtest vocabulary outside archived history.
+  rejects backticked paths that don't exist in governance docs, bans
+  gtest vocabulary outside archived history, refuses migration versions the
+  `sql/` chain does not have, and (rule 5) requires a file held by both
+  `.claude/` and `.codex/` to be byte-identical — see Fixed.
 - **`scripts/clang_format.py`**: single pinned clang-format major (22) for
   CI, the agent PostToolUse hook and pre-commit — previously three
   consumers used three different versions (CI 22 / pre-commit 17 / bare
@@ -245,6 +247,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials in `.env.production` — one `git add .` away from committing a
   production password. `.env.*` is ignored now, with only the `.example`
   templates re-included.
+- **The second agent's copy of the rules had drifted, silently and in the
+  wrong direction.** Three `.codex/` files that mirror `.claude/` were stale:
+  `rules/db-operations.md` still listed three raw-SQL exemptions where the
+  source lists six and had no `Mapper`-construction section at all,
+  `skills/project-conventions/SKILL.md` still placed core logic in `pay-server`
+  (the path the plugin refactor replaced) and still described four log levels,
+  and `skills/orm-gen/SKILL.md` still told the operator to `cd` into
+  `pay-server` for the model tree. Nothing reads a mirror, so this is invisible
+  until an agent enforces a rule the code stopped having — rule 5 of
+  `scripts/check_docs_drift.py` now fails CI on it (verified: the guard passes
+  on the re-mirrored tree, and reports the byte counts after a one-line
+  injected drift, then clears when the file is restored). While re-mirroring,
+  the `.claude` source itself lost two authforge leftovers in the same file:
+  `StringListCallback` / `AccessTokenCallback` / `RefreshTokenCallback` name
+  types this repository does not declare anywhere, and `(*sharedCb)(...)` is
+  only half the idiom — the section now describes what
+  `libs/drogon-pay/src/services/` actually does (per-construction-site
+  `try/catch`, failure reported through the call site's own callback shape,
+  `OnceCallback::call` where a service wrapped it).
 
 ## [1.0.0] - 2026-07-31
 
