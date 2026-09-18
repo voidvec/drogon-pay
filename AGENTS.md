@@ -19,8 +19,16 @@ operational facts below apply to **any** coding agent working in this repo.
 |-------|---------|
 | Full suite (Linux) | `ctest --test-dir build/linux-release --output-on-failure` |
 | Full suite (Windows) | `ctest --test-dir build\windows-msvc -C Release --output-on-failure` |
+| Line coverage (Linux/gcc only) | `cmake --preset linux-coverage` + build + ctest, then `python3 scripts/measure_coverage.py --dir build/linux-coverage --report` — full recipe and ratchet rules in [TECH_SPECS.md](TECH_SPECS.md) "行覆盖率计量" |
 
 Test framework: Drogon `DROGON_TEST` (not gtest). Test target: `PayBackendTests`.
+Integration tests need Postgres+Redis on `127.0.0.1` with the `test` role and
+`pay_test` database (see `examples/pay-server/.env`, gitignored). The coverage
+baseline `SEED`s itself on the first green run of `.github/workflows/coverage.yml`;
+that job, not a laptop, is the source of truth for the numbers. On this
+machine WSL is NAT'd with its own (role-less) Postgres 16 on loopback, so a
+WSL `ctest` hangs on DB auth rather than failing — do not chase that as a
+code bug.
 
 ## Critical Constraints (always enforce)
 
