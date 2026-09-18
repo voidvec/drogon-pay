@@ -115,6 +115,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `setup_database.bat`, and the `.bat` lost its embedded default password: both
   now reset the schema, replay the chain through the executor and read
   credentials from the environment or `examples/pay-server/.env`.
+- **`examples/pay-server/scripts/build.sh` and `test.sh`**, the POSIX twins of
+  `build.bat` / `test.bat`. Same flags (`-debug` / `-release`; `-l`,
+  `-r <pattern>`, `-v`, `-o` on the test side), same exit codes, and they
+  resolve `uname` to the matching preset instead of asking the reader to paste a
+  four-line conan+cmake incantation. New `linux-debug` and `macos-debug` CMake
+  presets back the `-debug` flag on Unix — previously only Windows had a debug
+  preset, so the documented `-debug` was a Windows-only option. `test.bat` also
+  dropped its `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS=123456` block: no test
+  reads those names (the suite loads `.env` through `ConfigLoader`), so it was a
+  plausible-looking plaintext credential that did nothing. Every tracked
+  `examples/pay-server/**/*.sh` is now mode 100755 — the docs (and these scripts'
+  own headers) have always shown a bare `examples/pay-server/scripts/setup_database.sh`
+  invocation, which a 0644 checkout rejects.
+- **Version sync guard** (`scripts/check_version_sync.py`): the version is
+  declared in `CMakeLists.txt`, `conanfile.py` and `examples/pay-admin/package.json`,
+  and nothing else may restate it. Bare mode asserts the three agree; `--tag
+  vX.Y.Z` additionally requires the tag to equal them and `CHANGELOG.md` to
+  already carry that section. Six `# Version: 1.0.0` comment lines in
+  `examples/pay-server/deploy/` were deleted as the drift they had already
+  caused.
 
 ### Changed
 

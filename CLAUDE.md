@@ -26,10 +26,13 @@
 
 | 命令 | 说明 |
 |------|------|
-| `examples\pay-server\scripts\build.bat` | Release 模式（默认，脚本自动切到仓库根） |
-| `examples\pay-server\scripts\build.bat -debug` | Debug 模式 |
+| `examples\pay-server\scripts\build.bat` | Windows Release 模式（默认，脚本自动切到仓库根） |
+| `examples\pay-server\scripts\build.bat -debug` | Windows Debug 模式 |
+| `examples/pay-server/scripts/build.sh` | Linux/macOS Release，参数与 `.bat` 完全一致 |
+| `examples/pay-server/scripts/build.sh -debug` | Linux/macOS Debug（`linux-debug` / `macos-debug` 预设） |
 
-**注意**: 使用 build.bat 确保 Conan 依赖正确配置，避免直接使用 CMake 或 Visual Studio 构建。
+**注意**: 使用 build 脚本确保 Conan 依赖正确配置，避免直接使用 CMake 或 Visual Studio 构建。
+两套脚本逐参数对齐，新增选项时必须同时改。
 
 ---
 

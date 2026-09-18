@@ -9,17 +9,23 @@ operational facts below apply to **any** coding agent working in this repo.
 
 | Platform | Command |
 |----------|---------|
-| Linux | `conan install . --output-folder=build/linux-release -s build_type=Release -s compiler.cppstd=17 --build=missing && cmake --preset linux-release && cmake --build --preset linux-release -j$(nproc)` |
-| macOS | `conan install . --output-folder=build/macos-arm64 -s build_type=Release -s compiler.cppstd=17 -s arch=armv8 --build=missing && cmake --preset macos-arm64 && cmake --build --preset macos-arm64 -j$(sysctl -n hw.ncpu)` |
-| Windows | `examples\pay-server\scripts\build.bat` (preferred; auto-runs Conan) |
+| Linux | `examples/pay-server/scripts/build.sh` (Release; `-debug` for `linux-debug`) |
+| macOS | `examples/pay-server/scripts/build.sh` (Release; `-debug` for `macos-debug`) |
+| Windows | `examples\pay-server\scripts\build.bat` (Release; `-debug` for `windows-msvc-debug`) |
+
+The two scripts take the same flags and do the same thing: `conan install . --output-folder=build/<preset>
+-s build_type=<Release|Debug> -s compiler.cppstd=17 --build=missing` (plus `-s arch=armv8` on macOS), then
+`cmake --preset <preset>` and `cmake --build --preset <preset>`, then copy `config.json`/`.env`/`certs/`
+next to the binaries. The raw Conan+CMake sequence in those scripts is the fallback for custom
+configurations.
 
 ### Test
 
 | Scope | Command |
 |-------|---------|
-| Full suite (Linux) | `ctest --test-dir build/linux-release --output-on-failure` |
-| Full suite (Windows) | `ctest --test-dir build\windows-msvc -C Release --output-on-failure` |
-| Full suite (macOS) | `ctest --test-dir build/macos-arm64 --output-on-failure` |
+| Full suite (Linux/macOS) | `examples/pay-server/scripts/test.sh` |
+| Full suite (Windows) | `examples\pay-server\scripts\test.bat` |
+| Raw ctest (after a build) | `ctest --test-dir build/<preset> --output-on-failure` (add `-C Release` for the MSVC presets) |
 | Line coverage (Linux/gcc only) | `cmake --preset linux-coverage` + build + ctest, then `python3 scripts/measure_coverage.py --dir build/linux-coverage --report` — full recipe and ratchet rules in [TECH_SPECS.md](TECH_SPECS.md) "行覆盖率计量" |
 
 Test framework: Drogon `DROGON_TEST` (not gtest). Test target: `PayBackendTests`.
@@ -76,6 +82,16 @@ Creating or dropping the *database* is provisioning: the app role has no
 `CREATEDB`, so the executor only probes and prints the superuser command.
 Rules in [TECH_SPECS.md](TECH_SPECS.md) "迁移工程化"; new files via
 `/create-migration`.
+
+### Versioning
+
+The version is declared three times and never derived: `project(drogon-pay
+VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level
+`"version"` in `examples/pay-admin/package.json`. `scripts/check_version_sync.py`
+enforces it: the FAST gate runs it with no arguments, which requires the three
+declarations to agree. Never hand-write a version into a deploy/config comment:
+those strings were the drift source and have been deleted. Bumping = three
+declarations + a new CHANGELOG section, then tag.
 
 ## Critical Constraints (always enforce)
 

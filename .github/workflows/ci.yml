@@ -82,6 +82,12 @@ jobs:
       - name: Migration hygiene guard
         run: python3 scripts/check_migrations.py
 
+      # Version is declared three times (CMakeLists / conanfile / pay-admin);
+      # catching the drift here means a tagged release never discovers that a
+      # PR could have fixed it.
+      - name: Version sync guard
+        run: python3 scripts/check_version_sync.py
+
       # Two halves of one gate, split so a stale spec and a stale exclusion
       # list produce different failing step names. The checker parses a
       # YAML subset with the stdlib only: GitHub's ubuntu runners ship
