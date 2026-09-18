@@ -121,6 +121,13 @@ declarations in the same commit, then `git tag v1.2.3 && git push --tags`.
 Do not restate the version in config or deploy comments; that is how it drifted before
 the checker existed.
 
+Pushing a `v*` tag runs `.github/workflows/release.yml`: `version-check` (the same
+script with `--tag "$GITHUB_REF_NAME"`, so a tag whose version is not in the tree or
+whose CHANGELOG section is missing fails in seconds), then `sdk-smoke` — the consumer
+`conan create` + `test_package` gate from `_sdk-smoke.yml`, on Linux and Windows —
+and only then `publish`, which uses that CHANGELOG section as the release body. Use
+`/release` for the runbook; do not create the release by hand.
+
 ## Contributing a payment channel
 
 New channels are host-side plugins, not library edits, in most cases:
