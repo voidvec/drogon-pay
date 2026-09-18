@@ -8,6 +8,7 @@ setlocal enabledelayedexpansion
 REM Configuration
 set SCRIPT_DIR=%~dp0
 set PROJECT_ROOT=%SCRIPT_DIR%..
+set REPO_ROOT=%SCRIPT_DIR%..\..\..
 set BUILD_DIR=%PROJECT_ROOT%\build
 set DEPLOY_ENV=%1
 if "%DEPLOY_ENV%"=="" set DEPLOY_ENV=development
@@ -79,13 +80,14 @@ REM Setup database
 call :log_info Setting up database...
 
 REM Check if PostgreSQL is running
-pg_isquiet -h %DB_HOST% -p %DB_PORT% -U %DB_USER%
+pg_isready -h %DB_HOST% -p %DB_PORT% -U %DB_USER%
 if errorlevel 1 (
     call :log_error Cannot connect to PostgreSQL at %DB_HOST%:%DB_PORT%
     exit /b 1
 )
 
-REM Check if database exists
+REM Provisioning: the app role has no CREATEDB, so creating the database is a
+REM superuser step and stays here rather than moving into the executor.
 psql -h %DB_HOST% -p %DB_PORT% -U %DB_USER% -lqt ^| findstr %DB_NAME% >nul
 if errorlevel 1 (
     call :log_info Creating database: %DB_NAME%
@@ -94,13 +96,16 @@ if errorlevel 1 (
     call :log_warn Database %DB_NAME% already exists
 )
 
-REM Run migrations
+REM Apply migrations with the one executor. This used to be a
+REM "for %%f in (%PROJECT_ROOT%\sql\*.sql)" loop, which was dead twice over:
+REM sql/ moved to the repository root after the plugin refactor, so the glob
+REM matched nothing and the step quietly succeeded without applying anything.
 call :log_info Running database migrations...
-for %%f in ("%PROJECT_ROOT%\sql\*.sql") do (
-    if exist "%%f" (
-        call :log_info Running migration: %%~nxf
-        psql -h %DB_HOST% -p %DB_PORT% -U %DB_USER% -d %DB_NAME% -f "%%f"
-    )
+python "%REPO_ROOT%\scripts\migrate_db.py" ^
+    --host %DB_HOST% --port %DB_PORT% --user %DB_USER% --db %DB_NAME%
+if errorlevel 1 (
+    call :log_error migrate_db.py failed - see its output above
+    exit /b 1
 )
 
 call :log_info Database setup complete

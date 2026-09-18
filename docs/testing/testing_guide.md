@@ -101,7 +101,9 @@ Tests run automatically on:
 
 ## Test Data Management
 
-- Use a test database schema (run `sql/000_drop_pay_tables.sql` reset, then
-  `sql/001_init_pay_tables.sql` … `sql/004_ledger_fk.sql` setup)
+- Build the test schema with the migration executor, not by hand:
+  `examples/pay-server/scripts/setup_database.sh` (or `.bat`) resets the schema
+  and replays `sql/NNN_*.sql` through `scripts/migrate_db.py`; add `--keep-data`
+  to apply only what is missing
 - The test config points at a throwaway database; isolate per CI run
 - External provider calls are stubbed via test channels (no real network)

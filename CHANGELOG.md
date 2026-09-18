@@ -92,6 +92,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no definition. Stdlib-only, because the FAST gate must not depend on
   PyYAML being present on the runner. The `openapi-update` skill was
   rewritten around this gate (both mirrors).
+- **Migration executor** (`scripts/migrate_db.py`, stdlib-only, shells out to
+  `psql`): the only code that knows which files exist. It discovers
+  `sql/NNN_*.sql`, applies what is missing in version order, commits each
+  migration together with its `schema_migrations` row (version / filename /
+  sha256 / applied_at) inside one transaction, refuses to run when an applied
+  version's bytes changed, warns when recorded tables were dropped out-of-band,
+  and adds `--status` / `--dry-run` / `--baseline` (adopt a database an
+  `initdb.d` mount already provisioned, rejected unless the tables are really
+  there) / `--reset-schema --confirm-drop <db>`. Creating or dropping the
+  *database* stayed out of it on purpose — the app role has no `CREATEDB`, so a
+  failed `DROP DATABASE` cannot be undone by the same connection; the executor
+  only probes `pg_database` and prints the superuser command.
+- **Migration hygiene guard** (`scripts/check_migrations.py`, CI
+  `static-analysis` step): naming, an unbroken version chain, idempotence and
+  non-destruction, plus a sha256 pin of history in
+  `scripts/migrations_baseline.json`. Content rules apply only to migrations
+  that are not yet baselined — `001`–`004` predate the guard and are pinned as
+  they are, while a new file must pass. `--write-missing` pins new versions and
+  never rewrites an existing entry.
+- **`examples/pay-server/scripts/setup_database.sh`**, the POSIX twin of
+  `setup_database.bat`, and the `.bat` lost its embedded default password: both
+  now reset the schema, replay the chain through the executor and read
+  credentials from the environment or `examples/pay-server/.env`.
 
 ### Changed
 
@@ -134,6 +157,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     payload shapes.
   - `updated_at` was documented as caller-maintained; the
     `update_*_modtime` triggers in `sql/001_init_pay_tables.sql` set it.
+- **The deploy scripts never applied a migration.** `deploy.bat` and
+  `deploy.sh` looped over `%PROJECT_ROOT%\sql\*.sql`, but `sql/` moved to the
+  repository root at the plugin refactor and `PROJECT_ROOT` is
+  `examples/pay-server`, so the glob matched nothing and the step reported
+  success while applying zero schema. (Before the move the same loop had run
+  `000_drop_pay_tables.sql` as if it were a version — the 2026-07-07
+  production-readiness gap analysis called that "not zero-downtime,
+  zero-data".) Both now call the executor, which cannot silently find nothing.
+  Adjacent typos in the same routines: `pg_isquiet` (not a program) made every
+  `deploy.bat` run abort at the connectivity check, and a required-dependency
+  named `pgredis` made every `deploy.sh` run abort before building.
+- **The Linux CI migration step had no password.** `_build-test.yml` applied
+  the chain with `psql -h 127.0.0.1 -U test` inside a step that never set
+  `PGPASSWORD`, while the readiness probe above it passed
+  `PGPASSWORD=123456` inline; on a password-authenticated container the step
+  could only fail once it stopped being the first psql call.
 
 ## [1.0.0] - 2026-07-31
 

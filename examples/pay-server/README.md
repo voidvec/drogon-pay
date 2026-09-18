@@ -21,7 +21,9 @@
 
 - PostgreSQL 13+ 与 Redis 6+（本示例启用了 Redis 幂等缓存；纯数据库幂等
   可从 config.json 删除 `redis_client` 键）
-- 按序执行仓库根 `sql/001` ~ `004` 建表脚本
+- 表结构用仓库根的唯一执行器建：`examples/pay-server/scripts/setup_database.sh`
+  （Windows 用同目录 `.bat`），它调用 `scripts/migrate_db.py` 重置 schema 并按
+  版本号重放 `sql/` 链，同时在 `schema_migrations` 里记账
 
 ### 2. 配置环境变量
 
