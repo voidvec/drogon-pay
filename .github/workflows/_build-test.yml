@@ -1,0 +1,266 @@
+name: Reusable — Build & Test
+
+# workflow_call body for ONE platform leg of the MAIN CI gate. Linux / Windows /
+# macOS run the identical Conan + `cmake --preset` + ctest pipeline; every
+# platform difference is expressed either as an input or as an `if:` on a
+# provisioning step, never as a copied pipeline.
+#
+# Reusable-workflow input names use underscores only: GitHub parses `-` inside
+# `${{ inputs.x }}` as subtraction.
+#
+# Shell policy: `defaults.run.shell: bash` unifies the build/test steps (Git for
+# Windows ships bash on the runner). The Windows service/database provisioning
+# stays on pwsh because `Get-Service`/`Set-Service`/`Start-Service` and the
+# `$env:PGBIN` launcher have no bash equivalent — a single shell is worth
+# having for the shared logic, not worth rewriting the one proven
+# Windows-only service-management block for.
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: "linux | windows | macos — selects the Postgres/Redis provisioning path"
+        type: string
+        required: true
+      runs_on:
+        description: "GitHub runner label (e.g. ubuntu-22.04)"
+        type: string
+        required: true
+      cmake_preset:
+        description: "CMake configure/build preset name (e.g. linux-release)"
+        type: string
+        required: true
+      preset_dir:
+        description: "Preset binary dir relative to the repo (e.g. build/linux-release)"
+        type: string
+        required: true
+      build_type:
+        description: "Conan/CMake build type"
+        type: string
+        required: false
+        default: Release
+      conan_extra_settings:
+        description: "Extra `conan install` settings (e.g. -s arch=armv8)"
+        type: string
+        required: false
+        default: ""
+      configure_extra_args:
+        description: "Extra `cmake --preset` args (e.g. -DDROGON_PAY_WERROR=ON)"
+        type: string
+        required: false
+        default: ""
+      use_database:
+        description: "Provision Postgres+Redis, apply migrations and run ctest; false means build-only"
+        type: boolean
+        required: false
+        default: false
+      ctest_timeout:
+        description: "Per-test timeout seconds (the suite is a single ctest entry)"
+        type: number
+        required: false
+        default: 120
+      timeout_minutes:
+        description: "Job timeout in minutes"
+        type: number
+        required: false
+        default: 90
+      log_artifact_name:
+        description: "Artifact name for the logs uploaded on failure"
+        type: string
+        required: true
+
+jobs:
+  build-test:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      BUILD_TYPE: ${{ inputs.build_type }}
+      CMAKE_PRESET: ${{ inputs.cmake_preset }}
+      PRESET_DIR: ${{ inputs.preset_dir }}
+      # Ephemeral CI-only credentials, identical to the values the Postgres
+      # containers/roles below are provisioned with. Nothing here is a secret:
+      # the runners are single-use and the database is throwaway.
+      PAY_DB_HOST: "127.0.0.1"
+      PAY_REDIS_HOST: "127.0.0.1"
+      PAY_DB_PASSWORD: "123456"
+      PAY_REDIS_PASSWORD: ""
+      PAY_API_KEY: "test_key_123456"
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # psql/pg_isready and redis-cli are needed by the readiness probes, so
+      # install them before the build instead of after it as the legacy
+      # per-platform workflows did.
+      - name: Install database clients (Linux)
+        if: inputs.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
+
+      - name: Install Conan
+        if: inputs.platform != 'macos'
+        run: |
+          pip install conan
+          conan profile detect --force
+
+      - name: Install Conan (macOS)
+        if: inputs.platform == 'macos'
+        run: |
+          brew update
+          brew install conan
+          conan profile detect --force
+
+      # --- Conan dependency cache ---
+      # Keyed on conanfile.py + conan.lock so the store is invalidated exactly
+      # when the pinned dependency graph can have changed. The key format is
+      # deliberately unchanged from the per-platform workflows: a new key means
+      # every platform rebuilds drogon/openssl from source once.
+      - name: Cache Conan packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.conan2/p
+          key: ${{ runner.os }}-conan2-${{ hashFiles('conanfile.py', 'conan.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-conan2-
+
+      - name: Install dependencies (Conan)
+        run: |
+          conan install . --output-folder="$PRESET_DIR" \
+            -s build_type="$BUILD_TYPE" -s compiler.cppstd=17 \
+            ${{ inputs.conan_extra_settings }} --build=missing
+
+      - name: Configure (cmake --preset)
+        run: cmake --preset "$CMAKE_PRESET" ${{ inputs.configure_extra_args }}
+
+      - name: Build (cmake --build --preset)
+        # VS already builds in parallel; only the Makefile generators need -j.
+        run: |
+          case "$RUNNER_OS" in
+            Windows) jobs="" ;;
+            macOS)   jobs="-j $(sysctl -n hw.ncpu)" ;;
+            *)       jobs="-j $(nproc)" ;;
+          esac
+          cmake --build --preset "$CMAKE_PRESET" $jobs
+
+      # --- Test infrastructure -------------------------------------------------
+      # Linux runs Postgres/Redis as plain containers rather than job `services`
+      # because a service block cannot be conditioned per matrix leg, and
+      # `docker logs` on a timeout is the only readable forensics we get.
+      - name: Start PostgreSQL and Redis and wait for readiness (Linux)
+        if: inputs.use_database && inputs.platform == 'linux'
+        run: |
+          docker run -d --name pay-postgres \
+            -e POSTGRES_USER=test -e POSTGRES_PASSWORD=123456 -e POSTGRES_DB=pay_test \
+            -p 5432:5432 postgres:15-alpine
+          docker run -d --name pay-redis -p 6379:6379 redis:7-alpine
+
+          echo "Waiting for Postgres (SELECT 1 probe)..."
+          ok=""
+          for i in $(seq 1 30); do
+            if PGPASSWORD=123456 psql -h 127.0.0.1 -U test -d pay_test -c 'SELECT 1' >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            echo "  Postgres not ready yet (attempt $i/30)..."; sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Postgres never became ready"
+            docker logs pay-postgres || true
+            exit 1
+          fi
+
+          echo "Waiting for Redis..."
+          ok=""
+          for i in $(seq 1 15); do
+            if redis-cli -h 127.0.0.1 ping | grep -q PONG; then
+              ok=yes; break
+            fi
+            echo "  Redis not ready yet (attempt $i/15)..."; sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Redis never became ready"
+            docker logs pay-redis || true
+            exit 1
+          fi
+
+      # GitHub-hosted Windows runners do not support service containers, so the
+      # runner image's own PostgreSQL service plus Chocolatey-installed Memurai
+      # stand in for the Linux containers.
+      - name: Start PostgreSQL (runner built-in, Windows)
+        if: inputs.use_database && inputs.platform == 'windows'
+        shell: pwsh
+        run: |
+          $pgService = Get-Service -Name "postgresql*" | Select-Object -First 1
+          if (-not $pgService) { Write-Error "No PostgreSQL service found on runner"; exit 1 }
+          Set-Service -InputObject $pgService -StartupType Manual
+          Start-Service -InputObject $pgService
+          & "$env:PGBIN\pg_isready.exe" -h 127.0.0.1
+          if ($LASTEXITCODE -ne 0) { Write-Error "PostgreSQL is not ready"; exit 1 }
+
+      - name: Install Redis (Memurai, Windows)
+        if: inputs.use_database && inputs.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install memurai-developer -y --no-progress
+          # Memurai installs as an auto-started Windows service on port 6379
+          $ready = $false
+          for ($i = 1; $i -le 15; $i++) {
+            if ((Test-NetConnection 127.0.0.1 -Port 6379 -WarningAction SilentlyContinue).TcpTestSucceeded) { $ready = $true; break }
+            Write-Host "  Redis not ready yet (attempt $i/15)..."
+            Start-Sleep -Seconds 2
+          }
+          if (-not $ready) { Write-Error "Redis (Memurai) did not become ready on port 6379"; exit 1 }
+
+      # Apply every versioned migration in filename order. `000_*` is the dev
+      # reset tool and deliberately sits outside the version chain, so it is
+      # skipped by name — a plain sql/*.sql glob would drop the schema.
+      - name: Initialize Database (Unix)
+        if: inputs.use_database && inputs.platform != 'windows'
+        run: |
+          for f in sql/*.sql; do
+            base=$(basename "$f")
+            case "$base" in
+              000_*) echo "Skipping $f (dev reset tool, not a version)"; continue ;;
+            esac
+            echo "Applying $f"
+            psql -h 127.0.0.1 -U test -d pay_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Initialize Database (Windows)
+        if: inputs.use_database && inputs.platform == 'windows'
+        shell: pwsh
+        run: |
+          # Runner image ships PostgreSQL with superuser postgres / password root
+          $env:PGPASSWORD = "root"
+          & "$env:PGBIN\psql" -h 127.0.0.1 -U postgres -c "CREATE USER test WITH PASSWORD '123456';"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:PGBIN\psql" -h 127.0.0.1 -U postgres -c "CREATE DATABASE pay_test OWNER test;"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:PGPASSWORD = "123456"
+          $files = Get-ChildItem -Path sql -Filter '*.sql' |
+            Where-Object { $_.Name -notlike '000_*' } | Sort-Object Name
+          foreach ($f in $files) {
+            Write-Host "Applying $($f.Name)"
+            & "$env:PGBIN\psql" -h 127.0.0.1 -U test -d pay_test -v ON_ERROR_STOP=1 -f $f.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Error "Migration $($f.Name) failed"; exit 1 }
+          }
+
+      # The whole DROGON_TEST suite is registered as a single ctest entry
+      # (tests/CMakeLists.txt), so ctest_timeout bounds the entire binary.
+      - name: Test
+        if: inputs.use_database
+        working-directory: ${{ github.workspace }}/${{ inputs.preset_dir }}
+        run: ctest -C "$BUILD_TYPE" --output-on-failure --timeout ${{ inputs.ctest_timeout }}
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.log_artifact_name }}
+          path: |
+            ${{ github.workspace }}/${{ inputs.preset_dir }}/Testing/
+            ${{ github.workspace }}/logs/
+          retention-days: 7

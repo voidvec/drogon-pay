@@ -1,0 +1,89 @@
+name: Reusable — SDK Smoke
+
+# workflow_call body for the RELEASE gate: consume the library the way an
+# external user does. `conan create` packages the drogon-pay recipe and runs
+# test_package, which find_package(DrogonPay)-links a minimal Drogon host,
+# loads PayPlugin from a config block and asserts the registered routes are
+# reachable (catches the static-library symbol-drop / route-404 failure mode
+# that a same-tree build can never see).
+#
+# Deliberately DB-free: test_package points the plugin at an in-memory sqlite3
+# client, so this gate needs no Postgres/Redis services on any platform.
+#
+# Both legs matter and neither is a duplicate: the linker behaviour that drops
+# plugin registration symbols is platform-specific (GNU ar vs MSVC /link).
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: "linux | windows — labels the run and selects the Conan installer"
+        type: string
+        required: true
+      runs_on:
+        description: "GitHub runner label (e.g. ubuntu-22.04)"
+        type: string
+        required: true
+      conan_extra_settings:
+        description: "Extra `conan create` settings (e.g. -s arch=armv8)"
+        type: string
+        required: false
+        default: ""
+      timeout_minutes:
+        description: "Job timeout in minutes"
+        type: number
+        required: false
+        default: 120
+
+jobs:
+  sdk-smoke:
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Conan
+        run: |
+          pip install conan
+          conan profile detect --force
+
+      # Same key scheme as _build-test.yml so the two gates share one dependency
+      # store per runner OS — drogon/openssl are built from source at most once.
+      - name: Cache Conan packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.conan2/p
+          key: ${{ runner.os }}-conan2-${{ hashFiles('conanfile.py', 'conan.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-conan2-
+
+      - name: conan create (recipe + test_package)
+        run: |
+          conan create . --build=missing \
+            -s build_type=Release -s compiler.cppstd=17 \
+            ${{ inputs.conan_extra_settings }} 2>&1 | tee conan-create.log
+
+      # test_package() skips the binary when Conan decides it cannot run
+      # (can_run() false), and a skipped smoke is indistinguishable from a
+      # passed one at the exit-code level. Demand the success marker instead.
+      - name: Assert the consumer smoke actually ran
+        run: |
+          if ! grep -q '\[test_package\] OK' conan-create.log; then
+            echo "::error::test_package never reported OK - the consumer smoke did not run"
+            tail -n 80 conan-create.log
+            exit 1
+          fi
+          echo "consumer smoke reported OK"
+
+      - name: Upload Conan log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdk-smoke-${{ inputs.platform }}-logs
+          path: conan-create.log
+          retention-days: 7
