@@ -3,7 +3,6 @@
 #include "../models/PayOrder.h"
 #include "../models/PayPayment.h"
 #include "../models/PayLedger.h"
-#include "../models/PayIdempotency.h"
 #include "../utils/PayUtils.h"
 #include "../utils/OnceCallback.h"
 #include <drogon/drogon.h>
@@ -21,7 +20,6 @@ using PayRefundModel = drogon_model::pay_test::PayRefund;
 using PayOrderModel = drogon_model::pay_test::PayOrder;
 using PayPaymentModel = drogon_model::pay_test::PayPayment;
 using PayLedgerModel = drogon_model::pay_test::PayLedger;
-using PayIdempotencyModel = drogon_model::pay_test::PayIdempotency;
 }  // namespace
 
 namespace
@@ -146,49 +144,6 @@ void insertLedgerEntry(
               }
           },
           [](const DrogonDbException &e) { LOG_WARN << "Ledger lookup error: " << e.base().what(); }
-        );
-    }
-    catch (const std::exception &e)
-    {
-        LOG_WARN << "[RefundService] Mapper construction failed: " << e.what();
-    }
-    catch (...)
-    {
-        LOG_WARN << "[RefundService] Mapper construction failed: unknown exception";
-    }
-}
-
-void storeIdempotencySnapshot(
-  const std::shared_ptr<DbClient> &dbClient,
-  const std::string &idempotencyKey,
-  const std::string &requestHash,
-  const std::string &responseSnapshot,
-  int64_t ttlSeconds
-)
-{
-    if (!dbClient || idempotencyKey.empty())
-    {
-        return;
-    }
-
-    PayIdempotencyModel idemp;
-    idemp.setIdempotencyKey(idempotencyKey);
-    idemp.setRequestHash(requestHash);
-    idemp.setResponseSnapshot(responseSnapshot);
-    const auto now = trantor::Date::now();
-    const auto expiresAt =
-      trantor::Date(now.microSecondsSinceEpoch() + ttlSeconds * static_cast<int64_t>(1000000));
-    idemp.setExpireAt(expiresAt);
-
-    try
-    {
-        Mapper<PayIdempotencyModel> idempMapper(dbClient);
-        idempMapper.insert(
-          idemp,
-          [](const PayIdempotencyModel &) {},
-          [](const DrogonDbException &e) {
-              LOG_WARN << "Idempotency insert error: " << e.base().what();
-          }
         );
     }
     catch (const std::exception &e)
