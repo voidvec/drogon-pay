@@ -229,7 +229,7 @@ REFUND_INIT ──(channel call)──> REFUND_PROCESSING ──(callback)──
 |----------|------|------|
 | 单元测试 | 覆盖率由 CI 棘轮基线守护（`scripts/measure_coverage.py` + `scripts/coverage_baseline.json`），禁止口头指标 | Drogon `DROGON_TEST` |
 | 集成测试 | API 接口级验证，依赖真实 Postgres/Redis | Drogon `DROGON_TEST` + CI service 容器 |
-| 端到端测试 | 完整支付流程验证 | `tests/e2e_test.sh` / `tests/e2e_test.ps1` |
+| 端到端测试 | 完整支付流程验证 | `examples/pay-server/scripts/e2e_test.sh` / `e2e_test.ps1` |
 
 ### [MUST] 测试数据管理
 

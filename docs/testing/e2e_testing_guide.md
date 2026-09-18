@@ -24,14 +24,14 @@ cd examples/pay-server
 
 **Linux/Mac (Bash):**
 ```bash
-cd tests
+cd examples/pay-server/scripts
 chmod +x e2e_test.sh
 ./e2e_test.sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-cd tests
+cd examples\pay-server\scripts
 .\e2e_test.ps1
 ```
 
@@ -314,7 +314,7 @@ jobs:
           sleep 5
       - name: Run E2E Tests
         run: |
-          cd tests
+          cd examples/pay-server/scripts
           ./e2e_test.sh
 ```
 
@@ -370,5 +370,5 @@ jobs:
 ---
 
 **创建时间：** 2026-04-11
-**脚本位置：** `tests/e2e_test.sh` (Bash), `tests/e2e_test.ps1` (PowerShell)
+**脚本位置：** `examples/pay-server/scripts/e2e_test.sh` (Bash), `examples/pay-server/scripts/e2e_test.ps1` (PowerShell)
 **状态：** ✅ 完成 - 可立即使用

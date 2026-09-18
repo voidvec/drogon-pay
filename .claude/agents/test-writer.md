@@ -26,13 +26,15 @@ manual request.
   `CHECK_FALSE`, `CHECK_EQ`/`CHECK_THROWS` also exist but this repo mostly
   uses `CHECK`/`REQUIRE` with explicit comparisons
 - Runner: single binary `PayBackendTests` built from `tests/`
-  (`test_main.cc` boots the Drogon app; tests run against the configured
-  test port, see `TestConfigHelper.h`)
+  (`tests/main.cc` boots the Drogon app; tests run against the configured
+  test port, see `TestConfigHelper.h`). New pure-logic files go to
+  `tests/unit/`; anything touching the HTTP server, DB or Redis goes to
+  `tests/integration/`.
 
 ### Async callback pattern (the house style)
 
 Services are callback-based; tests bridge with `std::promise`/`future` and a
-timeout, mirroring `tests/CreatePaymentIntegrationTest.cc`:
+timeout, mirroring `tests/integration/CreatePaymentIntegrationTest.cc`:
 
 ```cpp
 DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
@@ -87,6 +89,8 @@ Before writing tests, verify:
       `PAY_API_KEY=test_key_123456` style env defaults already in CI)
 - [ ] Idempotency behavior tested for payment create and refund
 - [ ] `tests/CMakeLists.txt` updated if a new test file is added
+      (explicit list; file registered under the unit or integration section
+      matching its dependencies)
 
 ## Naming Convention
 

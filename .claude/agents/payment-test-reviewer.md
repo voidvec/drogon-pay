@@ -231,8 +231,8 @@ build/windows-msvc/tests/Release/PayBackendTests.exe
 ## 相关文件
 
 - 代码审查: `.claude/skills/code-review/SKILL.md`
-- 测试文件: `tests/*.cc`
+- 测试文件: `tests/unit/*.cc`, `tests/integration/*.cc`
 - Service 定义: `libs/drogon-pay/src/services/*.h`
-- 迁移示例: `tests/CreatePaymentIntegrationTest.cc`
+- 迁移示例: `tests/integration/CreatePaymentIntegrationTest.cc`
 - 构建: `examples\pay-server\scripts\build.bat`
 - 测试运行: `build/windows-msvc/tests/Release/PayBackendTests.exe`

@@ -6,30 +6,36 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(TEST_SRC
-    CallbackControllerTest.cc     # P0: controller-level callback validation (C1-2, C2-1)
-    ConfigLoaderTest.cc
-    CreatePaymentIntegrationTest.cc  # [PASS] Updated to new API
-    ControllerMetricsTest.cc
-    HealthProbeTest.cc
-    HttpResponseHeadersTest.cc    # P2: CORS preflight + security headers
-    IdempotencyIntegrationTest.cc
-    OnceCallbackTest.cc
-    PayErrorCategoryTest.cc       # P3-7.2: PayErrorCategory singleton + concurrent
-    QueryOrderListAndReconcileTest.cc  # P1: queryOrderList + reconcileSummary params
-    test_main.cc
-    AuthCheckTest.cc
-    RouteRegistrationSmokeTest.cc
-    PayAuthMetricsTest.cc
-    PayUtilsTest.cc
-    QueryOrderTest.cc
-    WechatPayClientTest.cc
-    WechatCallbackIntegrationTest.cc  # [PASS] Updated to new API (Phase 3)
-    RefundQueryTest.cc  # [PASS] Updated to new API (Phase 3)
-    ReconcileSummaryTest.cc  # [PASS] Updated to new API (Phase 3)
-    StartupValidatorTest.cc
+    main.cc
+    # Unit tests: no HTTP/DB round-trip, pure logic of host and library helpers.
+    unit/AuthCheckTest.cc
+    unit/ConfigLoaderTest.cc
+    unit/ControllerMetricsTest.cc
+    unit/OnceCallbackTest.cc
+    unit/PayAuthMetricsTest.cc
+    unit/PayUtilsTest.cc
+    unit/StartupValidatorTest.cc
+    # Integration tests: exercise the running Drogon app, DB or HTTP surface.
+    integration/CallbackControllerTest.cc    # P0: controller-level callback validation (C1-2, C2-1)
+    integration/CreatePaymentIntegrationTest.cc
+    integration/HealthProbeTest.cc
+    integration/HttpResponseHeadersTest.cc   # P2: CORS preflight + security headers
+    integration/IdempotencyIntegrationTest.cc
+    integration/PayErrorCategoryTest.cc      # P3-7.2: PayErrorCategory singleton + concurrent
+    integration/QueryOrderListAndReconcileTest.cc  # P1: queryOrderList + reconcileSummary params
+    integration/QueryOrderTest.cc
+    integration/ReconcileSummaryTest.cc
+    integration/RefundQueryTest.cc
+    integration/RouteRegistrationSmokeTest.cc
+    integration/WechatCallbackIntegrationTest.cc
+    integration/WechatPayClientTest.cc
 )
 
 add_executable(${PROJECT_NAME} ${TEST_SRC})
+
+# TestConfigHelper.h lives at tests/ and is included by tests in both
+# subdirectories.
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Business sources come from the pay_core object library defined in
 # libs/drogon-pay (no more per-file recompilation). pay_core carries the
@@ -62,27 +68,25 @@ endif()
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE
         /bigobj  # Required for large object files (test files with lots of templates)
+        /utf-8   # Same source-encoding contract as the library targets
     )
 endif()
+
+# Test fixtures mint legacy RSA keys directly (RSA_new/RSA_generate_key_ex);
+# the deprecated-API warning is expected noise here and would break the
+# DROGON_PAY_WERROR=ON gate.
+target_compile_definitions(${PROJECT_NAME} PRIVATE OPENSSL_SUPPRESS_DEPRECATED)
 
 # First-party warning bar (shared with the library; see cmake/Warnings.cmake).
 include(Warnings)
 pay_apply_warnings(${PROJECT_NAME})
 
-# Platform-specific test configuration
-if(WIN32)
-    # Windows: Use PowerShell script
-    add_test(
-        NAME PayBackendTests
-        COMMAND powershell -ExecutionPolicy Bypass -File
-                "${CMAKE_CURRENT_SOURCE_DIR}/run_all_tests.ps1"
-                "$<TARGET_FILE:${PROJECT_NAME}>"
-    )
-else()
-    # Linux/macOS: Run test executable directly
-    add_test(
-        NAME PayBackendTests
-        COMMAND ${PROJECT_NAME}
-        WORKING_DIRECTORY $<TARGET_FILE_DIR:${PROJECT_NAME}>
-    )
-endif()
+# All platforms run the executable directly from its output directory so
+# ./config.json and ./.env (copied POST_BUILD above) resolve. The single
+# no-flag run executes every DROGON_TEST case in one process and the
+# process exit code propagates to CTest unchanged.
+add_test(
+    NAME PayBackendTests
+    COMMAND ${PROJECT_NAME}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:${PROJECT_NAME}>
+)

@@ -5,7 +5,7 @@
 using namespace drogon;
 
 // These are integration tests that hit the in-process test server started by
-// test_main.cc (port from pay::test_util::testPort(), default 5567).
+// tests/main.cc (port from pay::test_util::testPort(), default 5567).
 
 DROGON_TEST(HealthProbe_LivenessEndpoint)
 {

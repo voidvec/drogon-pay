@@ -49,6 +49,9 @@ jobs:
       - name: Docs drift guard
         run: python3 scripts/check_docs_drift.py
 
+      - name: Test layout guard
+        run: python3 scripts/check_test_layout.py
+
       # Hard gate: format-the-tree commit resolved all pre-existing drift.
       # models/ is generated code and excluded (same scope as
       # .clang-format-ignore). Version pin lives in

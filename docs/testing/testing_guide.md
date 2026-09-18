@@ -8,32 +8,35 @@ Tests live in the repository-root `tests/` directory and use Drogon's own
 
 ```
 tests/
-├── test_main.cc                  # DROGON_TEST_MAIN entry; overrides listener port
+├── main.cc                       # DROGON_TEST_MAIN entry; overrides listener port
 ├── TestConfigHelper.h            # testPort() / baseUrl() helpers (PAY_TEST_PORT, default 5567)
 ├── CMakeLists.txt                # builds the test binary + ctest registration
-├── AuthCheckTest.cc              # auth / scope enforcement
-├── PayAuthMetricsTest.cc         # auth metrics counters + Prometheus format
-├── PayErrorCategoryTest.cc       # error-code → HTTP status mapping
-├── CreatePaymentIntegrationTest.cc
-├── QueryOrderTest.cc
-├── QueryOrderListAndReconcileTest.cc
-├── ReconcileSummaryTest.cc
-├── RefundQueryTest.cc
-├── IdempotencyIntegrationTest.cc
-├── CallbackControllerTest.cc
-├── WechatCallbackIntegrationTest.cc
-├── WechatPayClientTest.cc
-├── HealthProbeTest.cc            # /healthz, /readyz probes
-├── HttpResponseHeadersTest.cc    # CORS preflight + security headers
-├── ControllerMetricsTest.cc      # /metrics + auth metrics endpoints
-├── RouteRegistrationSmokeTest.cc
-├── ConfigLoaderTest.cc
-├── StartupValidatorTest.cc
-├── OnceCallbackTest.cc
-├── PayUtilsTest.cc
-├── e2e_test.sh / e2e_test.ps1    # HTTP-level smoke scripts
-└── run_all_tests.ps1
+├── unit/                         # pure logic — no HTTP/DB round-trip
+│   ├── AuthCheckTest.cc          # auth / scope enforcement
+│   ├── ConfigLoaderTest.cc
+│   ├── ControllerMetricsTest.cc  # /metrics + auth metrics endpoints
+│   ├── OnceCallbackTest.cc
+│   ├── PayAuthMetricsTest.cc     # auth metrics counters + Prometheus format
+│   ├── PayUtilsTest.cc
+│   └── StartupValidatorTest.cc
+└── integration/                  # exercise the running Drogon app, DB or HTTP surface
+    ├── CallbackControllerTest.cc
+    ├── CreatePaymentIntegrationTest.cc
+    ├── HealthProbeTest.cc        # /healthz, /readyz probes
+    ├── HttpResponseHeadersTest.cc # CORS preflight + security headers
+    ├── IdempotencyIntegrationTest.cc
+    ├── PayErrorCategoryTest.cc   # error-code → HTTP status mapping
+    ├── QueryOrderListAndReconcileTest.cc
+    ├── QueryOrderTest.cc
+    ├── ReconcileSummaryTest.cc
+    ├── RefundQueryTest.cc
+    ├── RouteRegistrationSmokeTest.cc
+    ├── WechatCallbackIntegrationTest.cc
+    └── WechatPayClientTest.cc
 ```
+
+HTTP-level e2e smoke scripts live with the host they exercise:
+`examples/pay-server/scripts/e2e_test.sh` / `e2e_test.ps1`.
 
 ## Running Tests
 
@@ -65,12 +68,17 @@ ctest --test-dir build/windows-msvc -C Release -R RefundQuery
 ### End-to-end HTTP smoke scripts
 
 ```bash
-cd tests
+cd examples/pay-server/scripts
 ./e2e_test.sh        # Bash
 ./e2e_test.ps1       # PowerShell
 ```
 
 ## Writing Tests
+
+Place a new file under `tests/unit/` when it only calls functions/classes
+directly, and under `tests/integration/` when it talks to the in-process
+Drogon server, the database or Redis. Register it in the matching section of
+`tests/CMakeLists.txt` (explicit list, no glob).
 
 Tests use the `DROGON_TEST` macros (`TEST`, assertions via the framework).
 Inject test channels with `PayPlugin::setTestChannels(...)` (the legacy

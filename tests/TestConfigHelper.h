@@ -5,9 +5,10 @@
 // string. Replaces the per-file duplicates that lived in each integration test.
 //
 // loadConfig() resolves __env_var:VAR__ placeholders via ConfigLoader, mirroring
-// main.cc / test_main.cc, so credentials in config.json (e.g. the DB password)
-// are pulled from the environment that test_main loaded from .env. Without this,
-// the raw placeholder string was passed to libpq and DB auth failed.
+// the host's main.cc and tests/main.cc, so credentials in config.json (e.g. the
+// DB password) are pulled from the environment that tests/main.cc loaded from
+// .env. Without this, the raw placeholder string was passed to libpq and DB
+// auth failed.
 // ============================================================================
 
 #include <json/json.h>
@@ -90,7 +91,7 @@ inline bool loadConfig(Json::Value &root)
     }
 
     // Resolve __env_var:VAR__ placeholders so credentials come from the
-    // environment (loaded from .env by test_main), matching main.cc.
+    // environment (loaded from .env by tests/main.cc), matching main.cc.
     root = ConfigLoader::loadConfig(root);
     return true;
 }
