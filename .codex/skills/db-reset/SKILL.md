@@ -37,6 +37,12 @@ Both call `scripts/migrate_db.py --reset-schema
 replays the chain in one pass. Password comes from `PGPASSWORD` /
 `PAY_DB_PASSWORD` or `examples/pay-server/.env`; the scripts carry none.
 
+`--reset-schema` is a loopback-only dev primitive: the executor refuses any
+host that is not `localhost`/`127.x`/`::1`, because a remote host is where
+staging and production live and `--confirm-drop` is filled in for you by these
+scripts. To move a real environment forward, ship a versioned `sql/NNN_*.sql`
+instead.
+
 To apply only what is missing, without resetting: add `--keep-data`.
 
 ## Docker PostgreSQL

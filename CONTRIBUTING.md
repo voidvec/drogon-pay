@@ -103,8 +103,11 @@ bytes. The practical rules (see `TECH_SPECS.md` "迁移工程化" and the
 - `sql/000_*.sql` is a dev reset helper, not a version; it is never applied by
   the executor (a deploy that ran it dropped every table on redeploy).
 - Once a migration has shipped, pin it with
-  `python scripts/check_migrations.py --write-missing`. Changing a baselined
-  file means editing `scripts/migrations_baseline.json` in the same PR.
+  `python scripts/check_migrations.py --write-missing`. It adds entries for new
+  files only, never rewrites an existing one, and refuses a candidate that
+  breaks the content rules — a pinned file is exempt from them for good.
+  Changing a baselined file means editing `scripts/migrations_baseline.json` in
+  the same PR.
 - Creating/dropping the *database* is provisioning, not a migration: the app
   role has no `CREATEDB`, so the executor only probes and prints the superuser
   command instead of running it.

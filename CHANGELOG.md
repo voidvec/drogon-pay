@@ -100,7 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version's bytes changed, warns when recorded tables were dropped out-of-band,
   and adds `--status` / `--dry-run` / `--baseline` (adopt a database an
   `initdb.d` mount already provisioned, rejected unless the tables are really
-  there) / `--reset-schema --confirm-drop <db>`. Creating or dropping the
+  there) / `--reset-schema --confirm-drop <db>`. `--reset-schema` accepts a
+  loopback host only: `setup_database.{sh,bat}` fills in `--confirm-drop` for
+  the operator, so the repeated name is not a human decision and a remote host
+  is where staging and production live. Creating or dropping the
   *database* stayed out of it on purpose — the app role has no `CREATEDB`, so a
   failed `DROP DATABASE` cannot be undone by the same connection; the executor
   only probes `pg_database` and prints the superuser command.
@@ -109,8 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-destruction, plus a sha256 pin of history in
   `scripts/migrations_baseline.json`. Content rules apply only to migrations
   that are not yet baselined — `001`–`004` predate the guard and are pinned as
-  they are, while a new file must pass. `--write-missing` pins new versions and
-  never rewrites an existing entry.
+  they are, while a new file must pass. `--write-missing` pins new versions,
+  never rewrites an existing entry, and refuses a candidate that breaks the
+  content rules (pinning is a permanent exemption, so it cannot double as a
+  waiver).
 - **`examples/pay-server/scripts/setup_database.sh`**, the POSIX twin of
   `setup_database.bat`, and the `.bat` lost its embedded default password: both
   now reset the schema, replay the chain through the executor and read

@@ -89,7 +89,9 @@ before you push.
    `schema_migrations`, and `check_migrations.py` compares against
    `scripts/migrations_baseline.json`. If a baselined file genuinely has to
    change, update that JSON by hand in the same PR (the friction is the
-   point); `--write-missing` pins a *new* file without touching old entries.
+   point); `--write-missing` pins a *new* file without touching old entries, and
+   refuses one that breaks the content rules (pinning exempts a file from them
+   for good, so it cannot double as a waiver).
 
 ## Common Patterns
 

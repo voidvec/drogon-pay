@@ -36,6 +36,7 @@ Usage:
     python scripts/migrate_db.py --reset-schema --confirm-drop pay_test
                                                   # dev reset, then replay the
                                                   # chain (setup_database.{bat,sh})
+                                                  # loopback host only, by design
 
 Exit code 0 = nothing to apply or applied cleanly; 1 = refused/failed.
 """
@@ -44,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import os
 import re
 import subprocess
@@ -307,6 +309,16 @@ def assert_schema_present(psql: Psql, chain: list[tuple[str, Path]]) -> None:
         )
 
 
+def _is_loopback(host: str) -> bool:
+    """True for the addresses a developer's own database is reachable at."""
+    if host == "" or host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def reset_public_schema(psql: Psql, dbname: str, confirm: str) -> None:
     """Empty the target schema so the chain can be replayed from scratch.
 
@@ -317,9 +329,20 @@ def reset_public_schema(psql: Psql, dbname: str, confirm: str) -> None:
     creation belongs to provisioning, not to migrations — and needs only the
     privileges the owner already has.
 
-    `--confirm-drop` must repeat the database name: a mistyped --db must not
-    be enough to destroy something.
+    Two independent guards, because `setup_database.{sh,bat}` fills in
+    `--confirm-drop` for the operator, so the name alone is not a human
+    decision: the repeated name catches a mistyped `--db`, and the loopback
+    rule keeps this dev primitive away from any remote server, where staging
+    and production actually live.
     """
+    host = psql.env.get("PGHOST", "127.0.0.1")
+    if not _is_loopback(host):
+        raise MigrationError(
+            f"--reset-schema refuses to run against host {host!r}: this is a "
+            "loopback-only dev reset, and a remote host is where staging and "
+            "production live. Point PGHOST at 127.0.0.1, or migrate a real "
+            "environment forward with a versioned sql/NNN_*.sql instead."
+        )
     if confirm != dbname:
         raise MigrationError(
             f"--reset-schema also requires --confirm-drop {dbname} (you passed "
@@ -327,7 +350,7 @@ def reset_public_schema(psql: Psql, dbname: str, confirm: str) -> None:
             f"{dbname}'s public schema."
         )
     psql.run("DROP SCHEMA IF EXISTS public CASCADE;\nCREATE SCHEMA public;")
-    print(f"Reset the public schema of {dbname}.")
+    print(f"Reset the public schema of {dbname} on {host}.")
 
 
 def probe_database(psql: Psql, dbname: str, user: str,
@@ -397,7 +420,7 @@ def main(argv: list[str]) -> int:
                     help="record the on-disk chain as applied without running it")
     ap.add_argument("--reset-schema", action="store_true",
                     help="drop and recreate the target database's public schema "
-                         "first (dev reset; needs --confirm-drop)")
+                         "first (loopback dev reset; needs --confirm-drop)")
     ap.add_argument("--confirm-drop", default=None,
                     help="must repeat the database name for --reset-schema")
     ap.add_argument("--maintenance-db", default="postgres",

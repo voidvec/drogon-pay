@@ -103,8 +103,8 @@
 |--------|------|
 | 唯一执行器 | 任何工作流/脚本都不得自己写 `psql -f sql/...` 或 `for f in sql/*.sql`；曾经有三份硬编码清单，其中一份静默漏掉两条迁移 |
 | 版本记账 | `schema_migrations(version, filename, sha256, applied_at)`；每条迁移与它的记账行在**同一事务**内提交，失败即整体回滚 |
-| 不可变 | 已应用的版本内容一旦被改：`migrate_db.py`（比对 `sha256`）与 `scripts/check_migrations.py`（比对 `scripts/migrations_baseline.json`）双双 exit 1；要改历史只能同一 PR 里手改基线 JSON |
-| 重置助手 | `sql/000_*.sql` 不属于版本链，执行器跳过它；开发库重置走 `setup_database.{sh,bat}`（`--reset-schema --confirm-drop <db>`） |
+| 不可变 | 已应用的版本内容一旦被改：`migrate_db.py`（比对 `sha256`）与 `scripts/check_migrations.py`（比对 `scripts/migrations_baseline.json`）双双 exit 1；要改历史只能同一 PR 里手改基线 JSON。基线条目永久豁免内容规则，所以 `--write-missing` 钉新文件前会先跑这些规则，不合格就拒绝写入 |
+| 重置助手 | `sql/000_*.sql` 不属于版本链，执行器跳过它；开发库重置走 `setup_database.{sh,bat}`（`--reset-schema --confirm-drop <db>`），且**仅允许 loopback 主机**——远端主机是 staging/生产所在地，`--confirm-drop` 由脚本自动填写，真正拦住误用的是这条主机规则 |
 | 建库 = provisioning | 应用角色无 `CREATEDB`，所以执行器只探测、只提示，不建库也不删库；`CREATE DATABASE pay_test OWNER test` 由超级用户在部署前置步骤里做 |
 | 幂等/非破坏 | 新迁移必须 `IF NOT EXISTS` 风格，`ADD CONSTRAINT x` 与 `DROP CONSTRAINT IF EXISTS x` 同文件配对；禁止 `DROP TABLE/COLUMN`、`TRUNCATE`、裸 `DELETE FROM` |
 | compose 路径 | `docker-entrypoint-initdb.d` 只在新卷上以超户跑全部 `*.sql` 且不记账，因此那种库第一次必须 `migrate_db.py --baseline` 采纳（缺表会拒绝） |

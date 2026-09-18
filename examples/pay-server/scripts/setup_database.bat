@@ -18,11 +18,16 @@ REM   setup_database.bat --keep-data     apply pending migrations only
 cd /d "%~dp0..\..\.."
 
 if not defined PGDATABASE set "PGDATABASE=pay_test"
+REM Only for the message below: a variable set inside a parenthesized block is
+REM not visible to that block's own %expansions%, so default it up here.
+if not defined PGHOST set "PGHOST=127.0.0.1"
 
 set "EXTRA=--reset-schema --confirm-drop %PGDATABASE%"
 if /i "%~1"=="--keep-data" set "EXTRA="
 if defined EXTRA (
-    echo Resetting the public schema of %PGDATABASE%, then applying the chain...
+    REM migrate_db.py enforces this as the loopback-only dev reset it is: the
+    REM repeated name here is not the safety check, the host rule is.
+    echo Resetting the public schema of %PGDATABASE% on %PGHOST%, then applying the chain...
 ) else (
     echo Applying pending migrations into existing %PGDATABASE%...
 )

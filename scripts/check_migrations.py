@@ -12,7 +12,10 @@ Rules, in the order they fire:
                 bytes; editing applied history is how environments silently
                 diverge. Re-baseline by hand in the same PR to accept a
                 deliberate change (deliberate friction, same idiom as
-                PUBLIC_API_WHITELIST in check_architecture.py).
+                PUBLIC_API_WHITELIST in check_architecture.py). Because a
+                pinned file is exempt from R4/R5 for good, --write-missing
+                runs those rules over its candidates and refuses the write:
+                pinning a new migration must not be a self-granted waiver.
   R4 idempotent  new migrations (not in the baseline) must guard the objects
                 they create: IF NOT EXISTS, CREATE OR REPLACE, a paired
                 DROP ... IF EXISTS, or an IF NOT EXISTS check inside a DO
@@ -314,7 +317,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--baseline", type=Path, default=BASELINE)
     ap.add_argument("--write-missing", action="store_true",
                     help="add baseline entries for files not pinned yet; never "
-                         "rewrites an existing entry")
+                         "rewrites an existing entry, and refuses a candidate "
+                         "that breaks the naming/idempotency/destruction rules")
     args = ap.parse_args(argv)
 
     try:
@@ -326,7 +330,15 @@ def main(argv: list[str]) -> int:
     files = sorted(p for p in args.sql_dir.glob("*.sql") if p.is_file())
 
     if args.write_missing:
-        added = write_missing(files, baseline, args.baseline)
+        added, refused = write_missing(files, baseline, args.baseline)
+        if refused:
+            print(f"--write-missing refused to pin {len(refused)} violation(s):")
+            for problem in refused:
+                print("  " + problem)
+            print("A pinned file is exempt from the content rules for good, so "
+                  "pinning is not a waiver: fix the SQL, or leave the file "
+                  "unpinned and let the rules keep applying to it.")
+            return 1
         if not added:
             print(f"{args.baseline.name}: every sql/*.sql file is already "
                   f"pinned; nothing to write.")
@@ -358,7 +370,24 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def write_missing(files: list[Path], baseline: dict[str, str], path: Path) -> list[str]:
+def write_missing(files: list[Path], baseline: dict[str, str],
+                  path: Path) -> tuple[list[str], list[str]]:
+    """Pin the not-yet-pinned files, but only those that pass the rules.
+
+    check_baseline exempts a pinned file from the content rules forever (that is
+    how the pre-existing chain stays untouched), so pinning first and reviewing
+    later would be a self-granted waiver: run the same rules over the candidates
+    and refuse the write when any of them breaks them.
+    """
+    candidates = [f for f in files if f.name not in baseline]
+    refused: list[str] = []
+    for new_file in candidates:
+        if new_file.name.startswith(RESET_PREFIX):
+            continue
+        refused += check_naming([new_file]) + check_content(new_file)
+    if refused:
+        return [], refused
+
     added: list[str] = []
     payload = {k: v for k, v in baseline.items()}
     if not payload:
@@ -366,18 +395,22 @@ def write_missing(files: list[Path], baseline: dict[str, str], path: Path) -> li
             "_readme": (
                 "sha256 of every sql/*.sql frozen when migrate_db.py landed. "
                 "check_migrations.py fails if a pinned file changes; add an "
-                "entry with --write-missing once a new migration has shipped."
+                "entry with --write-missing once a new migration has shipped "
+                "(it refuses a file that breaks the content rules, because a "
+                "pinned file is exempt from them for good)."
             )
         }
     for f in files:
         if f.name not in payload:
             payload[f.name] = sha256_of(f)
             added.append(f.name)
+    if not added:
+        return [], []
     path.write_text(
         json.dumps(dict(sorted(payload.items())), indent=2) + "\n",
         encoding="utf-8",
     )
-    return added
+    return added, []
 
 
 if __name__ == "__main__":
