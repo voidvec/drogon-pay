@@ -8,11 +8,11 @@
 
 **Drogon Payment Processing Plugin & Vue Admin Dashboard** - 企业级支付处理系统，支持支付宝沙箱、微信支付等多种支付平台，采用服务导向架构（SOA）。
 
-**技术栈**: Drogon C++17 | PostgreSQL 13+ | Redis 6.0+ | Vue 3 + Element Plus | CMake 3.15+ | Conan
+**技术栈**: Drogon C++17 | PostgreSQL 13+ | Redis 6.0+ | Vue 3 + Element Plus | CMake 3.21+ | Conan 2
 
 **项目结构**: `libs/drogon-pay/`（发布库：`src/handlers/` → `src/services/` → `src/channels/` → `src/models/`，ORM禁止修改）| `examples/pay-server/`（示例宿主）| `examples/pay-admin/`（Vue 管理台）
 
-**关键成就**: 测试覆盖率 80%+ (107+ 用例) | P50 < 15ms, P95 < 39ms | 生产就绪 | 完整 CI/CD
+**关键现状**: 149 个 `DROGON_TEST` 用例 | 三平台 CI（linux/windows/macos）+ 静态门禁 | Conan 发布级包（`test_package` 消费方验证）| tag 驱动 Release + Docker 部署
 
 ---
 
@@ -130,9 +130,11 @@
 
 | 监控端点 | 说明 |
 |----------|------|
-| `GET /health` | 健康检查 |
-| `GET /metrics` | Prometheus 指标 |
-| `GET /api/v1/metrics/payments` | 支付统计 |
+| `GET /healthz` / `GET /readyz` | 存活/就绪检查（宿主） |
+| `GET /health` | 健康检查（宿主） |
+| `GET /metrics` | Prometheus 指标（宿主） |
+| `GET /api/pay/metrics/auth` | 支付统计（JSON） |
+| `GET /api/pay/metrics/auth.prom` | 支付统计（Prometheus 文本） |
 
 ---
 
@@ -148,4 +150,4 @@
 
 ---
 
-**文档版本**: v2.0 | **最后更新**: 2026-05-12 | **维护者**: Pay Plugin 开发团队
+**文档版本**: v2.1 | **最后更新**: 2026-09-18 | **维护者**: Pay Plugin 开发团队

@@ -6,7 +6,7 @@ library.
 
 ## Build & test
 
-Prerequisites: CMake ≥ 3.15, Conan 2, a C++17 toolchain
+Prerequisites: CMake ≥ 3.21, Conan 2, a C++17 toolchain
 (MSVC 2022 / GCC / Clang), PostgreSQL 13+ and Redis 6+ for the test suite.
 
 ```bash
@@ -36,15 +36,28 @@ CMake options: `DROGON_PAY_BUILD_EXAMPLES` / `DROGON_PAY_BUILD_TESTS`
 - [ ] No secrets in the diff (gitleaks runs in CI; install the local hook via
       [pre-commit](https://pre-commit.com): `pre-commit install`)
 - [ ] Architecture guard passes (`python scripts/check_architecture.py`)
+- [ ] All CI static gates pass locally — each gate is a stdlib-only script
+      under `scripts/check_*.py`; run them all before pushing
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` for user-visible changes
 - [ ] Docs updated when config keys, routes or public headers change
 
 ## Commit conventions
 
-Short imperative subject (≤ 72 chars), optionally prefixed with the area:
-`channels:`, `services:`, `plugin:`, `cmake:`, `ci:`, `docs:`, `tests:`.
-Breaking changes must say `BREAKING:` in the body and update the migration
-table in `docs/development/plugin_integration.md`.
+Conventional Commits: `<type>(<scope>): <imperative subject>` (≤ 72 chars).
+
+- **type**: `feat`, `fix`, `refactor`, `docs`, `test`, `build`, `ci`,
+  `chore`, `perf`, `style`
+- **scope**: the affected area, matching existing history — e.g. `linux`,
+  `windows`, `macos`, `tests`, `logs`, `ci-gate`, `idempotency`, `alipay`,
+  `wechat`, `handlers`, `services`, `channels`, `cmake`, `pay-admin`,
+  `docs`, `agents`
+- **Breaking changes**: append `!` after the scope (`feat(spi)!: ...`) and
+  say `BREAKING:` in the body; update the migration table in
+  `docs/development/plugin_integration.md`.
+
+Examples from history: `refactor(logs): address review feedback on six-tier
+standardization`, `ci(linux): drop diagnostic diff output from clang-format
+check`, `fix(idempotency): persist snapshot before responding on refund`.
 
 ## Architecture rules (CI-enforced)
 

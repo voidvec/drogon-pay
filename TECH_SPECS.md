@@ -12,12 +12,14 @@
 
 ### [MUST] 分层架构
 
-| 层级 | 职责 | 关键要求 |
-|------|------|----------|
-| Controller 层 | HTTP 请求/响应 | 薄层设计，验证格式，调用 Service |
-| Service 层 | 核心业务逻辑 | PaymentService, RefundService, CallbackService 等 |
-| Plugin 层 | 第三方集成 | AlipaySandboxClient, WechatPayClient |
-| Model 层 | ORM 映射 | 禁止修改 ORM 类，用 `drogon_ctl` 重新生成 |
+| 层级 | 目录 | 职责 | 关键要求 |
+|------|------|------|----------|
+| handlers 层 | `src/handlers/` | HTTP 请求/响应 | 薄层设计，验证格式，调用 Service |
+| services 层 | `src/services/` | 核心业务逻辑 | PaymentService, RefundService, CallbackService 等；仅依赖 channels 的 SPI（`PaymentChannel`），禁止 include 具体渠道头文件 |
+| channels 层 | `src/channels/` | 第三方支付渠道集成 | WechatChannel, AlipayChannel 实现 `PaymentChannel` SPI |
+| models 层 | `src/models/` | ORM 映射 | 禁止修改 ORM 类，用 `drogon_ctl` 重新生成 |
+
+依赖方向：`handlers → services → channels → models`，由 `scripts/check_architecture.py` 在 CI 强制。
 
 ### [MUST] 服务架构
 
@@ -225,9 +227,9 @@ REFUND_INIT ──(channel call)──> REFUND_PROCESSING ──(callback)──
 
 | 测试类型 | 要求 | 工具 |
 |----------|------|------|
-| 单元测试 | 每个服务方法 80%+ 覆盖率 | Google Test |
-| 集成测试 | API 接口级验证 | Google Test |
-| 端到端测试 | 完整支付流程验证 | 前端测试 |
+| 单元测试 | 覆盖率由 CI 棘轮基线守护（`scripts/measure_coverage.py` + `scripts/coverage_baseline.json`），禁止口头指标 | Drogon `DROGON_TEST` |
+| 集成测试 | API 接口级验证，依赖真实 Postgres/Redis | Drogon `DROGON_TEST` + CI service 容器 |
+| 端到端测试 | 完整支付流程验证 | `tests/e2e_test.sh` / `tests/e2e_test.ps1` |
 
 ### [MUST] 测试数据管理
 
@@ -283,4 +285,4 @@ REFUND_INIT ──(channel call)──> REFUND_PROCESSING ──(callback)──
 
 ---
 
-**文档版本**: v1.0 | **最后更新**: 2026-05-12 | **维护者**: Pay Plugin 开发团队
+**文档版本**: v1.1 | **最后更新**: 2026-09-18 | **维护者**: Pay Plugin 开发团队
