@@ -281,11 +281,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on its first run there. It now resolves each citation against the git index
   (a tracked file or a tracked directory prefix) plus the set `git
   check-ignore` claims, both of which are versioned facts, so the answer no
-  longer depends on what happens to be on disk. The plumbing had its own
-  laptop/CI split: passing `encoding=` to `subprocess.run` enables text mode,
-  whose newline translation fed CRLF to `git check-ignore --stdin` and made
-  every path look unignored, and the writer thread's exception left the git
-  child blocked on stdin. That call now speaks bytes in both directions.
+  longer depends on what happens to be on disk — and each probe is asked about
+  twice, bare and with a trailing slash, because `build/` and `certs/` are
+  directory-only patterns and git will not apply one to a path it cannot
+  establish is a directory, which on a checkout is exactly the case. The
+  plumbing had its own laptop/CI split too: passing `encoding=` to
+  `subprocess.run` enables text mode, whose newline translation fed CRLF to
+  `git check-ignore --stdin` and made every path look unignored, and the
+  writer thread's exception left the git child blocked on stdin. That call now
+  speaks bytes in both directions. Verified by running the guard in a clean
+  clone with no `build/`, `.env` or `certs/` on disk (green, as on CI, where
+  the previous version was red) and by injecting two fabricated paths there
+  (both reported, then clean again once the file was restored).
 - **`YOUR_API_KEY` was flagged as a leaked secret.** The `curl-auth-header`
   rule matches on shape, and every curl sample in
   `docs/api/pay-api-examples.md` writes `-H "X-Api-Key: YOUR_API_KEY"`. The

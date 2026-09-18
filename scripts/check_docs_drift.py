@@ -146,10 +146,18 @@ def _tracked_files() -> set[str]:
 def _git_ignored(probes: set[str]) -> set[str]:
     """The subset that .gitignore claims. A doc citing one of these is
     describing something the operator or the build provisions (`.env`, a
-    generated `certs/`, `build/`), which no checkout will ever contain."""
+    generated `certs/`, `build/`), which no checkout will ever contain.
+
+    Both spellings are asked about. `build/` and `certs/` are directory-only
+    patterns, and git applies one only to a path it can establish is a
+    directory — which it cannot do on a CI checkout where the directory does
+    not exist, so the bare probe reports nothing and the rule passes on a
+    laptop while failing there.
+    """
     if not probes:
         return set()
-    payload = ("\n".join(sorted(probes)) + "\n").encode("utf-8")
+    asked = sorted(probes | {p + "/" for p in probes})
+    payload = ("\n".join(asked) + "\n").encode("utf-8")
     proc = subprocess.run(
         ["git", "check-ignore", "--stdin"],
         cwd=str(REPO_ROOT),
@@ -159,7 +167,8 @@ def _git_ignored(probes: set[str]) -> set[str]:
     # Bytes in, bytes out: passing `encoding` would flip this into text mode,
     # whose newline translation sends CRLF to git and silently stops every
     # path matching.
-    return set(proc.stdout.decode("utf-8", errors="replace").split())
+    answers = set(proc.stdout.decode("utf-8", errors="replace").split())
+    return {p for p in probes if p in answers or p + "/" in answers}
 
 
 def check_doc_paths() -> list[str]:
