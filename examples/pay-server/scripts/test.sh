@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [-l] [-r ExactTestName] [-v] [-o] [-debug|-release]" >&2
       echo "  -l             List available tests" >&2
       echo "  -r <name>      Run one test by its exact name (see -l)" >&2
-      echo "  -v             Verbose output (show test details)" >&2
+      echo "  -v             Verbose output (already the default)" >&2
       echo "  -o             Also save test_results.log in the build directory" >&2
       echo "  -debug         Use the Debug preset (default: $PRESET_RELEASE)" >&2
       exit 1
