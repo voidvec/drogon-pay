@@ -51,7 +51,7 @@ jobs:
         run: conan install . --output-folder=build/macos-arm64 -s build_type=${{env.BUILD_TYPE}} -s compiler.cppstd=17 -s arch=armv8 --build=missing
 
       - name: Configure (cmake --preset)
-        run: cmake --preset macos-arm64
+        run: cmake --preset macos-arm64 -DDROGON_PAY_WERROR=ON
 
       - name: Build (cmake --build --preset)
         run: cmake --build --preset macos-arm64 -j $(sysctl -n hw.ncpu)

@@ -153,7 +153,7 @@ jobs:
         run: conan install . --output-folder=build/linux-release -s build_type=${{env.BUILD_TYPE}} -s compiler.cppstd=17 --build=missing
 
       - name: Configure (cmake --preset)
-        run: cmake --preset linux-release
+        run: cmake --preset linux-release -DDROGON_PAY_WERROR=ON
 
       - name: Build (cmake --build --preset)
         run: cmake --build --preset linux-release -j $(nproc)

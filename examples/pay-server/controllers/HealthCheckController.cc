@@ -77,7 +77,7 @@ void HealthCheckController::readyz(
               std::lock_guard<std::mutex> lock(state->mtx);
               state->pending--;
           },
-          [state](const drogon::orm::DrogonDbException &e) {
+          [state](const drogon::orm::DrogonDbException & /*e*/) {
               std::lock_guard<std::mutex> lock(state->mtx);
               state->failed.push_back("db");
               state->pending--;
@@ -99,7 +99,7 @@ void HealthCheckController::readyz(
               std::lock_guard<std::mutex> lock(state->mtx);
               state->pending--;
           },
-          [state](const std::exception &e) {
+          [state](const std::exception & /*e*/) {
               std::lock_guard<std::mutex> lock(state->mtx);
               state->failed.push_back("redis");
               state->pending--;

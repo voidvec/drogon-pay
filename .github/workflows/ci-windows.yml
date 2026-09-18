@@ -39,7 +39,7 @@ jobs:
         run: conan install . --output-folder=build/windows-msvc -s build_type=${{env.BUILD_TYPE}} -s compiler.cppstd=17 --build=missing
 
       - name: Configure (cmake --preset)
-        run: cmake --preset windows-msvc
+        run: cmake --preset windows-msvc -DDROGON_PAY_WERROR=ON
 
       - name: Build (cmake --build --preset)
         run: cmake --build --preset windows-msvc

@@ -65,6 +65,10 @@ if(MSVC)
     )
 endif()
 
+# First-party warning bar (shared with the library; see cmake/Warnings.cmake).
+include(Warnings)
+pay_apply_warnings(${PROJECT_NAME})
+
 # Platform-specific test configuration
 if(WIN32)
     # Windows: Use PowerShell script

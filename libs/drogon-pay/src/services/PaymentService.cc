@@ -2685,7 +2685,7 @@ void PaymentService::syncOrderStatusFromAlipay(
     }
 }
 
-void PaymentService::reconcileSummary(const std::string &date, PaymentCallback &&callback)
+void PaymentService::reconcileSummary(const std::string & /*date*/, PaymentCallback &&callback)
 {
     if (!dbClient_)
     {

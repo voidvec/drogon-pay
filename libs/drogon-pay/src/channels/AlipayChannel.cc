@@ -345,7 +345,7 @@ void AlipaySandboxClient::sendRequest(
           req,
           [this,
            callback,
-           method](drogon::ReqResult result, const drogon::HttpResponsePtr &response) {
+           method](drogon::ReqResult /*result*/, const drogon::HttpResponsePtr &response) {
               try
               {
                   if (!response)

@@ -24,3 +24,8 @@ add_executable(PayServer main.cc)
 # pay_host_core only pulls its own objects, so pay_core must be listed
 # explicitly to get the library's objects into the executable.
 target_link_libraries(PayServer PRIVATE pay_host_core pay_core)
+
+# First-party warning bar (shared with the library; see cmake/Warnings.cmake).
+include(Warnings)
+pay_apply_warnings(pay_host_core)
+pay_apply_warnings(PayServer)
