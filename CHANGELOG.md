@@ -210,6 +210,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two dead idempotency helpers survived the service refactor until GCC
+  pointed at them.** `storeIdempotencySnapshot` existed as a file-local
+  function in both `PaymentService.cc` and `RefundService.cc`, with no caller
+  in either: snapshot persistence had moved to
+  `IdempotencyService::updateResult` (the fix that made the write land before
+  the response), and the `RefundService` copy had even lost its own exception
+  messages to the copy-paste, logging "Mapper construction failed" where an
+  insert failure would appear. `PaymentService.cc` also carried a second
+  orphan, `toRfc3339Utc`, whose `RefundService` twin is live. MSVC's `/W4 /WX`
+  does not report an unreferenced internal-linkage function, so the
+  `DROGON_PAY_WERROR` gate passed on Windows and on the macOS build lane while
+  GCC's `-Wunused-function` was right. All three are deleted, along with the
+  `PayIdempotency` include and model alias that only they used. The behaviour
+  was already correct; nothing that wrote a snapshot was removed.
+
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
   `CLAUDE.md`, `docs/operations/operations_manual.md` and the `drogon-build`

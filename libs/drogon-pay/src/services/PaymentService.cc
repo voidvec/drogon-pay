@@ -3,7 +3,6 @@
 #include "../models/PayOrder.h"
 #include "../models/PayPayment.h"
 #include "../models/PayLedger.h"
-#include "../models/PayIdempotency.h"
 #include "../models/PayRefund.h"
 #include "../utils/OnceCallback.h"
 #include "../utils/PayUtils.h"
@@ -21,7 +20,6 @@ namespace
 using PayOrderModel = drogon_model::pay_test::PayOrder;
 using PayPaymentModel = drogon_model::pay_test::PayPayment;
 using PayLedgerModel = drogon_model::pay_test::PayLedger;
-using PayIdempotencyModel = drogon_model::pay_test::PayIdempotency;
 using PayRefundModel = drogon_model::pay_test::PayRefund;
 }  // namespace
 
@@ -162,66 +160,6 @@ void insertLedgerEntry(
     {
         LOG_WARN << "[PaymentService] Mapper construction failed: unknown exception";
     }
-}
-
-void storeIdempotencySnapshot(
-  const std::shared_ptr<DbClient> &dbClient,
-  const std::string &idempotencyKey,
-  const std::string &requestHash,
-  const std::string &responseSnapshot,
-  int64_t ttlSeconds
-)
-{
-    if (!dbClient || idempotencyKey.empty())
-    {
-        return;
-    }
-
-    PayIdempotencyModel idemp;
-    idemp.setIdempotencyKey(idempotencyKey);
-    idemp.setRequestHash(requestHash);
-    idemp.setResponseSnapshot(responseSnapshot);
-    const auto now = trantor::Date::now();
-    const auto expiresAt =
-      trantor::Date(now.microSecondsSinceEpoch() + ttlSeconds * static_cast<int64_t>(1000000));
-    idemp.setExpireAt(expiresAt);
-
-    try
-    {
-        Mapper<PayIdempotencyModel> idempMapper(dbClient);
-        idempMapper.insert(
-          idemp,
-          [](const PayIdempotencyModel &) {},
-          [](const DrogonDbException &e) {
-              LOG_WARN << "Idempotency insert error: " << e.base().what();
-          }
-        );
-    }
-    catch (const std::exception &e)
-    {
-        LOG_WARN << "Idempotency mapper error: " << e.what();
-    }
-    catch (...)
-    {
-        LOG_WARN << "Idempotency mapper error: unknown exception";
-    }
-}
-
-std::string toRfc3339Utc(const trantor::Date &when)
-{
-    const auto seconds = static_cast<time_t>(when.microSecondsSinceEpoch() / 1000000);
-    std::tm tmUtc{};
-#ifdef _WIN32
-    gmtime_s(&tmUtc, &seconds);
-#else
-    gmtime_r(&seconds, &tmUtc);
-#endif
-    char buffer[32]{};
-    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tmUtc) == 0)
-    {
-        return {};
-    }
-    return buffer;
 }
 
 // Shared 1003 error payload for Mapper-construction catch blocks.
