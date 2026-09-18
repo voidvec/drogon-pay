@@ -1,0 +1,25 @@
+# Line endings, declared instead of inherited from each clone's core.autocrlf.
+#
+# The shell twins of the dev scripts are the reason: on a Windows checkout with
+# `core.autocrlf=true` a `.sh` file arrives CRLF, and a CRLF `#!/bin/bash` shebang
+# makes it unrunnable under Git Bash and WSL - which is exactly where the `.sh`
+# side of build.sh / test.sh / setup_database.sh gets exercised on this machine.
+# Batch files get the opposite rule, because cmd.exe is the one that needs CRLF.
+* text=auto eol=lf
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Never touch these: byte content is what the guards compare.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.ttf  binary
+*.woff binary
+*.woff2 binary
+*.pdf  binary
+*.p12  binary
+*.der  binary
+*.zip  binary
+*.gcda binary
+*.gcno binary

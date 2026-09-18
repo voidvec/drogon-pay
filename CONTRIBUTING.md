@@ -35,6 +35,13 @@ Presets: `windows-msvc` / `windows-msvc-debug` (multi-config, binaries under
 CMake options: `DROGON_PAY_BUILD_EXAMPLES` / `DROGON_PAY_BUILD_TESTS`
 (both default ON; `PAY_BUILD_TESTS`/`BUILD_TESTS` kept as CI-compatible aliases).
 
+Line endings come from `.gitattributes`, not from your `core.autocrlf`: text is
+LF in the working tree as well as in the repository, `.bat`/`.cmd` stay CRLF.
+This is not cosmetic — `scripts/check_migrations.py` and `migrate_db.py` hash
+file bytes, so a CRLF working copy disagrees with the pins and with the Linux
+runner. If a clone predates the attributes file, re-materialise it with
+`git rm --cached -r -q . && git reset --hard` (or re-clone).
+
 ## Pull request checklist
 
 - [ ] Three-platform CI green (Linux / macOS / Windows) — required

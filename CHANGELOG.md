@@ -172,6 +172,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left the release body blank. The workflow asks for `contents: read` and grants
   `write` to `publish` alone, and its changelog extraction fails the job when it
   yields nothing instead of publishing a release with a blank body.
+- **`build-test` waits for `clang-tidy`, not only `static-analysis`.** MAIN
+  depended on one FAST job, so the promoted tidy batch was advisory in
+  practice: red on a check nothing depends on still merges. The `needs` edge
+  makes it a blocker regardless of which contexts the branch ruleset requires.
 
 ### Fixed
 
@@ -211,6 +215,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PGPASSWORD`, while the readiness probe above it passed
   `PGPASSWORD=123456` inline; on a password-authenticated container the step
   could only fail once it stopped being the first psql call.
+- **A Windows checkout could not pass the guards that hash committed bytes.**
+  No `.gitattributes` existed, so `core.autocrlf=true` delivered CRLF working
+  copies — and `scripts/migrations_baseline.json` had been pinned from one of
+  them: `001`/`003`/`004` carried CRLF digests, which pass on the machine that
+  wrote them and fail rule 3 on a Linux runner that checks out LF. The pins now
+  hold the committed bytes and `.gitattributes` declares them (`eol=lf` for
+  text, `eol=crlf` for the `.bat`/`.cmd` files cmd.exe needs CRLF for), so
+  disk, index and runner agree. `check_migrations.py` and `migrate_db.py`
+  additionally separate "applied history was edited" from "your working copy
+  has CRLF", because those two need opposite fixes. The other half of the same
+  bug: a CRLF `#!/bin/bash` shebang is not executable, which is exactly how the
+  `.sh` twins of the dev scripts failed on this machine.
+- **`.env.production` was not ignored.** The ignore list covered `.env`,
+  `.env.local` and `.env.*.local` but not the rest of the family, while
+  `docs/development/environment_setup.md` tells operators to put real
+  credentials in `.env.production` — one `git add .` away from committing a
+  production password. `.env.*` is ignored now, with only the `.example`
+  templates re-included.
 
 ## [1.0.0] - 2026-07-31
 

@@ -113,6 +113,12 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def crlf_variant_of(path: Path) -> str:
+    """Digest the file would have if read from a CRLF working copy."""
+    raw = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(raw.replace(b"\n", b"\r\n")).hexdigest()
+
+
 def tables_created_by(chain: list[tuple[str, Path]]) -> set[str]:
     tables: set[str] = set()
     for _, path in chain:
@@ -226,11 +232,20 @@ def check_applied_files(chain: list[tuple[str, Path]],
             continue
         actual = sha256_of(path)
         if digest and actual != digest:
+            hint = ""
+            if crlf_variant_of(path) == digest:
+                hint = (
+                    " The two digests differ only in line endings: this ledger "
+                    "row was written from a CRLF checkout, before "
+                    ".gitattributes pinned eol=lf. Replay the chain on the dev "
+                    "database (examples/pay-server/scripts/setup_database.bat "
+                    "or .sh) to re-record it; do not edit the migration."
+                )
             problems.append(
                 f"{rel(path)} changed after it was applied (recorded "
                 f"{digest[:12]}, on disk {actual[:12]}). Applied migrations are "
                 f"immutable: revert the edit, or fix forward with a new NNN_ "
-                f"migration."
+                f"migration.{hint}"
             )
     return problems
 

@@ -16,6 +16,9 @@ Rules, in the order they fire:
                 pinned file is exempt from R4/R5 for good, --write-missing
                 runs those rules over its candidates and refuses the write:
                 pinning a new migration must not be a self-granted waiver.
+                Pins are digests of the committed bytes, so the checkout must
+                be LF — .gitattributes makes it so; a CRLF working copy is
+                reported as a line-ending problem, not as edited history.
   R4 idempotent  new migrations (not in the baseline) must guard the objects
                 they create: IF NOT EXISTS, CREATE OR REPLACE, a paired
                 DROP ... IF EXISTS, or an IF NOT EXISTS check inside a DO
@@ -158,6 +161,18 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def sha256_of_lf_bytes(path: Path) -> str:
+    """Digest of the file as the repository stores it.
+
+    Rule 3 compares raw bytes, so a working copy whose line endings differ from
+    the committed ones fails it while the migration is untouched. `.gitattributes`
+    pins `eol=lf`, so this should be unreachable; when it is reachable the
+    distinction matters, because "someone edited applied history" and "your
+    checkout has CRLF" need opposite fixes.
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def load_baseline(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
@@ -230,6 +245,16 @@ def check_baseline(files: list[Path], baseline: dict[str, str]) -> list[str]:
             continue
         actual = sha256_of(path)
         if actual != digest:
+            if sha256_of_lf_bytes(path) == digest:
+                errors.append(
+                    f"[rule3 immutability] sql/{name} is byte-identical to its "
+                    f"pin except for line endings (pinned {digest[:12]}, on disk "
+                    f"{actual[:12]}). The pin records the committed LF bytes; "
+                    f"this checkout has CRLF. Restore it with "
+                    f"`git checkout -- sql/{name}` after committing "
+                    f".gitattributes, and never re-pin from a CRLF working copy."
+                )
+                continue
             errors.append(
                 f"[rule3 immutability] sql/{name} changed after being baselined "
                 f"(pinned {digest[:12]}, on disk {actual[:12]}). Applied "
