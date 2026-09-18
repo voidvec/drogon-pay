@@ -59,10 +59,15 @@ logs/
 Thumbs.db
 Desktop.ini
 
-# Environment files
+# Environment files, as a family. `docs/development/environment_setup.md` tells
+# operators to put real credentials in `.env.production`, and this used to ignore
+# `.env` but not that file - so the documented workflow was one `git add .` away
+# from committing a production password. Only the `.example` templates are
+# tracked.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # MCP server config (contains local connection details)
 .mcp.json
