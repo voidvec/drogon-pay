@@ -123,11 +123,20 @@ Claude 自动调用：当 CI 构建失败或代码变更影响 CI 时
 
 ## CI 工作流程文件
 
-| 平台 | 工作流文件 | 特点 |
-|------|-----------|------|
-| Linux | `.github/workflows/ci-linux.yml` | PostgreSQL + Redis 容器 |
-| Windows | `.github/workflows/ci-windows.yml` | 内存存储，MSVC 编译 |
-| macOS | `.github/workflows/ci-macos.yml` | ARM64，Homebrew 依赖 |
+`.github/workflows/ci.yml` 是主流水线的唯一入口，按 FAST → MAIN → RELEASE 三道
+门用 `needs` 串联；各平台的构建+测试由可复用工作流承担，不要到旧的分平台副本里
+找作业。
+
+| 门 | 文件 | 说明 |
+|----|------|------|
+| FAST | `.github/workflows/ci.yml` | `static-analysis`（纯源码门禁，不编译）+ 并行的 `clang-tidy` 硬门 |
+| MAIN | `.github/workflows/_build-test.yml` | 三平台矩阵：Linux 用 Docker PG/Redis，Windows 用 runner 自带 PG 服务 + Memurai |
+| RELEASE | `.github/workflows/_sdk-smoke.yml` | `conan create` + test_package，Linux 与 Windows 双腿 |
+| 覆盖率 | `.github/workflows/coverage.yml` | Debug+gcov，按目录桶对基线棘轮 |
+| 回退 | `.github/workflows/legacy-source-build.yml` | Conan 前的源码直编 Drogon 路径，仅手动触发 |
+
+必过检查名固定为 `linux-build-and-test`、`windows-build-and-test`、
+`macos-build`（分支 ruleset 里写死），改名等于悄悄取消合并保护。
 
 ## 监控指标
 
@@ -142,13 +151,13 @@ Claude 自动调用：当 CI 构建失败或代码变更影响 CI 时
 
 ```bash
 # 检查最近的构建状态
-gh run list --workflow=ci-linux.yml --limit 5
+gh run list --workflow=ci.yml --limit 5
 
 # 查看构建详情
 gh run view [run-id]
 
 # 重新触发失败的构建
-gh workflow run ci-linux.yml
+gh workflow run ci.yml
 
 # 查看构建日志
 gh run view [run-id] --log

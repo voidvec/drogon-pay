@@ -4,6 +4,10 @@ name: Conan Package
 # recipe and runs test_package (a minimal find_package(DrogonPay) host that
 # loads PayPlugin and asserts its routes are reachable). Deliberately NOT a
 # required check yet - it will be promoted once it has proven stable.
+#
+# MIGRATION WINDOW: superseded by the sdk-smoke gate in ci.yml, which runs the
+# same conan create on Linux as well as Windows. This file is deleted once that
+# pipeline has one fully green run alongside it.
 on:
   push:
     branches: ["master"]

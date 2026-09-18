@@ -53,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exemption, line-collapse detection, SEED on first run). The
   `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
   verbal percentage.
+- **Single-entry CI pipeline** (`.github/workflows/ci.yml` + reusable
+  `_build-test.yml` / `_sdk-smoke.yml`): FAST (`static-analysis`, parallel
+  `clang-tidy`) → MAIN (`build-test` matrix over linux/windows/macos) →
+  RELEASE (`sdk-smoke` matrix over linux/windows), chained by `needs`, with
+  `concurrency` cancelling superseded runs. The three required check names
+  (`linux-build-and-test`, `windows-build-and-test`, `macos-build`) are
+  unchanged and now come from `matrix.check_name`. Actions are pinned to
+  full commit SHAs. The pre-Conan build-Drogon-from-source jobs moved to
+  dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
+  `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` still run beside
+  the new pipeline for one verification cycle and are deleted afterwards.
+- **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
+  per-platform workflow it replaces hardcoded only `001` and `002`, and its
+  Postgres readiness loop fell through to a green step when the probe never
+  succeeded. Readiness now probes `SELECT 1`, hard-fails on timeout and dumps
+  the container log.
 
 ### Changed
 

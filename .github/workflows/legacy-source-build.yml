@@ -1,0 +1,219 @@
+name: Legacy Source Build
+
+# Rollback safety net for the Conan + CMakePresets migration: the pre-Conan
+# pipeline that clones Drogon and builds it from source against
+# apt/brew-provided dependencies. Nothing here is a second implementation of a
+# capability the main pipeline lacks — it exists only so a Conan graph
+# regression can be bisected against a known-old build path.
+#
+# Dispatch-only on purpose: it is slow, it is not a required check, and its
+# Drogon pin drifts from conan.lock silently between runs.
+#
+# DELETE AT v1.1 — once the Conan path has carried a full release cycle, this
+# file is dead weight (see docs, AGENTS.md "Git Workflow").
+
+on:
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  DROGON_VERSION: "v1.9.13"
+
+jobs:
+  linux-source-build:
+    name: linux-build-and-test-legacy
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: 123456
+          POSTGRES_DB: pay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Drogon dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            gcc \
+            g++ \
+            cmake \
+            libjsoncpp-dev \
+            uuid-dev \
+            libpq-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libhiredis-dev \
+            redis-tools \
+            postgresql-client
+
+      - name: Build Drogon
+        run: |
+          git clone --depth 1 --branch ${{ env.DROGON_VERSION }} https://github.com/drogonframework/drogon
+          cd drogon
+          git submodule update --init --recursive
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DBUILD_EXAMPLES=OFF -DBUILD_MYSQL=OFF
+          make -j$(nproc)
+
+      - name: Install Drogon
+        run: |
+          cd drogon/build
+          sudo make install
+
+      - name: Configure Project CMake
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_CXX_STANDARD=17 -DBUILD_TESTS=ON -DCMAKE_PREFIX_PATH=/usr/local
+
+      - name: Build
+        run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for Postgres (SELECT 1 probe)..."
+          ok=""
+          for i in $(seq 1 30); do
+            if PGPASSWORD=123456 psql -h localhost -U test -d pay_test -c 'SELECT 1' >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            echo "  Postgres not ready yet (attempt $i/30)..."; sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::Postgres never became ready"; exit 1; }
+          echo "Waiting for Redis..."
+          ok=""
+          for i in $(seq 1 15); do
+            redis-cli -h localhost ping >/dev/null 2>&1 && { ok=yes; break; }
+            echo "  Redis not ready yet (attempt $i/15)..."; sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::Redis never became ready"; exit 1; }
+
+      - name: Initialize Database
+        env:
+          PGPASSWORD: 123456
+        run: |
+          for f in sql/*.sql; do
+            base=$(basename "$f")
+            case "$base" in
+              000_*) echo "Skipping $f (dev reset tool, not a version)"; continue ;;
+            esac
+            echo "Applying $f"
+            psql -h localhost -U test -d pay_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        env:
+          PAY_REDIS_PASSWORD: ""
+          PAY_DB_HOST: "127.0.0.1"
+          PAY_REDIS_HOST: "127.0.0.1"
+          PAY_DB_PASSWORD: "123456"
+          PAY_API_KEY: "test_key_123456"
+        run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure --timeout 180
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-legacy-test-logs
+          path: |
+            ${{github.workspace}}/build/Testing/
+            ${{github.workspace}}/logs/
+          retention-days: 7
+
+  macos-source-build:
+    name: macos-build-legacy
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Drogon dependencies
+        run: |
+          # Update Homebrew
+          brew update
+
+          # Install core dependencies (no databases needed for build-only)
+          brew install git cmake
+          brew install jsoncpp
+          brew install ossp-uuid
+          brew install zlib
+          brew install openssl@3 libpq hiredis
+
+      - name: Build Drogon
+        run: |
+          git clone --depth 1 --branch ${{ env.DROGON_VERSION }} https://github.com/drogonframework/drogon
+          cd drogon
+          git submodule update --init --recursive
+          mkdir build && cd build
+          export PostgreSQL_ROOT="$(brew --prefix libpq)"
+          cmake .. \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_CXX_EXTENSIONS=OFF \
+            -DCMAKE_CXX_FLAGS="-std=c++17" \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_FIND_FRAMEWORK=LAST \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_MYSQL=OFF \
+            -DBUILD_POSTGRESQL=ON \
+            -DBUILD_REDIS=ON \
+            -DBUILD_TESTING=OFF
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Install Drogon
+        run: |
+          cd drogon/build
+          sudo make install
+
+      - name: Configure Project CMake
+        run: |
+          export PostgreSQL_ROOT="$(brew --prefix libpq)"
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_CXX_EXTENSIONS=OFF \
+            -DCMAKE_CXX_FLAGS="-std=c++17" \
+            -DBUILD_TESTS=ON \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_FIND_FRAMEWORK=LAST
+
+      - name: Build
+        run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-legacy-test-logs
+          path: |
+            ${{github.workspace}}/build/Testing/
+            ${{github.workspace}}/logs/
+          retention-days: 7
