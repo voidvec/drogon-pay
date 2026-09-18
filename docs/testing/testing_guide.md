@@ -53,23 +53,32 @@ ctest --test-dir build/windows-msvc -C Release        # Windows
 ctest --test-dir build/linux-release                  # Linux/macOS
 ```
 
-Or through the dev wrappers, which pick the preset for you and refuse to run
-before a build exists: `examples/pay-server/scripts/test.sh` (Windows:
-`examples\pay-server\scripts\test.bat`), with `-l` to list, `-r <pattern>` to
-filter by CTest name, `-v` for per-test output and `-o` to also keep
-`test_results.log`.
+Or through the dev wrappers, which pick the preset for you, refuse to run
+before a build exists, and refuse to call an empty suite a pass:
+`examples/pay-server/scripts/test.sh` (Windows:
+`examples\pay-server\scripts\test.bat`), with `-l` to list case names,
+`-r <ExactName>` to run one case, `-v` for per-test output and `-o` to also
+keep `test_results.log` in the build directory.
 
-### A single test (by CTest name)
+### A single test
+
+`tests/CMakeLists.txt` registers **one** CTest case (`PayBackendTests`) that
+runs every `DROGON_TEST` in a single process from the binary's own output
+directory, so the `./config.json` and `./.env` resolve and one process exit code
+propagates to CTest unchanged. CTest therefore cannot select an individual
+case: `ctest -R RefundQuery` matches nothing, prints "No tests were found!!!"
+and exits **0**, which reads as a pass. Filter through the test binary instead —
+its `-r` takes an exact case name and exits 1 when no case matches:
 
 ```bash
-ctest --test-dir build/windows-msvc -C Release -R RefundQuery
+examples\pay-server\scripts\test.bat -l                    # list exact names
+examples\pay-server\scripts\test.bat -r PayIdempotency_RedisSetNx
+./build/windows-msvc/tests/Release/PayBackendTests -r PayIdempotency_RedisSetNx   # direct
 ```
 
-### Direct binary (verbose)
-
-```bash
-./build/windows-msvc/tests/Release/PayBackendTests
-```
+The direct form must run from the binary's own directory, which is where
+`build.bat` / `build.sh` put the `config.json` and `.env` the suite loads; the
+wrappers already `cd` there for you.
 
 ### End-to-end HTTP smoke scripts
 
