@@ -126,10 +126,9 @@ jobs:
       - name: Initialize Database
         env:
           PGPASSWORD: 123456
-        run: |
-          for f in sql/001_init_pay_tables.sql sql/002_add_indexes.sql sql/003_refund_unique_constraint.sql sql/004_ledger_fk.sql; do
-            psql -h localhost -U test -d pay_test -v ON_ERROR_STOP=1 -f "$f"
-          done
+        # Same executor as every other consumer: a second copy of the file list
+        # is one rename away from quietly skipping a migration.
+        run: python3 scripts/migrate_db.py --host localhost --user test --db pay_test
 
       - name: Run tests (produces .gcda)
         working-directory: ${{github.workspace}}/build/linux-coverage

@@ -17,7 +17,9 @@ conan install . --output-folder=build/windows-msvc -s build_type=Release -s comp
 cmake --preset windows-msvc
 cmake --build --preset windows-msvc
 
-# 3. Create the test database (user test / db pay_test), then run tests
+# 3. Provision the test database (superuser: CREATE ROLE test / CREATE DATABASE
+#    pay_test OWNER test), build its schema with
+#    examples/pay-server/scripts/setup_database.{sh,bat}, then run tests
 ctest --test-dir build/windows-msvc -C Release --output-on-failure
 
 # 4. Consumer-view verification (recipe + test_package)
@@ -77,6 +79,29 @@ The public API surface is a frozen whitelist (4 headers). Adding a header to
 `include/drogon_pay/` requires updating the whitelist in
 `scripts/check_architecture.py` in the same PR — deliberate friction to keep
 the API surface small.
+
+## Schema changes
+
+Migrations live in `sql/` as `NNN_snake_case.sql` and are applied by exactly
+one program, `scripts/migrate_db.py`, which records each version in
+`schema_migrations` and refuses to run when a file already applied has changed
+bytes. The practical rules (see `TECH_SPECS.md` "迁移工程化" and the
+`/create-migration` skill for the full checklist):
+
+- Never write `psql -f sql/...` in a workflow or script — add the file to `sql/`
+  and the executor picks it up. Three hardcoded lists used to exist and one
+  silently skipped two migrations.
+- New migrations must be idempotent and non-destructive;
+  `python scripts/check_migrations.py` enforces that plus naming and an
+  unbroken version chain, and CI runs it as a hard gate.
+- `sql/000_*.sql` is a dev reset helper, not a version; it is never applied by
+  the executor (a deploy that ran it dropped every table on redeploy).
+- Once a migration has shipped, pin it with
+  `python scripts/check_migrations.py --write-missing`. Changing a baselined
+  file means editing `scripts/migrations_baseline.json` in the same PR.
+- Creating/dropping the *database* is provisioning, not a migration: the app
+  role has no `CREATEDB`, so the executor only probes and prints the superuser
+  command instead of running it.
 
 ## Contributing a payment channel
 

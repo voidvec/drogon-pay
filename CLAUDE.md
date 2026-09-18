@@ -91,6 +91,11 @@
 | pay_idempotency | `libs/drogon-pay/src/models/PayIdempotency.{h,cc}` | 幂等性键 |
 | pay_ledger | `libs/drogon-pay/src/models/PayLedger.{h,cc}` | 账本记录 |
 
+表结构只由 `scripts/migrate_db.py` 应用（发现 `sql/` 链、与 `schema_migrations`
+同事务记账、已应用版本被改即拒绝），CI/部署/本地共用这一个执行器；
+`scripts/check_migrations.py` 负责命名、链连续性、幂等与非破坏。规范见
+[TECH_SPECS.md](TECH_SPECS.md) 「迁移工程化」，新增迁移用 `/create-migration`。
+
 ### 支付渠道（PaymentChannel SPI 实现）
 
 | 渠道 | 文件 |

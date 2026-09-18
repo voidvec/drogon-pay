@@ -3,7 +3,7 @@
 """Docs/AI-config drift guard (CI gate + local check).
 
 The authforge benchmark showed that hand-maintained agent inventories and
-spec docs rot within weeks. This gate makes the three historically-broken
+spec docs rot within weeks. This gate makes the four historically-broken
 invariants fail loudly:
 
   R1  AGENTS.md "Claude Code Assets" lists exactly what exists on disk
@@ -16,6 +16,9 @@ invariants fail loudly:
   R3  No gtest vocabulary outside docs/history/ and CHANGELOG.md — the
       suite is Drogon DROGON_TEST; gtest examples in agent docs were
       actively misleading (see 2026-09 drift audit).
+  R4  Migration versions cited in docs and skills must exist in sql/.
+      Chains move forward; prose that quotes "001-004" after 005 lands is
+      a runbook that will be copy-pasted into a deploy.
 
 Exit code 0 = all rules pass; 1 = violations (printed one per line).
 """
@@ -188,14 +191,88 @@ def check_gtest_vocabulary() -> list[str]:
     return errors
 
 
+R4_SKIP_DIRS = ("docs/history/", "docs/superpowers/")
+# READMEs that quote the chain by name, so they belong under the same rule as
+# the governance docs even though they sit outside docs/.
+R4_EXTRA_FILES = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "examples" / "pay-server" / "README.md",
+    REPO_ROOT / "libs" / "drogon-pay" / "src" / "models" / "README.md",
+)
+
+# `004_ledger_fk.sql` anywhere, with or without the sql/ prefix.
+R4_FILE_RE = re.compile(r"(?<![\w/])(\d{3}_[a-z0-9][a-z0-9_]*\.sql)\b")
+# `sql/004` without a filename.
+R4_VERSION_RE = re.compile(r"sql/(\d{3})(?!\d)")
+# "001 ~ 004" / "`000` → `001`" — backticks and separators between the numbers.
+R4_RANGE_RE = re.compile(
+    r"(?<!\d)(\d{3})[`\s]*(?:–|-|~|→|\.\.\.)[`\s]*(\d{3})(?!\d)"
+)
+
+
+def disk_migration_names() -> set[str]:
+    return {p.name for p in (REPO_ROOT / "sql").glob("*.sql")}
+
+
+def check_migration_versions() -> list[str]:
+    """Rule 4 — docs may not cite a migration version the chain does not have.
+
+    The migration chain is the one inventory that docs *and* skills quote by
+    number, and a runbook that lists 001-004 while sql/ holds 001-006 is wrong
+    in the way that gets copy-pasted into a deploy.
+    """
+    errors: list[str] = []
+    names = disk_migration_names()
+    versions = {name[:3] for name in names}
+    files: list[Path] = list(R3_ROOTS) + [p for p in R4_EXTRA_FILES if p.is_file()]
+    for root in R3_DIRS:
+        if not root.is_dir():
+            continue
+        files += [p for p in root.rglob("*")
+                  if p.is_file() and p.suffix in {".md", ".toml", ".py", ".sh"}]
+    for f in files:
+        rel = f.relative_to(REPO_ROOT).as_posix()
+        if any(rel.startswith(p) for p in R4_SKIP_DIRS):
+            continue
+        for lineno, line in enumerate(
+            f.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
+            for name in R4_FILE_RE.findall(line):
+                if name not in names:
+                    errors.append(
+                        f"[rule4 migration-cite] {rel}:{lineno}: cites "
+                        f"{name}, which is not in sql/ (on disk: "
+                        f"{', '.join(sorted(names))})"
+                    )
+            for version in R4_VERSION_RE.findall(line):
+                if version not in versions:
+                    errors.append(
+                        f"[rule4 migration-cite] {rel}:{lineno}: cites "
+                        f"sql/{version}, but no {version}_*.sql exists in sql/"
+                    )
+            if ".sql" in line or "sql/" in line:
+                for low, high in R4_RANGE_RE.findall(line):
+                    for value in range(int(low), int(high) + 1):
+                        if f"{value:03d}" not in versions:
+                            errors.append(
+                                f"[rule4 migration-cite] {rel}:{lineno}: cites "
+                                f"the range {low}-{high}, but {value:03d} is "
+                                f"not in sql/ (head is "
+                                f"{max(versions) if versions else '-'})"
+                            )
+    return errors
+
+
 def main() -> int:
-    violations = check_asset_inventory() + check_doc_paths() + check_gtest_vocabulary()
+    violations = (check_asset_inventory() + check_doc_paths()
+                  + check_gtest_vocabulary() + check_migration_versions())
     if violations:
         print(f"Docs drift guard FAILED ({len(violations)} violation(s)):")
         for v in violations:
             print("  " + v)
         return 1
-    print("Docs drift guard passed (3 rules: inventory, dead-paths, gtest-vocab).")
+    print("Docs drift guard passed (4 rules: inventory, dead-paths, "
+          "gtest-vocab, migration-versions).")
     return 0
 
 

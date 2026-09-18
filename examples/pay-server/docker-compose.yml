@@ -14,6 +14,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # SQL migrations live at the repository root after the plugin refactor.
+      # The image entrypoint runs every *.sql in filename order while
+      # initialising a *virgin* data directory, so this volume is a bootstrap
+      # convenience, not a migration runner: it also executes
+      # 000_drop_pay_tables.sql (a no-op on a fresh cluster), and it writes no
+      # schema_migrations rows. Therefore the first migrate_db.py run against a
+      # compose-provisioned database must adopt that state explicitly:
+      #   python scripts/migrate_db.py --baseline
+      # which refuses to record anything unless the tables really exist.
+      # To replay the chain instead of adopting it, drop the volume
+      # (`docker compose down -v`) and let migrate_db.py apply the versions.
       - ../../sql:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]

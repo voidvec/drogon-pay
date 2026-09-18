@@ -1,68 +1,43 @@
 @echo off
 setlocal
 
-REM SQL migrations live at the repository root (script is in examples/pay-server/scripts/)
+REM Recreates the dev database and applies the migration chain.
+REM
+REM Everything except the two lines below lives in scripts/migrate_db.py, the
+REM same executor CI uses. This script used to carry its own list of
+REM sql/NNN_*.sql files, as did three other consumers - one of which had
+REM drifted to applying only 001 and 002 - plus a hardcoded PGPASSWORD=123456.
+REM
+REM Password resolution is done by migrate_db.py: it reads PGPASSWORD /
+REM PAY_DB_PASSWORD from the environment, or from examples/pay-server/.env when
+REM --env-file is passed. A password is never written on a command line here.
+REM
+REM   setup_database.bat                 reset the schema, replay the chain
+REM   setup_database.bat --keep-data     apply pending migrations only
+
 cd /d "%~dp0..\..\.."
-echo Setting up pay_test database...
 
-set PGPASSWORD=123456
+if not defined PGDATABASE set "PGDATABASE=pay_test"
 
-echo Dropping existing database...
-psql -U test -d postgres -c "DROP DATABASE IF EXISTS pay_test;" >nul 2>&1
+set "EXTRA=--reset-schema --confirm-drop %PGDATABASE%"
+if /i "%~1"=="--keep-data" set "EXTRA="
+if defined EXTRA (
+    echo Resetting the public schema of %PGDATABASE%, then applying the chain...
+) else (
+    echo Applying pending migrations into existing %PGDATABASE%...
+)
+
+python scripts\migrate_db.py --env-file "examples/pay-server/.env" ^
+  --db "%PGDATABASE%" %EXTRA%
 if %errorlevel% neq 0 (
-    echo Error: Failed to drop database
+    echo.
+    echo Error: migrate_db.py failed - see its output above. No default password
+    echo        is shipped any more; set PGPASSWORD or fill in
+    echo        examples/pay-server/.env and retry.
     endlocal
     exit /b 1
 )
 
-echo Creating new database...
-psql -U test -d postgres -c "CREATE DATABASE pay_test;" >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to create database
-    endlocal
-    exit /b 1
-)
-
-echo Applying Dropping tables...
-psql -U test -d pay_test -f sql/000_drop_pay_tables.sql >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to apply OAuth2 core schema
-    endlocal
-    exit /b 1
-)
-
-echo Applying Pay core schema...
-psql -U test -d pay_test -f sql/001_init_pay_tables.sql >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to apply OAuth2 core schema
-    endlocal
-    exit /b 1
-)
-
-echo Applying add indexes...
-psql -U test -d pay_test -f sql/002_add_indexes.sql >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to apply indexes
-    endlocal
-    exit /b 1
-)
-
-echo Applying refund unique constraint...
-psql -U test -d pay_test -f sql/003_refund_unique_constraint.sql >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to apply refund unique constraint
-    endlocal
-    exit /b 1
-)
-
-echo Applying ledger foreign keys...
-psql -U test -d pay_test -f sql/004_ledger_fk.sql >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Failed to apply ledger foreign keys
-    endlocal
-    exit /b 1
-)
-
-echo Database setup complete!
+echo Database setup complete.
 endlocal
 exit /b 0

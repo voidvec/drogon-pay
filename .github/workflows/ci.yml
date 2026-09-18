@@ -79,6 +79,9 @@ jobs:
       - name: Test layout guard
         run: python3 scripts/check_test_layout.py
 
+      - name: Migration hygiene guard
+        run: python3 scripts/check_migrations.py
+
       # Two halves of one gate, split so a stale spec and a stale exclusion
       # list produce different failing step names. The checker parses a
       # YAML subset with the stdlib only: GitHub's ubuntu runners ship

@@ -16,27 +16,41 @@ Triggered by `/create-migration`.
 
 ## Migration Naming
 
-Pattern: `sql/{NNN}_{snake_case}.sql` (three digits, single underscore).
+Pattern: `sql/{NNN}_{snake_case}.sql` (three digits, single underscore,
+lowercase). Take the next number from the chain head:
 
-Current chain: `001_init_pay_tables` .. `004_ledger_fk` — next migration
-number is **005**.
+```bash
+ls sql/            # highest NNN wins; never reuse or renumber a version
+```
 
 `000_drop_pay_tables.sql` is a **dev reset helper**, not part of the version
 chain: never add schema changes to it, never renumber the chain to 000.
 
-Always check before creating:
-```bash
-ls sql/
-```
-
 ## How Migrations Are Applied
 
-- **CI**: `.github/workflows/ci-linux.yml` applies `sql/*.sql` in numeric
-  order with `psql -f` against a fresh database.
-- **Local docker**: `examples/pay-server/docker-compose.yml` mounts `sql/` as
-  `docker-entrypoint-initdb.d` (only runs on a brand-new volume).
-- **Manual**: `examples/pay-server/scripts/setup_database.bat` (Windows) or
-  `psql -f sql/00N_xxx.sql`.
+One executor, one place that knows the file list: `scripts/migrate_db.py`.
+It discovers `sql/NNN_*.sql`, applies what is missing in version order, each
+migration inside its own transaction together with its `schema_migrations`
+row, and refuses to run if a file already applied has changed bytes.
+
+| Consumer | Command |
+|----------|---------|
+| CI (Linux/Windows/macOS) | `.github/workflows/_build-test.yml` calls `migrate_db.py` |
+| Coverage job | `.github/workflows/coverage.yml` calls the same script |
+| Deploy | `examples/pay-server/scripts/deploy.{bat,sh}` call it too (they used to run `000_drop_pay_tables.sql` as a migration) |
+| Local dev | `examples/pay-server/scripts/setup_database.bat` or `.sh` (schema reset + replay) |
+| Docker compose | mounts `sql/` as `docker-entrypoint-initdb.d`, which writes **no** `schema_migrations` rows — run `python scripts/migrate_db.py --baseline` once against such a database |
+
+```bash
+python scripts/migrate_db.py --status      # what the database has recorded
+python scripts/migrate_db.py --dry-run     # what the next run would apply
+```
+
+Never hand-write `psql -f sql/...` in a workflow or script. Five copies of that
+list used to exist and they had already drifted: one applied only two of the
+four versions, and the deploy scripts globbed a `sql/` path that the plugin
+refactor had moved, so their "Run migrations" step applied nothing while
+reporting success.
 
 ## File Template
 
@@ -53,18 +67,29 @@ ever rolled forward onto fresh or staging databases).
 
 ## Validation Checklist
 
+Rules 1-5 below are enforced by `scripts/check_migrations.py` (CI
+`static-analysis` step) for every migration that is not yet baselined; run it
+before you push.
+
 1. **Naming**: `NNN_snake_case.sql`, next number after the latest migration
+   (the guard also rejects a gap, because "everything after 003" has to mean
+   something)
 2. **Idempotent**: `CREATE TABLE/INDEX ... IF NOT EXISTS`,
    `ADD COLUMN IF NOT EXISTS`; `ADD CONSTRAINT x` must be paired with
-   `DROP CONSTRAINT IF EXISTS x` in the same file; top-level `INSERT` needs
+   `DROP CONSTRAINT IF EXISTS x` in the same file, or checked inside a
+   `DO $$ ... IF NOT EXISTS ... END $$` block; top-level `INSERT` needs
    `ON CONFLICT DO NOTHING`
 3. **Non-destructive**: no `DROP TABLE/COLUMN`, `TRUNCATE`, or bare
    `DELETE FROM` (only `000_` may drop objects)
 4. **ORM consistency**: schema must match `libs/drogon-pay/model.json`;
    regenerate models via `/orm-gen` (`generate_models.bat`) after schema
    changes — never hand-edit `src/models/`
-5. **Existing files immutable**: never edit an applied `00N_*.sql`; add a
-   new migration instead
+5. **Existing files immutable**: never edit an applied `00N_*.sql`. Two
+   gates enforce it — `migrate_db.py` compares the sha256 recorded in
+   `schema_migrations`, and `check_migrations.py` compares against
+   `scripts/migrations_baseline.json`. If a baselined file genuinely has to
+   change, update that JSON by hand in the same PR (the friction is the
+   point); `--write-missing` pins a *new* file without touching old entries.
 
 ## Common Patterns
 
@@ -98,7 +123,13 @@ ALTER TABLE child_table
 
 ## After Creating
 
-1. Apply locally and run the suite: `ctest --test-dir build/<preset> ...`
-2. If ORM models need updating: `/orm-gen`
-3. Update `libs/drogon-pay/model.json` if new tables were added
-4. Add a line to `CHANGELOG.md` under `[Unreleased]`
+1. `python scripts/check_migrations.py` — naming, chain, guards
+2. Apply locally: `examples/pay-server/scripts/setup_database.sh`
+   (or `.bat`), which resets the schema and replays the whole chain, so the
+   new file is exercised from scratch rather than on top of drift
+3. Run the suite: `ctest --test-dir build/<preset> --output-on-failure`
+4. If ORM models need updating: `/orm-gen`
+5. Update `libs/drogon-pay/model.json` if new tables were added
+6. Add a line to `CHANGELOG.md` under `[Unreleased]`
+7. Once the migration has shipped, pin it:
+   `python scripts/check_migrations.py --write-missing`

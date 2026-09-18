@@ -9,7 +9,11 @@ set -o pipefail  # Exit on pipe failure
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$(dirname "$PROJECT_ROOT")")"
 BUILD_DIR="$PROJECT_ROOT/build"
+# migrate_db.py is the only migration executor; bash has no `python` alias
+# guarantee the way Windows batch does.
+PYTHON="$(command -v python3 || command -v python || true)"
 DEPLOY_ENV="${1:-development}"
 
 # Colors for output
@@ -61,12 +65,18 @@ check_prerequisites() {
 
     local missing_deps=()
 
-    # Check required commands
-    for cmd in cmake curl pgredis psql; do
+    # Check required commands ("pgredis" here used to abort every run: the
+    # client shipped with Redis is redis-cli, which check_redis calls below)
+    for cmd in cmake curl redis-cli psql; do
         if ! command -v $cmd &> /dev/null; then
             missing_deps+=($cmd)
         fi
     done
+
+    if [[ -z "$PYTHON" ]]; then
+        log_error "Neither python3 nor python is on PATH (scripts/migrate_db.py needs one)"
+        exit 1
+    fi
 
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
         log_error "Missing dependencies: ${missing_deps[*]}"
@@ -102,7 +112,8 @@ build_app() {
 setup_database() {
     log_info "Setting up database..."
 
-    # Check if database exists
+    # Provisioning: the app role has no CREATEDB, so creating the database is a
+    # superuser step and stays here rather than moving into the executor.
     if psql -h "$DB_HOST" -U "$DB_USER" -p "$DB_PORT" -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
         log_warn "Database $DB_NAME already exists"
     else
@@ -110,14 +121,16 @@ setup_database() {
         psql -h "$DB_HOST" -U "$DB_USER" -p "$DB_PORT" -c "CREATE DATABASE $DB_NAME;"
     fi
 
-    # Run migrations
+    # Apply migrations with the one executor. This used to be a
+    # "for migration in $PROJECT_ROOT/sql/*.sql" loop, which was dead twice
+    # over: sql/ moved to the repository root after the plugin refactor, so the
+    # glob matched nothing and the step quietly succeeded without applying
+    # anything. It also ran 000_drop_pay_tables.sql, which on a redeploy to
+    # staging would have dropped every table along with its data.
     log_info "Running database migrations..."
-    for migration in "$PROJECT_ROOT"/sql/*.sql; do
-        if [[ -f "$migration" ]]; then
-            log_info "Running migration: $(basename "$migration")"
-            psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -f "$migration"
-        fi
-    done
+    "$PYTHON" "$REPO_ROOT/scripts/migrate_db.py" \
+        --host "$DB_HOST" --port "$DB_PORT" --user "$DB_USER" --db "$DB_NAME" \
+        || { log_error "migrate_db.py failed - see its output above"; exit 1; }
 
     log_info "Database setup complete"
 }

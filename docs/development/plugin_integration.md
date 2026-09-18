@@ -106,18 +106,24 @@ target_link_libraries(my_server PRIVATE DrogonPay::DrogonPay)
 | `reconcile.enabled` | `false` | 对账定时器（跑在插件独立 worker 线程，不占 IO loop） |
 | `channels.<name>.enabled` | `false` | 渠道开关；未启用/未注册渠道的请求返回 `CHANNEL_NOT_AVAILABLE`（**没有兜底渠道**） |
 
-### 步骤 4：执行 sql/ 建表
+### 步骤 4：执行迁移建表
 
-按序执行仓库根 [sql/](../../sql/) 下的迁移脚本（PostgreSQL）：
+用仓库根的唯一执行器 [scripts/migrate_db.py](../../scripts/migrate_db.py) 应用
+[sql/](../../sql/) 下的迁移（PostgreSQL）：
 
 ```bash
-psql -h 127.0.0.1 -U <user> -d <dbname> -f sql/001_init_pay_tables.sql
-psql -h 127.0.0.1 -U <user> -d <dbname> -f sql/002_add_indexes.sql
-psql -h 127.0.0.1 -U <user> -d <dbname> -f sql/003_refund_unique_constraint.sql
-psql -h 127.0.0.1 -U <user> -d <dbname> -f sql/004_ledger_fk.sql
+python3 scripts/migrate_db.py --host 127.0.0.1 --user <user> --db <dbname>
+python3 scripts/migrate_db.py --host 127.0.0.1 --user <user> --db <dbname> --status   # 看已应用版本
+python3 scripts/migrate_db.py --host 127.0.0.1 --user <user> --db <dbname> --dry-run  # 看下次会跑什么
 ```
 
-（`000_drop_pay_tables.sql` 仅用于测试环境重置。）
+凭据从环境变量取（`PGPASSWORD`，或应用配置同名的 `PAY_DB_PASSWORD`），命令行不
+要写口令。执行器会自行发现 `sql/NNN_*.sql`、按版本号补齐未应用的部分，每条迁移
+与其 `schema_migrations` 记录在同一事务内提交；若某个已应用的版本被改过字节，它会
+直接拒绝执行。
+
+`sql/000_*.sql` 是**测试环境重置助手**，不在版本链里，执行器会跳过它——这也正是
+部署脚本曾经把它当迁移跑、每次部署先删一遍表的原因。
 
 ### 步骤 5：启动并验证
 

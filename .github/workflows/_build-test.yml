@@ -266,20 +266,21 @@ jobs:
           }
           if (-not $ready) { Write-Error "Redis (Memurai) did not become ready on port 6379"; exit 1 }
 
-      # Apply every versioned migration in filename order. `000_*` is the dev
-      # reset tool and deliberately sits outside the version chain, so it is
-      # skipped by name — a plain sql/*.sql glob would drop the schema.
+      # One migration implementation for every platform: scripts/migrate_db.py
+      # discovers sql/NNN_*.sql, applies what is missing in filename order, and
+      # records it in schema_migrations. `000_*` is the dev reset helper and the
+      # executor skips it by name, so no consumer has to keep its own file list
+      # — the copies that did had already drifted: the per-platform Linux
+      # workflow this replaces applied only 001 and 002, and this step ran
+      # without a Linux password, which no psql invocation can survive.
       - name: Initialize Database (Unix)
         if: inputs.use_database && inputs.platform != 'windows'
         run: |
-          for f in sql/*.sql; do
-            base=$(basename "$f")
-            case "$base" in
-              000_*) echo "Skipping $f (dev reset tool, not a version)"; continue ;;
-            esac
-            echo "Applying $f"
-            psql -h 127.0.0.1 -U test -d pay_test -v ON_ERROR_STOP=1 -f "$f"
-          done
+          # No password on this command line: migrate_db.py falls back to the
+          # job's PAY_DB_PASSWORD (the app's own name for the same secret), and
+          # the macOS cluster is a trust-authenticated throwaway anyway.
+          python3 scripts/migrate_db.py --host 127.0.0.1 --user test --db pay_test
+          python3 scripts/migrate_db.py --host 127.0.0.1 --user test --db pay_test --status
 
       - name: Initialize Database (Windows)
         if: inputs.use_database && inputs.platform == 'windows'
@@ -291,14 +292,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & "$env:PGBIN\psql" -h 127.0.0.1 -U postgres -c "CREATE DATABASE pay_test OWNER test;"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # migrate_db.py calls `psql` by name; the runner keeps the client in
+          # $env:PGBIN instead of on PATH.
+          $env:PATH = "$env:PGBIN;$env:PATH"
           $env:PGPASSWORD = "123456"
-          $files = Get-ChildItem -Path sql -Filter '*.sql' |
-            Where-Object { $_.Name -notlike '000_*' } | Sort-Object Name
-          foreach ($f in $files) {
-            Write-Host "Applying $($f.Name)"
-            & "$env:PGBIN\psql" -h 127.0.0.1 -U test -d pay_test -v ON_ERROR_STOP=1 -f $f.FullName
-            if ($LASTEXITCODE -ne 0) { Write-Error "Migration $($f.Name) failed"; exit 1 }
-          }
+          python scripts/migrate_db.py --host 127.0.0.1 --user test --db pay_test
+          if ($LASTEXITCODE -ne 0) { Write-Error "migrate_db.py failed"; exit 1 }
 
       # The whole DROGON_TEST suite is registered as a single ctest entry
       # (tests/CMakeLists.txt), so ctest_timeout bounds the entire binary.

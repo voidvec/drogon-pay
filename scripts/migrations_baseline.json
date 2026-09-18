@@ -1,0 +1,8 @@
+{
+  "000_drop_pay_tables.sql": "a22b4903b487bbb3c208fcb37ec3bd017eac7514110c7bfa5727ccc75444feeb",
+  "001_init_pay_tables.sql": "d3fa6fe7cefa11e74defbde3a94b35700db91d7ad804cc8d5ec1f976c49530fe",
+  "002_add_indexes.sql": "990b592e25c946096e003bfa7ed182153c83e959b44c8585f2566a9d08c532c5",
+  "003_refund_unique_constraint.sql": "ddd40c96cd2ca9a7aa3d94ea0d112cff3c6b67388b088f385e7b0a54dc54b13d",
+  "004_ledger_fk.sql": "62c850de62d537823a0bf6dbfe7d76be02f12fd13c4758d24ff43945ac4a361e",
+  "_readme": "sha256 of every sql/*.sql frozen when migrate_db.py landed. check_migrations.py fails if a pinned file changes; add an entry with --write-missing once a new migration has shipped."
+}

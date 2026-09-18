@@ -1,114 +1,85 @@
 ---
 name: db-reset
-description: Reset the pay_test development database by dropping and recreating all tables from SQL scripts.
+description: Reset the pay_test development schema and replay the SQL migration chain with the project executor
 ---
 
 # Database Reset
 
-Reset the `pay_test` development database by dropping and recreating all tables from
-the SQL scripts in `sql/`.
+Reset the `pay_test` development schema so it is rebuilt from
+`sql/NNN_*.sql`, with the applied versions recorded.
 
 ## Usage
 
 - User invokes: `/db-reset`
-- Requires: PostgreSQL running (local or Docker), `psql` available on PATH
+- Requires: PostgreSQL running (local or Docker), `psql` and `python` on PATH
 
-## Quick Reset (Recommended)
+## Do not drop tables by hand
 
-### Docker PostgreSQL (default)
+The old recipe — pipe `000_drop_pay_tables.sql` and then every
+`NNN_*.sql` into psql — is gone for two reasons:
+
+1. It hardcoded the file list, so the day a migration was added the recipe
+   silently stopped applying it.
+2. `sql/000_*` drops the pay tables but knows nothing about
+   `schema_migrations`, so the bookkeeping kept claiming the chain was applied
+   against an empty schema. `migrate_db.py` now refuses to proceed when
+   recorded versions have no tables behind them.
+
+## Local PostgreSQL
+
 ```powershell
-cd examples/pay-server
-
-# Drop existing tables, recreate from SQL scripts
-docker exec -i pay_postgres psql -U postgres -d pay_test < sql/000_drop_pay_tables.sql
-docker exec -i pay_postgres psql -U postgres -d pay_test < sql/001_init_pay_tables.sql
-docker exec -i pay_postgres psql -U postgres -d pay_test < sql/002_add_indexes.sql
-docker exec -i pay_postgres psql -U postgres -d pay_test < sql/003_refund_unique_constraint.sql
-docker exec -i pay_postgres psql -U postgres -d pay_test < sql/004_ledger_fk.sql
-
-# Verify
-docker exec -i pay_postgres psql -U postgres -d pay_test -c "\dt"
+examples\pay-server\scripts\setup_database.bat         REM Windows
+examples/pay-server/scripts/setup_database.sh          REM POSIX
 ```
 
-### Local PostgreSQL
-```powershell
-cd examples/pay-server
-$env:PGPASSWORD="postgres"
+Both call `scripts/migrate_db.py --reset-schema
+--confirm-drop pay_test`, which drops/recreates the `public` schema and then
+replays the chain in one pass. Password comes from `PGPASSWORD` /
+`PAY_DB_PASSWORD` or `examples/pay-server/.env`; the scripts carry none.
 
-# Drop existing tables, recreate from SQL scripts
-Get-ChildItem "sql\*.sql" | ForEach-Object {
-    psql -h localhost -U postgres -d pay_test -f $_.FullName
-}
+To apply only what is missing, without resetting: add `--keep-data`.
 
-# Verify
-psql -h localhost -U postgres -d pay_test -c "\dt"
+## Docker PostgreSQL
+
+```bash
+docker compose -f examples/pay-server/docker-compose.yml down -v
+docker compose -f examples/pay-server/docker-compose.yml up -d postgres
+# initdb.d already ran the chain as superuser and wrote no bookkeeping:
+python scripts/migrate_db.py --host 127.0.0.1 --user postgres --db pay_test --baseline
 ```
 
-## SQL Migration Files
+`--baseline` records the on-disk chain as applied *without* running it, and
+refuses if the tables are not actually there — so a half-provisioned volume
+cannot be adopted by mistake.
 
-All SQL scripts live in `sql/` as a flat directory (no `migrations/` or `seed/` subdirectories):
+## Verify
 
-| File | Purpose |
-|------|---------|
-| `000_drop_pay_tables.sql` | Drop all existing tables (safe for re-run) |
-| `001_init_pay_tables.sql` | Create core tables: `pay_payment`, `pay_refund`, `pay_callback`, `pay_idempotency`, `pay_ledger` |
-| `002_add_indexes.sql` | Performance indexes on frequently queried columns |
-| `003_refund_unique_constraint.sql` | Enforce refund uniqueness |
-| `004_ledger_fk.sql` | Foreign key constraints on ledger table |
+```bash
+python scripts/migrate_db.py --status          # every version reads "applied"
+psql -h 127.0.0.1 -U test -d pay_test -c '\dt' # pay_* tables + schema_migrations
+```
 
-**Apply order**: Always run sequentially by numeric prefix (`000` → `001` → `002` → `003` → `004`).
-
-## Database Customisation
-
-| Parameter | Default (Docker) | Default (Local) |
-|-----------|-----------------|-----------------|
-| Host | localhost | localhost |
-| Port | 5432 | 5432 |
-| Database | pay_test | pay_test |
-| User | postgres | postgres |
-| Password | postgres | postgres |
-
-Defaults come from `examples/pay-server/docker-compose.yml`. For local setups, adjust credentials via environment variables.
+Then the suite:
+```powershell
+build\windows-msvc\tests\Release\PayBackendTests.exe
+```
 
 ## ORM Model Regeneration
 
-After resetting the database structure, regenerate ORM models to ensure they match the
-schema:
+After the structure changes, regenerate models so they match the schema:
 
 ```powershell
 cd libs/drogon-pay/src
 drogon_ctl create model models
 ```
 
-For details, see the `/orm-gen` skill.
-
-## Verification
-
-After reset, verify the schema is intact:
-
-```powershell
-# List all tables in pay_test
-docker exec -i pay_postgres psql -U postgres -d pay_test -c "\dt"
-
-# Expected output:
-#  pay_callback
-#  pay_idempotency
-#  pay_ledger
-#  pay_payment
-#  pay_refund
-```
-
-Run a smoke test to confirm everything works:
-```powershell
-# From the repository root (DROGON_TEST binary, runs the full suite)
-build\windows-msvc\tests\Release\PayBackendTests.exe
-```
+For details, see the `/orm-gen` skill. Never hand-edit `src/models/`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `psql: FATAL: role "postgres" does not exist` | Verify PostgreSQL user; check docker-compose.yml `POSTGRES_USER` |
-| `psql: FATAL: database "pay_test" does not exist` | Create database: `docker exec pay_postgres createdb -U postgres pay_test` |
-| `drogon_ctl: command not found` | Install drogon_ctl or run from Drogon install directory |
-| Tables already exist | Run `000_drop_pay_tables.sql` first (uses `DROP TABLE IF EXISTS`) |
+| `database "pay_test" does not exist` | Creating it is provisioning, not a migration: `psql -U postgres -d postgres -c "CREATE DATABASE pay_test OWNER test"` (the app role has no CREATEDB, which is why the executor will not try) |
+| `psql: FATAL: role "postgres" does not exist` | Check `examples/pay-server/docker-compose.yml` `POSTGRES_USER` |
+| `schema_migrations says ... but these tables are absent` | Something dropped objects out-of-band; run `setup_database` (reset + replay) or delete the stale rows if the empty schema is intended |
+| `changed after it was applied` | An applied migration was edited. Revert it and add a new version instead |
