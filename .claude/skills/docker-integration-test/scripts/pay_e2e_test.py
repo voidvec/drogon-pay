@@ -79,7 +79,7 @@ def test_health_check(result):
     """测试 1: 健康检查"""
     print("\n🏥 测试 1: 健康检查...")
     start = time.time()
-    status, content = api_request("GET", "/health")
+    status, content = api_request("GET", "/healthz")
     duration = f"<{int((time.time() - start) * 1000)}ms"
 
     if status == 200:
@@ -97,10 +97,11 @@ def test_create_payment(result):
     order_no = f"E2E-{uuid.uuid4().hex[:12].upper()}"
 
     start = time.time()
-    status, content = api_request("POST", "/api/v1/payments", data={
+    status, content = api_request("POST", "/api/pay/create", data={
         "channel": "alipay",
         "order_no": order_no,
-        "amount": 1,
+        "amount": "1.00",
+        "user_id": 10001,
         "description": "E2E integration test",
     })
     duration = f"<{int((time.time() - start) * 1000)}ms"
@@ -123,14 +124,14 @@ def test_query_payment(result, order_no):
 
     print(f"\n🔍 测试 3: 查询支付 ({order_no})...")
     start = time.time()
-    status, content = api_request("GET", f"/api/v1/payments/{order_no}")
+    status, content = api_request("GET", f"/api/pay/query?order_no={order_no}")
     duration = f"<{int((time.time() - start) * 1000)}ms"
 
     if status == 200:
         try:
             data = json.loads(content)
-            print(f"   ✅ 支付查询成功: status={data.get('status', 'unknown')}")
-            result.add("查询支付", True, duration, f"状态: {data.get('status')}")
+            print(f"   ✅ 支付查询成功: status={data.get('data', {}).get('status', 'unknown')}")
+            result.add("查询支付", True, duration, f"状态: {data.get('data', {}).get('status')}")
         except json.JSONDecodeError:
             print(f"   ✅ 支付查询返回 (非 JSON): {content[:100]}")
             result.add("查询支付", True, duration, "响应正常")
@@ -148,19 +149,20 @@ def test_idempotency(result):
     payload = {
         "channel": "alipay",
         "order_no": order_no,
-        "amount": 1,
+        "amount": "1.00",
+        "user_id": 10001,
         "description": "Idempotency E2E test",
     }
 
     # 第一次请求
     start = time.time()
-    status1, content1 = api_request("POST", "/api/v1/payments", data=payload,
+    status1, content1 = api_request("POST", "/api/pay/create", data=payload,
                                      headers={"Idempotency-Key": idem_key})
     duration1 = f"<{int((time.time() - start) * 1000)}ms"
 
     # 第二次请求（相同 Idempotency-Key）
     start = time.time()
-    status2, content2 = api_request("POST", "/api/v1/payments", data=payload,
+    status2, content2 = api_request("POST", "/api/pay/create", data=payload,
                                      headers={"Idempotency-Key": idem_key})
     duration2 = f"<{int((time.time() - start) * 1000)}ms"
 
@@ -186,9 +188,9 @@ def test_refund(result, order_no):
 
     print(f"\n💸 测试 5: 退款 ({order_no})...")
     start = time.time()
-    status, content = api_request("POST", "/api/v1/refunds", data={
+    status, content = api_request("POST", "/api/pay/refund", data={
         "order_no": order_no,
-        "amount": 1,
+        "amount": "1.00",
         "reason": "E2E test refund",
     })
     duration = f"<{int((time.time() - start) * 1000)}ms"

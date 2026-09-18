@@ -118,25 +118,30 @@ auto order = mapper.findBy(OrderNo, orderNo);
 PayOrder order;
 order.setOrderNo(newOrderNo);
 order.setUserId(userId);
-order.setAmount(amount);
-order.setStatus("pending");
+order.setAmount(amount);          // decimal string in yuan, e.g. "9.99"
+order.setStatus("CREATED");
 mapper.insert(order);
 ```
 
 ### Important Notes
 
-1. **Amount Storage**: All amounts are stored as **BIGINT** (in cents/fen)
-   - 100.00 CNY = 10000 (stored as integer)
-   - Convert before database operations
+1. **Amount Storage**: All amounts are stored as `VARCHAR(32)` **decimal strings
+   in yuan units** (the columns are not numeric, and there is no cents
+   conversion)
+   - `"9.99"`, `"100"`, `"0.5"` are valid; the controller-level check is
+     `^\d+(\.\d{1,2})?$`
+   - Never multiply by 100 and never store a cent integer
 
-2. **Timestamps**: Use `CURRENT_TIMESTAMP` for automatic timestamps
-   - `created_at` - Set automatically on insert
-   - `updated_at` - Must be updated manually
+2. **Timestamps**: `created_at` and `updated_at` are maintained by PostgreSQL
+   - `created_at` - Set automatically on insert (`DEFAULT CURRENT_TIMESTAMP`)
+   - `updated_at` - Set by the `update_*_modtime` triggers created in
+     `sql/001_init_pay_tables.sql`; do not assign it by hand
 
-3. **Status Values**: Use consistent status strings
-   - Order: `pending`, `paying`, `paid`, `failed`, `closed`
-   - Payment: `pending`, `processing`, `success`, `failed`
-   - Refund: `pending`, `processing`, `success`, `failed`
+3. **Status Values**: Uppercase state-machine constants, defined in
+   [TECH_SPECS.md](../../../../TECH_SPECS.md) "订单状态机"
+   - Order: `CREATED`, `PAYING`, `PAID`, `REFUNDED`, `CLOSED`, `FAILED`
+   - Payment: `INIT`, `PROCESSING`, `SUCCESS`, `FAIL`
+   - Refund: `REFUND_INIT`, `REFUNDING`, `REFUND_SUCCESS`, `REFUND_FAIL`
 
 ## Troubleshooting
 
