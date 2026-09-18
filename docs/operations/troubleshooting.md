@@ -133,7 +133,8 @@ Failed to refresh WeChat certificate
 1. Ensure test database exists
 2. Check mock expectations match actual service calls
 3. Verify test configuration is correct
-4. Run tests with verbose output: `--gtest_verbose`
+4. Re-run a single failing case with the Drogon test runner:
+   `PayBackendTests -r <TestName>` (or `ctest --test-dir build/<preset> -C Release --output-on-failure`)
 
 ## Debug Mode
 
