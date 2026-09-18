@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
   `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` still run beside
   the new pipeline for one verification cycle and are deleted afterwards.
+- **macOS CI runs the test suite instead of building only.** The arm64 leg
+  provisions a throwaway Postgres cluster (`initdb -A trust` under
+  `$RUNNER_TEMP`) and a daemonized `redis-server`, applies the migration chain
+  and runs the same `PayBackendTests` ctest entry as the other platforms.
+  Previously a platform-specific regression could only be caught by hand.
 - **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
   per-platform workflow it replaces hardcoded only `001` and `002`, and its
   Postgres readiness loop fell through to a green step when the probe never

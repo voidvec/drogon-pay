@@ -186,6 +186,58 @@ jobs:
             exit 1
           fi
 
+      # macOS has no service containers and no Docker dependency here: the
+      # suite runs against a throwaway cluster under $RUNNER_TEMP, so the
+      # runner's own state is never touched. `-A trust` keeps the bootstrap
+      # honest-but-simple — password auth is already exercised by the Linux and
+      # Windows legs; this leg's question is "does the arm64 build pass the
+      # suite", and answering it must not depend on Homebrew's default auth
+      # config or on writing into the shared brew var directory.
+      - name: Provision PostgreSQL and Redis (macOS)
+        if: inputs.use_database && inputs.platform == 'macos'
+        run: |
+          brew install postgresql@15 redis@7
+          pg_prefix="$(brew --prefix postgresql@15)"
+          redis_prefix="$(brew --prefix redis@7)"
+          {
+            echo "$pg_prefix/bin"
+            echo "$redis_prefix/bin"
+          } >> "$GITHUB_PATH"
+          export PATH="$pg_prefix/bin:$redis_prefix/bin:$PATH"
+          export PGDATA="$RUNNER_TEMP/pgdata"
+
+          initdb -D "$PGDATA" -A trust -U "$USER" > "$RUNNER_TEMP/initdb.log" 2>&1
+          pg_ctl -D "$PGDATA" \
+            -o "-p 5432 -k /tmp -c listen_addresses=127.0.0.1" \
+            -l "$RUNNER_TEMP/postgres.log" -w start
+
+          ok=""
+          for i in $(seq 1 30); do
+            if psql -h 127.0.0.1 -U "$USER" -d postgres -c 'SELECT 1' >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            echo "  Postgres not ready yet (attempt $i/30)..."; sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::Postgres never became ready"
+            cat "$RUNNER_TEMP/initdb.log" "$RUNNER_TEMP/postgres.log" || true
+            exit 1
+          fi
+
+          psql -h 127.0.0.1 -U "$USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE test LOGIN SUPERUSER" \
+            -c "CREATE DATABASE pay_test OWNER test"
+
+          redis-server --daemonize yes --port 6379 --dir "$RUNNER_TEMP"
+          ok=""
+          for i in $(seq 1 15); do
+            if redis-cli -h 127.0.0.1 ping | grep -q PONG; then
+              ok=yes; break
+            fi
+            echo "  Redis not ready yet (attempt $i/15)..."; sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::Redis never became ready"; exit 1; }
+
       # GitHub-hosted Windows runners do not support service containers, so the
       # runner image's own PostgreSQL service plus Chocolatey-installed Memurai
       # stand in for the Linux containers.
