@@ -1,6 +1,5 @@
 #!/bin/bash
 # Pay Plugin Database Restore Script
-# Version: 1.0.0
 # Description: Restore PostgreSQL database from backup
 
 set -e  # Exit on error

@@ -50,6 +50,23 @@
       }
     },
     {
+      "name": "linux-debug",
+      "inherits": "conan-base",
+      "displayName": "Linux Debug (Conan)",
+      "description": "conan install . --output-folder=build/linux-debug -s build_type=Debug -s compiler.cppstd=17 --build=missing",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/linux-debug/build/generators/conan_toolchain.cmake"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "windows-msvc",
       "inherits": "conan-base",
       "displayName": "Windows MSVC (Conan)",
@@ -98,12 +115,34 @@
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
       }
+    },
+    {
+      "name": "macos-debug",
+      "inherits": "conan-base",
+      "displayName": "macOS arm64 Debug (Conan)",
+      "description": "conan install . --output-folder=build/macos-debug -s build_type=Debug -s compiler.cppstd=17 -s arch=armv8 --build=missing",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/macos-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build/macos-debug/build/generators/conan_toolchain.cmake"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "linux-release",
       "configurePreset": "linux-release"
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug"
     },
     {
       "name": "linux-coverage",
@@ -122,6 +161,10 @@
     {
       "name": "macos-arm64",
       "configurePreset": "macos-arm64"
+    },
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug"
     }
   ]
 }

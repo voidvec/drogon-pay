@@ -10,21 +10,27 @@ Prerequisites: CMake ≥ 3.21, Conan 2, a C++17 toolchain
 (MSVC 2022 / GCC / Clang), PostgreSQL 13+ and Redis 6+ for the test suite.
 
 ```bash
-# 1. Dependencies (per-preset output folder)
-conan install . --output-folder=build/windows-msvc -s build_type=Release -s compiler.cppstd=17 --build=missing
-
-# 2. Configure + build (presets: windows-msvc / linux-release / macos-arm64)
-cmake --preset windows-msvc
-cmake --build --preset windows-msvc
+# 1+2. Dependencies, configure and build in one step. The dev scripts are
+#      parameter-for-parameter twins: build.sh on Linux/macOS, build.bat on
+#      Windows (add -debug for the *-debug presets). They run
+#      `conan install` + `cmake --preset` + `cmake --build --preset` and copy
+#      config.json/.env/certs next to the binaries.
+examples/pay-server/scripts/build.sh            # Linux / macOS
+examples\pay-server\scripts\build.bat           # Windows
 
 # 3. Provision the test database (superuser: CREATE ROLE test / CREATE DATABASE
 #    pay_test OWNER test), build its schema with
 #    examples/pay-server/scripts/setup_database.{sh,bat}, then run tests
+#    (same twins: test.sh / test.bat, or ctest directly)
 ctest --test-dir build/windows-msvc -C Release --output-on-failure
 
 # 4. Consumer-view verification (recipe + test_package)
 conan create . --build=missing -s build_type=Release -s compiler.cppstd=17
 ```
+
+Presets: `windows-msvc` / `windows-msvc-debug` (multi-config, binaries under
+`build/<preset>/.../Release|Debug`) and `linux-release` / `linux-debug` /
+`macos-arm64` / `macos-debug` / `linux-coverage` (single-config).
 
 CMake options: `DROGON_PAY_BUILD_EXAMPLES` / `DROGON_PAY_BUILD_TESTS`
 (both default ON; `PAY_BUILD_TESTS`/`BUILD_TESTS` kept as CI-compatible aliases).
@@ -102,6 +108,18 @@ bytes. The practical rules (see `TECH_SPECS.md` "迁移工程化" and the
 - Creating/dropping the *database* is provisioning, not a migration: the app
   role has no `CREATEDB`, so the executor only probes and prints the superuser
   command instead of running it.
+
+## Releasing
+
+The version lives in three places and nowhere else: `project(drogon-pay VERSION …)`
+in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level `"version"`
+in `examples/pay-admin/package.json`. `scripts/check_version_sync.py` keeps them
+honest, and `static-analysis` runs it on every pull request.
+
+To release: move `[Unreleased]` into a dated `## [x.y.z]` section, bump the three
+declarations in the same commit, then `git tag v1.2.3 && git push --tags`.
+Do not restate the version in config or deploy comments; that is how it drifted before
+the checker existed.
 
 ## Contributing a payment channel
 

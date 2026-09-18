@@ -100,12 +100,9 @@ if not exist "CTestTestfile.cmake" (
 echo Test directory: %CD%\!TEST_DIR!
 echo.
 
-REM Set environment for tests
-set DB_HOST=localhost
-set DB_PORT=5432
-set DB_NAME=pay_test
-set DB_USER=test
-set DB_PASS=123456
+REM No DB_* / PAY_* environment here on purpose: tests/main.cc loads the .env
+REM that build.bat copied next to the binary, so credentials do not belong in
+REM this script. (A dead DB_PASS=123456 block used to sit here, read by nothing.)
 
 REM Build CTest command (without --test-dir since we're already in the build dir)
 set CTEST_CMD=ctest -C %BUILD_TYPE%

@@ -1,6 +1,5 @@
 #!/bin/bash
 # Pay Plugin Database Backup Script
-# Version: 1.0.0
 # Description: Automated PostgreSQL database backup with compression and retention
 
 set -e  # Exit on error

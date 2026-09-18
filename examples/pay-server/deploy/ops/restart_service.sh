@@ -1,6 +1,5 @@
 #!/bin/bash
 # Pay Plugin Service Restart Script
-# Version: 1.0.0
 # Description: Graceful restart of PayPlugin service with health check
 
 set -e  # Exit on error

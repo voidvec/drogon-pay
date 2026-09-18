@@ -130,6 +130,19 @@ python3 scripts/migrate_db.py                  # 应用缺口
 | 格式化工具 | clang-format 自动格式化 |
 | 字符规范 | 禁止 emoji，使用 ASCII 符号如 `[+]`, `[-]`, `[!]`（Windows 兼容性） |
 
+### [MUST] 开发脚本跨平台对齐
+
+`examples/pay-server/scripts/` 下的每个开发脚本都有 `.sh` / `.bat` 两个孪生体
+（`build` / `test` / `setup_database` / `deploy`），二者**逐参数对齐**：同样的选项、
+同样的默认值、同样的退出码语义。
+
+| 规范项 | 要求 |
+|--------|------|
+| 唯一入口 | 平台差异只写在脚本里，不写进文档/工作流；文档给的是 `build.sh` / `build.bat`，不是展开的 conan+cmake 长命令 |
+| 预设映射 | 脚本内部映射到 CMakePresets：`windows-msvc{,-debug}`、`linux-{release,debug}`、`macos-{arm64,debug}`；新增构建类型先加 preset 再加脚本分支 |
+| 凭据来源 | 脚本不写口令。`test.sh`/`test.bat` 不设任何 `DB_*` 变量，真实测试凭据由 `build.*` 复制到二进制旁边的 `.env` 提供，进程环境优先 |
+| 变更要求 | 改一个孪生体必须在同一提交里改另一个；只加 `.bat` 会让 Linux/macOS 开发者按文档抄命令时踩到未覆盖路径 |
+
 ### [MUST] 错误处理
 
 | 错误类型 | 处理要求 |
@@ -328,6 +341,19 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 | `PAY_API_KEY` | API 认证密钥 |
 | `ALIPAY_PRIVATE_KEY` | 支付宝私钥 |
 | `WECHAT_PAY_KEY` | 微信支付密钥 |
+
+### [MUST] 版本号一致性
+
+版本号只**声明**、不派生，且只允许出现在三处：`CMakeLists.txt` 的
+`project(drogon-pay VERSION x.y.z …)`、`conanfile.py` 的 `version = "x.y.z"`、
+`examples/pay-admin/package.json` 的顶层 `"version"`。
+
+| 规范项 | 要求 |
+|--------|------|
+| 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言三处一致 |
+| 打 tag | `python3 scripts/check_version_sync.py --tag v1.2.3`：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段 |
+| 禁止复述 | 配置/部署/告警文件的注释里不得再写版本号字符串——历史上那 6 处注释就是漂移源，已删除 |
+| 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 → 提交 PR → 合并后打 tag |
 
 ### [MUST] 日志分级规范
 

@@ -1,6 +1,5 @@
 #!/bin/bash
 # Pay Plugin Log Viewer Script
-# Version: 1.0.0
 # Description: View and filter PayPlugin logs
 
 # ============================================================================
