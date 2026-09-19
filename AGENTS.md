@@ -48,10 +48,10 @@ code bug.
 | MAIN | `.github/workflows/_build-test.yml` (called per platform by `ci.yml`) | `linux-build-and-test`, `windows-build-and-test`, `macos-build` |
 | RELEASE | `.github/workflows/_sdk-smoke.yml` (called per platform by `ci.yml`) | `sdk-smoke-linux`, `sdk-smoke-windows` |
 
-`ci.yml` is the single entry point; `.github/workflows/ci-linux.yml`,
-`ci-windows.yml`, `ci-macos.yml` and `conan-create.yml` are the superseded
-per-platform copies, kept running for one parallel-verification cycle and then
-deleted. Do not add a new job to the legacy files — extend `ci.yml`.
+`ci.yml` is the single entry point: the per-platform workflow copies it replaced
+(plus the standalone Windows-only Conan-package job) ran beside it until one
+commit produced a fully green pass of both chains, and are now deleted. Do not
+reintroduce a per-platform workflow file — extend `ci.yml`.
 
 **The three MAIN check names are required status checks in the branch
 ruleset.** Never rename them (a rename silently removes merge protection);
