@@ -160,7 +160,7 @@ python3 scripts/migrate_db.py                  # 应用缺口
 | 规范项 | 要求 |
 |--------|------|
 | 单一入口 | `ci.yml` 是唯一入口，FAST(`static-analysis`+`clang-tidy`) → MAIN(`_build-test.yml`) → RELEASE(`_sdk-smoke.yml`) 全部用 `needs` 串联；缺 `needs` 边的检查只是建议性信号，它红了也照样能合进去 |
-| 检查名契约 | 三个 required context 是 `linux-build-and-test / build-test`、`windows-build-and-test / build-test`、`macos-build / build-test`：`uses:` 调可复用工作流的 job 报名为「调用方 job 名 / 被调用方工作流给它自己 job 的名字」，`matrix.check_name` 只供前一半。改任何一半或删掉曾上报某名的工作流文件，ruleset 会继续要求一个无人上报的 context——保护不是解除而是反转成永久 pending 卡死，且 `gh pr checks` 不列出缺位的必需检查，全绿列表会掩盖它；用 ruleset context 与 `commits/<sha>/check-runs` 名做差集核验 |
+| 检查名契约 | 三个 required context 是 `linux-build-and-test / build-test`、`windows-build-and-test / build-test`、`macos-build / build-test`：`uses:` 调可复用工作流的 job 报名为「调用方 job 名 / 被调用方工作流给它自己 job 的名字」，`matrix.check_name` 只供前一半；后缀之所以就是 `build-test` 这个键名，是因为 `_build-test.yml` 的 job 没写 `name:` 键，给它补一个 `name:` 同样会改掉三条 context。改任何一处或删掉曾上报某名的工作流文件，ruleset 会继续要求一个无人上报的 context——保护不是解除而是反转成永久 pending 卡死，且 `gh pr checks` 不列出缺位的必需检查，全绿列表会掩盖它；用 ruleset context 与 `commits/<sha>/check-runs` 名做差集核验（命令见 AGENTS.md "CI"） |
 | 行动固定 | 所有 `uses:` 钉到完整 commit SHA，并注释该 SHA 对应的 tag；浮动 major tag 让未经评审的上游变更决定门禁结论 |
 | 最小权限 | 工作流级显式声明 `permissions: contents: read`，只有 `release.yml` 的 `publish` job 拿 `write`；`.github/workflows/secrets-scan.yml` 因 gitleaks 需要回写 commit status 暂未收窄 |
 
