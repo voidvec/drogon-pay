@@ -1,0 +1,45 @@
+{
+  "_comment": "Coverage ratchet baseline; regenerate with `measure_coverage.py --seed` and review the diff.",
+  "buckets": {
+    "channels": {
+      "covered": 231,
+      "lines": 903,
+      "pct": 25.58
+    },
+    "core": {
+      "covered": 222,
+      "lines": 286,
+      "pct": 77.62
+    },
+    "handlers": {
+      "covered": 190,
+      "lines": 682,
+      "pct": 27.86
+    },
+    "host-controllers": {
+      "covered": 70,
+      "lines": 148,
+      "pct": 47.3
+    },
+    "host-utils": {
+      "covered": 115,
+      "lines": 156,
+      "pct": 73.72
+    },
+    "services": {
+      "covered": 1998,
+      "lines": 5113,
+      "pct": 39.08
+    },
+    "utils": {
+      "covered": 186,
+      "lines": 202,
+      "pct": 92.08
+    }
+  },
+  "overall": {
+    "covered": 3012,
+    "lines": 7490,
+    "pct": 40.21
+  }
+}
