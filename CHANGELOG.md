@@ -85,8 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged and now come from `matrix.check_name`. Actions are pinned to
   full commit SHAs. The pre-Conan build-Drogon-from-source jobs moved to
   dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
-  `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` still run beside
-  the new pipeline for one verification cycle and are deleted afterwards.
+  `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` ran beside the new
+  pipeline for exactly one verification cycle and are deleted in this stack: the
+  same commit carried both chains to green (`ci.yml` FAST → MAIN → both
+  sdk-smoke legs, plus all four legacy checks), and the new RELEASE gate
+  smoke-tests `conan create` on Linux as well as Windows at PR time, which the
+  Windows-only job it replaces never did.
 - **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
   per-platform workflow it replaces hardcoded only `001` and `002`, and its
   Postgres readiness loop fell through to a green step when the probe never

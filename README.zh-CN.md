@@ -4,10 +4,8 @@
 
 [English](README.md) | **简体中文**
 
-[![Windows CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-windows.yml)
-[![Linux CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-linux.yml)
-[![macOS CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-macos.yml)
-[![Conan Package](https://github.com/lucaswang420/drogon-pay/actions/workflows/conan-create.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/conan-create.yml)
+[![CI](https://github.com/voidvec/drogon-pay/actions/workflows/ci.yml/badge.svg)](https://github.com/voidvec/drogon-pay/actions/workflows/ci.yml)
+[![Coverage](https://github.com/voidvec/drogon-pay/actions/workflows/coverage.yml/badge.svg)](https://github.com/voidvec/drogon-pay/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `drogon-pay` 把完整的支付能力（创建/扫码/查询/退款/回调验签/对账/幂等）封装为

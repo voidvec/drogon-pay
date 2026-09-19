@@ -26,9 +26,11 @@ name: CI
 #     | select(.type=="required_status_checks")
 #     | .parameters.required_status_checks[].context'
 #
-# During the migration window the legacy ci-linux/ci-windows/ci-macos/
-# conan-create workflows still run side by side with this one; they are removed
-# once this pipeline has produced one fully green run on the same commit.
+# The legacy ci-linux / ci-windows / ci-macos / conan-create copies this pipeline
+# supersedes are deleted: run 35441152813 produced one fully green pass of this
+# chain (FAST -> MAIN -> both sdk-smoke legs) side by side with all four legacy
+# checks on the same commit, and `conan create` is now smoke-tested on Linux as
+# well as Windows at PR time, which the legacy copy never did.
 # `secrets-scan.yml` and `deploy.yml` stay independent on purpose.
 
 on:

@@ -4,10 +4,8 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-[![Windows CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-windows.yml)
-[![Linux CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-linux.yml)
-[![macOS CI](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/ci-macos.yml)
-[![Conan Package](https://github.com/lucaswang420/drogon-pay/actions/workflows/conan-create.yml/badge.svg)](https://github.com/lucaswang420/drogon-pay/actions/workflows/conan-create.yml)
+[![CI](https://github.com/voidvec/drogon-pay/actions/workflows/ci.yml/badge.svg)](https://github.com/voidvec/drogon-pay/actions/workflows/ci.yml)
+[![Coverage](https://github.com/voidvec/drogon-pay/actions/workflows/coverage.yml/badge.svg)](https://github.com/voidvec/drogon-pay/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `drogon-pay` packages a complete payment stack (create / QR code / query / refund /

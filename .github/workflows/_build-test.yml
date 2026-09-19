@@ -20,7 +20,7 @@ on:
   workflow_call:
     inputs:
       platform:
-        description: "linux | windows | macos — selects the Postgres/Redis provisioning path"
+        description: "linux | windows | macos — selects the per-platform steps (Conan install, and Postgres/Redis provisioning on the two legs that run the suite)"
         type: string
         required: true
       runs_on:
