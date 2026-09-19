@@ -115,11 +115,13 @@ port, so tests follow `PAY_TEST_PORT`.
 Tests run automatically on:
 - The `linux-build-and-test` and `windows-build-and-test` MAIN legs, on every
   pull request: the full `PayBackendTests` suite against a provisioned
-  Postgres+Redis. Both are required status checks, so they gate the merge.
+  Postgres+Redis. Both are required status checks — the ruleset matches them by
+  their reported context, `<job name> / build-test` — so they gate the merge.
 - `coverage.yml`: the same suite built Debug+gcov, ratcheted per directory bucket.
 - The `macos-build` leg compiles the identical targets on arm64 clang with
   `-Werror` but runs no tests — its image cannot stand a database up, and it is
-  the only lane that sees clang-exclusive diagnostics. See AGENTS.md "CI".
+  the only lane that sees clang-exclusive diagnostics. Its context is
+  `macos-build / build-test`. See AGENTS.md "CI".
 
 ## Test Data Management
 

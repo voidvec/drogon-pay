@@ -80,9 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_build-test.yml` / `_sdk-smoke.yml`): FAST (`static-analysis`, parallel
   `clang-tidy`) → MAIN (`build-test` matrix over linux/windows/macos) →
   RELEASE (`sdk-smoke` matrix over linux/windows), chained by `needs`, with
-  `concurrency` cancelling superseded runs. The three required check names
-  (`linux-build-and-test`, `windows-build-and-test`, `macos-build`) are
-  unchanged and now come from `matrix.check_name`. Actions are pinned to
+  `concurrency` cancelling superseded runs. The three required checks keep the
+  names the legacy files used, but not as bare contexts: a job calling a
+  reusable workflow reports `<caller job name> / <name the called workflow gives
+  its own job>`, so the ruleset now requires `linux-build-and-test / build-test`,
+  `windows-build-and-test / build-test` and `macos-build / build-test`, whose
+  first half comes from `matrix.check_name` and second half from the unnamed
+  `jobs: build-test:` in `_build-test.yml`. Actions are pinned to
   full commit SHAs. The pre-Conan build-Drogon-from-source jobs moved to
   dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
   `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` ran beside the new
@@ -318,11 +322,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   120-minute timeout inside `brew install` and never reached `initdb`, let alone
   the suite. The provisioning step is deleted and `use_database` is `false` for
   macOS, which is where the repository started and where the reference
-  implementation still is: the required check is named `macos-build` because an
-  earlier honest-naming pass renamed it off `macos-build-and-test` precisely for
-  having no databases. What the leg does gate — the arm64 clang `-Werror`
-  compile, sole reporter of `-Wunused-lambda-capture` — needs no services, and
-  the runtime suite stays covered on Linux and Windows.
+  implementation still is: the job is named `macos-build` because an earlier
+  honest-naming pass renamed it off `macos-build-and-test` precisely for having
+  no databases — in the standalone `ci-macos.yml` that name was also the whole
+  context, which is why the drift below was invisible for so long. What the leg
+  does gate — the arm64 clang `-Werror` compile, sole reporter of
+  `-Wunused-lambda-capture` — needs no services, and the runtime suite stays
+  covered on Linux and Windows.
+
+- **Deleting the legacy workflows deleted three required status checks.** The
+  ruleset required the bare contexts `linux-build-and-test`,
+  `windows-build-and-test` and `macos-build`, and the legacy per-platform copies
+  were the only real reporters of those strings. `ci.yml` looked like a second
+  reporter because its matrix carries the same three names, but a job that calls
+  a reusable workflow with `uses:` reports its check as
+  `<caller job name> / <name the called workflow gives its own job>`, so
+  `matrix.check_name` had only ever produced the first half. Removing the copies
+  left the ruleset requiring three contexts nothing would ever report — which
+  does not lift merge protection, it inverts it into a permanent stall: every PR
+  from then on sat at `mergeStateStatus: BLOCKED` with those checks pending
+  forever. The cause was hidden by the tooling, because `gh pr checks` lists
+  check runs that exist and never a required check that has none, so the run read
+  all-green while the merge was blocked. The ruleset now requires the three
+  contexts that `ci.yml` genuinely reports — `linux-build-and-test /
+  build-test`, `windows-build-and-test / build-test`, `macos-build / build-test`
+  — which keeps the protection it was meant to enforce and makes it match
+  reality; `AGENTS.md` "CI", the `ci.yml` header, `TECH_SPECS.md` and the
+  `ci-monitor` agent document state the mechanism and the two-command `gh api`
+  diff that catches a recurrence.
 
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet

@@ -45,18 +45,38 @@ code bug.
 | Gate | Definition | Checks it produces |
 |------|-----------|--------------------|
 | FAST | `static-analysis` + `clang-tidy` jobs in `.github/workflows/ci.yml` | source-only guards, no compilation |
-| MAIN | `.github/workflows/_build-test.yml` (called per platform by `ci.yml`) | `linux-build-and-test`, `windows-build-and-test`, `macos-build` |
-| RELEASE | `.github/workflows/_sdk-smoke.yml` (called per platform by `ci.yml`) | `sdk-smoke-linux`, `sdk-smoke-windows` |
+| MAIN | `.github/workflows/_build-test.yml` (called per platform by `ci.yml`) | `linux-build-and-test / build-test`, `windows-build-and-test / build-test`, `macos-build / build-test` |
+| RELEASE | `.github/workflows/_sdk-smoke.yml` (called per platform by `ci.yml`) | `sdk-smoke-linux / sdk-smoke`, `sdk-smoke-windows / sdk-smoke` |
 
 `ci.yml` is the single entry point: the per-platform workflow copies it replaced
 (plus the standalone Windows-only Conan-package job) ran beside it until one
 commit produced a fully green pass of both chains, and are now deleted. Do not
 reintroduce a per-platform workflow file — extend `ci.yml`.
 
-**The three MAIN check names are required status checks in the branch
-ruleset.** Never rename them (a rename silently removes merge protection);
-they are set by `matrix.check_name` in `ci.yml`, not inside the reusable
-workflows. Postgres/Redis for the DB-backed suite is provisioned on two of the
+**The three MAIN checks are required status checks in the branch ruleset, and
+their contexts carry a `/ build-test` suffix.** A job that calls a reusable
+workflow with `uses:` reports its check as `<caller job name> / <name the
+called workflow gives its own job>`, so `matrix.check_name` pins only the first
+half; the second half here is `build-test` because `_build-test.yml` declares
+`jobs: build-test:` with no `name:` key. Change either half — or delete a
+workflow file that reported one — and the ruleset keeps requiring a context
+nothing will ever report. That does not lift merge protection, it inverts it
+into a permanent stall: every PR blocks with the check pending forever, and
+`gh pr checks` hides the cause because it lists only check runs that exist,
+never a required-but-unreported name, so the output reads all-green beside a
+`mergeStateStatus` of `BLOCKED`. The legacy `ci-linux.yml` / `ci-windows.yml` /
+`ci-macos.yml` copies were the sole reporters of the bare names, so deleting
+them is exactly what triggered this. Diff both sides when a run looks green but
+will not merge:
+
+```
+gh api repos/:owner/:repo/rulesets/<id> --jq '.rules[]
+  | select(.type=="required_status_checks")
+  | .parameters.required_status_checks[].context'
+gh api repos/:owner/:repo/commits/<sha>/check-runs --jq '.check_runs[].name'
+```
+
+Postgres/Redis for the DB-backed suite is provisioned on two of the
 three legs: Docker containers on Linux, and the runner's own PostgreSQL service
 plus Memurai on Windows. The macOS leg is **build-only** — `macos-14` is past
 Homebrew's support window and has no bottles, so installing a database there
