@@ -201,9 +201,9 @@ jobs:
       - name: Provision PostgreSQL and Redis (macOS)
         if: inputs.use_database && inputs.platform == 'macos'
         run: |
-          brew install postgresql@15 redis@7
+          brew install postgresql@15 redis
           pg_prefix="$(brew --prefix postgresql@15)"
-          redis_prefix="$(brew --prefix redis@7)"
+          redis_prefix="$(brew --prefix redis)"
           {
             echo "$pg_prefix/bin"
             echo "$redis_prefix/bin"

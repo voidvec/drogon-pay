@@ -286,6 +286,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compilers rather than one: each of the three owns a class of defect the other
   two cannot see.
 
+- **An `assert` that two tests exist to violate, visible only in Debug.**
+  `CallbackService`'s constructor asserted that `wechatClient_` and `dbClient_`
+  were non-null (the comment called it "C2-3 fix: previously missing null
+  checks"), while `PayPlugin::setTestChannels` builds that service
+  unconditionally — its comment says so: "a missing wechat channel exercises the
+  service's own 'wechat client not ready' branch" — and
+  `PayPlugin_WechatCallback_WechatClientNotReady` calls `setTestChannels({},
+  nullptr)` precisely to pin that branch. The two cannot both be true. `assert`
+  evaporates under `NDEBUG`, so every Release lane — which is all `ci.yml`
+  builds — has run those tests green, while `coverage.yml`, the one lane that
+  builds Debug, aborted 2.4 s into `ctest`: before a single `.gcda` landed,
+  which is one reason more the coverage baseline has still never seeded. Both
+  asserts are gone; nothing else was, because the null checks were never the
+  job of the constructor: every dereference of `wechatClient_` and `dbClient_`
+  already sits behind a branch that answers `1400 / "wechat client not ready"`
+  or `1003 / "Database client not available"`, and those were the only two
+  `assert(...)` calls left in the service layer.
+
+- **The macOS lane died before it compiled anything, on a formula name.**
+  `brew install postgresql@15 redis@7` — `redis@7` has been removed from
+  homebrew-core (it now suggests plain `redis`), and `brew` exits non-zero on an
+  unknown formula, so the required `macos-build` check failed in its
+  provisioning step. The legacy `ci-macos.yml` lane the repository is being
+  migrated off never noticed, because it only builds and installs nothing for
+  tests; the new `ci.yml` macOS job runs the database-backed suite, which is the
+  first thing in the stack to actually need a Redis on that platform. It
+  installs `redis` now.
+
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
   `CLAUDE.md`, `docs/operations/operations_manual.md` and the `drogon-build`
