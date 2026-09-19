@@ -255,9 +255,10 @@ jobs:
             # and drags llvm@22 + rust in as Redis dependencies. The leg spent its
             # whole 120-minute allowance inside brew and never reached the suite.
             # What this leg must prove is the arm64 clang `-Werror` compile (the
-            # only compiler that reports -Wunused-lambda-capture); the required
-            # check name `macos-build` says exactly that, and the runtime suite is
-            # covered on the two platforms that can stand a database up.
+            # only compiler that reports -Wunused-lambda-capture); the name this
+            # leg reports under, `macos-build / build-test`, says exactly that, and
+            # the runtime suite is covered on the two platforms that can stand a
+            # database up.
             use_database: false
             ctest_timeout: 180
             timeout_minutes: 90

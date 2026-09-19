@@ -330,26 +330,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-Wunused-lambda-capture` — needs no services, and the runtime suite stays
   covered on Linux and Windows.
 
-- **Deleting the legacy workflows deleted three required status checks.** The
-  ruleset required the bare contexts `linux-build-and-test`,
-  `windows-build-and-test` and `macos-build`, and the legacy per-platform copies
-  were the only real reporters of those strings. `ci.yml` looked like a second
-  reporter because its matrix carries the same three names, but a job that calls
-  a reusable workflow with `uses:` reports its check as
-  `<caller job name> / <name the called workflow gives its own job>`, so
+- **Deleting the legacy workflows deleted the only reporters of three required
+  status checks.** The ruleset required the bare contexts
+  `linux-build-and-test`, `windows-build-and-test` and `macos-build`, and the
+  legacy per-platform copies were the only real reporters of those strings.
+  `ci.yml` looked like a second reporter because its matrix carries the same
+  three names, but a job that calls a reusable workflow with `uses:` reports its
+  check as `<caller job name> / <name the called workflow gives its own job>`, so
   `matrix.check_name` had only ever produced the first half. Removing the copies
   left the ruleset requiring three contexts nothing would ever report — which
-  does not lift merge protection, it inverts it into a permanent stall: every PR
-  from then on sat at `mergeStateStatus: BLOCKED` with those checks pending
-  forever. The cause was hidden by the tooling, because `gh pr checks` lists
-  check runs that exist and never a required check that has none, so the run read
-  all-green while the merge was blocked. The ruleset now requires the three
+  does not lift merge protection, it inverts it into a stall: the PR that carried
+  the deletion sat at `mergeStateStatus: BLOCKED` with those three checks pending,
+  and every later PR would have too, since no workflow could report them again.
+  The cause was hidden by the tooling, because `gh pr checks` lists check runs
+  that exist and never a required check that has none, so the run read all-green
+  while the merge was blocked. The ruleset now requires the three
   contexts that `ci.yml` genuinely reports — `linux-build-and-test /
   build-test`, `windows-build-and-test / build-test`, `macos-build / build-test`
   — which keeps the protection it was meant to enforce and makes it match
-  reality; `AGENTS.md` "CI", the `ci.yml` header, `TECH_SPECS.md` and the
-  `ci-monitor` agent document state the mechanism and the two-command `gh api`
-  diff that catches a recurrence.
+  reality; `AGENTS.md` "CI", the `ci.yml` header and the `ci-monitor` agent
+  document carry the mechanism plus the two-command `gh api` diff that catches a
+  recurrence, and `TECH_SPECS.md` states the rule in its CI governance table.
 
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
