@@ -347,7 +347,7 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 | 基线来源 | `scripts/coverage_baseline.json` 必须由 CI（`.github/workflows/coverage.yml`）一次全绿运行生成；本地半途中断的运行会把虚假的低值钉成地板 |
 | 容忍度 | 单桶下降 >0.5pp 判失败；<150 行的小桶只报表不门禁 |
 | 塌缩检测 | 某桶可计量行数缩水 >50% 直接判失败（视为覆盖率数据丢失，而非改进） |
-| 缺基线 | 视为首次 SEED：写入基线并通过，基线提交本身即审计线索 |
+| 缺基线 | 视为首次 SEED：写入基线并通过，基线提交本身即审计线索。注意 runner 写的那份随作业工作副本一起丢弃，所以基线要由人按那次全绿运行的报表数字提交进仓库，否则每次运行都在重新 SEED，棘轮永远没有地板 |
 
 ---
 

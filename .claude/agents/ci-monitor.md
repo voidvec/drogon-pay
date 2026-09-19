@@ -130,7 +130,7 @@ Claude 自动调用：当 CI 构建失败或代码变更影响 CI 时
 | 门 | 文件 | 说明 |
 |----|------|------|
 | FAST | `.github/workflows/ci.yml` | `static-analysis`（纯源码门禁，不编译）+ 并行的 `clang-tidy` 硬门 |
-| MAIN | `.github/workflows/_build-test.yml` | 三平台矩阵，均跑全量测试：Linux 用 Docker PG/Redis，Windows 用 runner 自带 PG 服务 + Memurai，macOS 用 `$RUNNER_TEMP` 下的一次性 initdb 集群 |
+| MAIN | `.github/workflows/_build-test.yml` | 三平台矩阵；Linux（Docker PG/Redis）与 Windows（runner 自带 PG 服务 + Memurai）跑全量测试，macOS 只编译——`macos-14` 已超出 Homebrew 支持窗口、没有 bottle，装数据库会变成源码编译工具链，那次尝试把作业 120 分钟全部耗在 `brew install` 上，没跑到测试 |
 | RELEASE | `.github/workflows/_sdk-smoke.yml` | `conan create` + test_package，Linux 与 Windows 双腿 |
 | 覆盖率 | `.github/workflows/coverage.yml` | Debug+gcov，按目录桶对基线棘轮 |
 | 回退 | `.github/workflows/legacy-source-build.yml` | Conan 前的源码直编 Drogon 路径，仅手动触发 |

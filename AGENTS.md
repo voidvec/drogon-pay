@@ -31,8 +31,11 @@ configurations.
 Test framework: Drogon `DROGON_TEST` (not gtest). Test target: `PayBackendTests`.
 Integration tests need Postgres+Redis on `127.0.0.1` with the `test` role and
 `pay_test` database (see `examples/pay-server/.env`, gitignored). The coverage
-baseline `SEED`s itself on the first green run of `.github/workflows/coverage.yml`;
-that job, not a laptop, is the source of truth for the numbers. On this
+baseline is *measured* by the first green run of
+`.github/workflows/coverage.yml` — that job, not a laptop, is the source of
+truth for the numbers — but a run's write is discarded with the runner's working
+copy, so the measured numbers have to be committed as
+`scripts/coverage_baseline.json` before the ratchet can hold anything. On this
 machine WSL is NAT'd with its own (role-less) Postgres 16 on loopback, so a
 WSL `ctest` hangs on DB auth rather than failing — do not chase that as a
 code bug.
@@ -53,11 +56,15 @@ deleted. Do not add a new job to the legacy files — extend `ci.yml`.
 **The three MAIN check names are required status checks in the branch
 ruleset.** Never rename them (a rename silently removes merge protection);
 they are set by `matrix.check_name` in `ci.yml`, not inside the reusable
-workflows. Postgres/Redis for the DB-backed suite is provisioned per platform:
-Docker containers on Linux, the runner's own PostgreSQL service plus Memurai on
-Windows, and a throwaway `initdb` cluster under `$RUNNER_TEMP` plus a daemonized
-`redis-server` on macOS. `.github/workflows/legacy-source-build.yml` holds the
-pre-Conan build-Drogon-from-source rollback net and is dispatch-only.
+workflows. Postgres/Redis for the DB-backed suite is provisioned on two of the
+three legs: Docker containers on Linux, and the runner's own PostgreSQL service
+plus Memurai on Windows. The macOS leg is **build-only** — `macos-14` is past
+Homebrew's support window and has no bottles, so installing a database there
+compiles a toolchain instead (a real attempt consumed the job's whole
+120-minute timeout in `brew install` and never reached the suite). What that leg
+does prove is the arm64 clang `-Werror` compile, which is the only lane that
+sees clang-exclusive diagnostics. `.github/workflows/legacy-source-build.yml`
+holds the pre-Conan build-Drogon-from-source rollback net and is dispatch-only.
 
 ### Database
 

@@ -54,7 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   baseline (`scripts/coverage_baseline.json`, 0.5pp tolerance, small-bucket
   exemption, line-collapse detection, SEED on first run). The
   `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
-  verbal percentage.
+  verbal percentage. A SEED run writes its baseline into the runner's working
+  copy and loses it there, so the file this ships with is the first green
+  `coverage.yml` run's measured numbers copied into a reviewed commit (overall
+  40.21%, 3012/7490 lines, 2026-09-19) — without it every run re-SEEDs and the
+  ratchet has no floor to hold.
 - **Drift guard rules 6 and 7** (`scripts/check_docs_drift.py`), which turn
   this round of documentation fixes into something that cannot silently rot
   again. Rule 6 (`no-version-stamps`) rejects a `**版本：**` /
@@ -83,11 +87,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
   `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` still run beside
   the new pipeline for one verification cycle and are deleted afterwards.
-- **macOS CI runs the test suite instead of building only.** The arm64 leg
-  provisions a throwaway Postgres cluster (`initdb -A trust` under
-  `$RUNNER_TEMP`) and a daemonized `redis-server`, applies the migration chain
-  and runs the same `PayBackendTests` ctest entry as the other platforms.
-  Previously a platform-specific regression could only be caught by hand.
 - **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
   per-platform workflow it replaces hardcoded only `001` and `002`, and its
   Postgres readiness loop fell through to a green step when the probe never
@@ -304,15 +303,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `1003 / "Database client not available"`, and those were the only two
   `assert(...)` calls left in the service layer.
 
-- **The macOS lane died before it compiled anything, on a formula name.**
-  `brew install postgresql@15 redis@7` — `redis@7` has been removed from
-  homebrew-core (it now suggests plain `redis`), and `brew` exits non-zero on an
-  unknown formula, so the required `macos-build` check failed in its
-  provisioning step. The legacy `ci-macos.yml` lane the repository is being
-  migrated off never noticed, because it only builds and installs nothing for
-  tests; the new `ci.yml` macOS job runs the database-backed suite, which is the
-  first thing in the stack to actually need a Redis on that platform. It
-  installs `redis` now.
+- **The macOS leg was asked to do something its image cannot do.** Its first
+  failure was a formula name: `brew install postgresql@15 redis@7` — `redis@7`
+  has been removed from homebrew-core, and `brew` exits non-zero on an unknown
+  formula. Renaming it to plain `redis` looked like the fix and was the start of
+  the real answer: `macos-14` sits outside Homebrew's support window now
+  (`You are using macOS 14. ... Homebrew no longer builds bottles for this
+  configuration`), so every fresh install compiles from source, and Redis 8
+  pulls `llvm@22` and `rust` in as build dependencies. The leg burned its entire
+  120-minute timeout inside `brew install` and never reached `initdb`, let alone
+  the suite. The provisioning step is deleted and `use_database` is `false` for
+  macOS, which is where the repository started and where the reference
+  implementation still is: the required check is named `macos-build` because an
+  earlier honest-naming pass renamed it off `macos-build-and-test` precisely for
+  having no databases. What the leg does gate — the arm64 clang `-Werror`
+  compile, sole reporter of `-Wunused-lambda-capture` — needs no services, and
+  the runtime suite stays covered on Linux and Windows.
 
 - **The docs described a command line the server does not have.**
   `main()` in `examples/pay-server/main.cc` takes no `argc`/`argv`, yet
