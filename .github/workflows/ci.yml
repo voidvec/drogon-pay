@@ -18,13 +18,21 @@ name: CI
 # blocker, independent of which contexts the ruleset happens to require.
 #
 # Check-name contract: the branch ruleset requires exactly
-# `linux-build-and-test`, `windows-build-and-test` and `macos-build`. Those
-# strings are produced here by `matrix.check_name`, not by the reusable
-# workflow's internal job name, so renaming anything inside _build-test.yml
-# cannot silently unrequire a check. Verify with:
+# `linux-build-and-test / build-test`, `windows-build-and-test / build-test`
+# and `macos-build / build-test`. The suffix is not decoration — a job that
+# calls a reusable workflow with `uses:` reports its check as
+# `<this job's name> / <name the called workflow gives its own job>`, so
+# `matrix.check_name` fixes only the first half. The second half is `build-test`
+# because _build-test.yml declares `jobs: build-test:` with no `name:` key.
+# Change either half, or delete a workflow file that reported one, and the
+# ruleset goes on requiring a context that nothing reports: merge protection
+# does not lift, it inverts into a permanent stall, and `gh pr checks` never lists a
+# required check that has no run, so the PR reads all-green while
+# `mergeStateStatus` stays BLOCKED. Diff both sides with:
 #   gh api repos/:owner/:repo/rulesets/<id> --jq '.rules[]
 #     | select(.type=="required_status_checks")
 #     | .parameters.required_status_checks[].context'
+#   gh api repos/:owner/:repo/commits/<sha>/check-runs --jq '.check_runs[].name'
 #
 # The legacy ci-linux / ci-windows / ci-macos / conan-create copies this pipeline
 # supersedes are deleted: run 35441152813 produced one fully green pass of this

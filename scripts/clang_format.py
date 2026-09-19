@@ -4,8 +4,8 @@
 Background: CI pinned clang-format-22, pre-commit used v17 and the agent
 PostToolUse hook used whatever `clang-format` happened to be on PATH. v17
 and v22 disagree on formatting for real (see the pin comment in
-.github/workflows/ci-linux.yml), so every consumer must run the SAME major
-version. This file is the one place that constant lives.
+.github/workflows/ci.yml's static-analysis job), so every consumer must run the
+SAME major version. This file is the one place that constant lives.
 
 Usage:
   python scripts/clang_format.py --check   # exit 1 on drift (CI gate)

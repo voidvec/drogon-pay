@@ -135,8 +135,22 @@ Claude 自动调用：当 CI 构建失败或代码变更影响 CI 时
 | 覆盖率 | `.github/workflows/coverage.yml` | Debug+gcov，按目录桶对基线棘轮 |
 | 回退 | `.github/workflows/legacy-source-build.yml` | Conan 前的源码直编 Drogon 路径，仅手动触发 |
 
-必过检查名固定为 `linux-build-and-test`、`windows-build-and-test`、
-`macos-build`（分支 ruleset 里写死），改名等于悄悄取消合并保护。
+必过检查的 context 是 `linux-build-and-test / build-test`、
+`windows-build-and-test / build-test`、`macos-build / build-test`（分支 ruleset
+里写死）。带 `/ build-test` 后缀不是排版：用 `uses:` 调可复用工作流的 job，报名是
+`<调用方 job 名> / <被调用方工作流给它自己 job 的名字>`，所以 `matrix.check_name`
+只管前一半；后一半是 `build-test`，因为 `_build-test.yml` 写的是 `jobs:
+build-test:` 且没有 `name:` 键。改任何一侧、或删掉某个曾上报裸名的工作流文件，
+ruleset 仍会继续要求一个没人上报的 context——保护不是被解除，而是反转成永久卡死：
+每个 PR 都挂在那一项 pending。而且 `gh pr checks` 不会列出"必需但没人上报"的占位项，
+只会看到全绿列表配 `mergeStateStatus: BLOCKED`。核对两边差集：
+
+```bash
+gh api repos/:owner/:repo/rulesets/<id> --jq '.rules[]
+  | select(.type=="required_status_checks")
+  | .parameters.required_status_checks[].context'
+gh api repos/:owner/:repo/commits/<sha>/check-runs --jq '.check_runs[].name'
+```
 
 ## 监控指标
 
