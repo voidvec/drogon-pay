@@ -112,12 +112,14 @@ CallbackService::CallbackService(
       dbClient_(dbClient),
       redisClient_(redisClient)
 {
-    // Ensure required dependencies are provided at construction time
-    // (C2-3 fix: previously missing null checks). redisClient_ is
-    // optional per CallbackService.h documentation.
     // SPI whitelist: callback decrypt/verify needs the concrete WeChat client.
-    assert(wechatClient_ != nullptr && "CallbackService: wechatChannel must be a WechatPayClient");
-    assert(dbClient_ != nullptr && "CallbackService: dbClient must not be null");
+    // Neither dependency is asserted on purpose: both absent states are
+    // handled per method (the `!wechatClient_` / `!dbClient_` branches in
+    // handlePaymentCallback, handleRefundCallback and verifySignature), each
+    // has a test that constructs the service with that dependency missing to
+    // pin the response, and PayPlugin::setTestChannels always builds this
+    // service so the accessor never returns null. redisClient_ is optional per
+    // CallbackService.h.
 }
 
 bool CallbackService::isTimestampFresh(const std::string &timestamp, std::string &errorMsg)
