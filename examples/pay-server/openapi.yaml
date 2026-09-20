@@ -30,9 +30,12 @@ info:
       ("9.99", "100", "0.5"); anything else is rejected with business code
       40001 before the request reaches the database.
     * Success envelopes carry `code: 0` (or `code: 200` on the order list)
-      plus `message` and, where there is a payload, `data`. A non-zero `code`
-      is paired with a matching HTTP status, so clients may branch on either;
-      prefer HTTP status for transport decisions and `code` for business ones.
+      plus `message` and, where there is a payload, `data`. The handler derives
+      the HTTP status from the error code a service hands it, so where a
+      business code travels in the error the two agree (400, 404, 409, 501,
+      502, 503); failures that pass an `errno` instead land on HTTP 500
+      whatever the body says. Branch on `code` for business decisions and
+      prefer HTTP status for transport ones.
     * Write operations (`/create`, `/api/qrpay/create`, `/refund`) are
       idempotent. Send `X-Idempotency-Key` (or `Idempotency-Key`) to make a
       retry replay the stored snapshot; omit it and the server derives a key
@@ -161,9 +164,9 @@ paths:
       summary: Create a QR-code payment
       description: |
         Historical QR entry point. Unlike `/api/pay/create` it requires
-        `channel` and `user_id` in the body, defaults `subject` to "Payment",
-        and reports failures inside the body with HTTP 200 (codes 500 and
-        1005) rather than via the transport status -- see
+        `channel` and `user_id` in the body and defaults `subject` to
+        "Payment". Its in-body failure codes (500 for a channel or gateway
+        fault, 1005 for an unknown channel) ride an HTTP 500 -- see
         `docs/development/plugin_integration.md` for the migration note.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -175,7 +178,7 @@ paths:
               $ref: '#/components/schemas/CreateQRPaymentRequest'
       responses:
         "200":
-          description: QR created (code 0) or channel failure reported in-body
+          description: QR created (code 0)
           content:
             application/json:
               schema:
@@ -189,10 +192,6 @@ paths:
                       order_no: "ord-2026-0001"
                       qr_code: "https://qr.alipay.com/bax..."
                       out_trade_no: "ord-2026-0001"
-                unknown-channel:
-                  value:
-                    code: 1005
-                    message: "CHANNEL_NOT_AVAILABLE: paypal"
         "400":
           $ref: '#/components/responses/BadRequest'
         "501":

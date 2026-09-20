@@ -40,6 +40,29 @@ void reportMapperFailure(
     }
 }
 
+// Only a refund that certainly did not happen may be booked terminal. A
+// REFUND_FAIL on an outcome we do not know invites a retry under a fresh
+// out_refund_no, which WeChat would honour as a second refund.
+//   - a local channel fault (missing config, client not ready) never sent a
+//     request, so nothing happened;
+//   - `HTTP 4xx: <code> <message>` is WeChat refusing the refund;
+//   - a 5xx, a 4xx with no error envelope (an intermediary answered for us),
+//     a timeout, a transport failure or an unparseable body says nothing
+//     either way -- reconciliation decides those from the channel's answer.
+bool refundCertainlyDidNotHappen(const std::string &error)
+{
+    const bool httpRefusal =
+      error.rfind("HTTP 4", 0) == 0 && error.find("no error envelope") == std::string::npos;
+    if (httpRefusal)
+    {
+        return true;
+    }
+    const bool wentThroughHttp = error.rfind("HTTP ", 0) == 0 ||
+                                 error.rfind("http request", 0) == 0 ||
+                                 error == "invalid json response";
+    return !wentThroughHttp;
+}
+
 // TODO(dedup): duplicated in PaymentService.cc and CallbackService.cc.
 // Extract to PayUtils.h/cc in a future refactoring iteration.
 void insertLedgerEntry(
@@ -1382,17 +1405,10 @@ void RefundService::invokeRefundChannel(
               if (!error.empty())
               {
                   const std::string errorMessage = "WeChat error: " + error;
-                  // A 4xx is WeChat refusing the request: the refund certainly
-                  // did not happen, so the row may go terminal. A timeout, a 5xx
-                  // or a transport failure says nothing -- the request may have
-                  // been accepted -- and a terminal REFUND_FAIL there invites a
-                  // retry under a new out_refund_no, which WeChat would honour as
-                  // a second refund. The row stays REFUNDING and reconciliation
-                  // settles it from the channel's answer.
-                  const bool rejectedByWechat = error.rfind("HTTP 4", 0) == 0;
+                  const bool certainlyNotRefunded = refundCertainlyDidNotHappen(error);
                   Json::Value errJson;
                   errJson["error"] = errorMessage;
-                  if (rejectedByWechat)
+                  if (certainlyNotRefunded)
                   {
                       updateRefundWithError(refundNo, errorMessage, errJson);
                   }
@@ -1410,7 +1426,8 @@ void RefundService::invokeRefundChannel(
                       response["data"]["order_no"] = orderNo;
                       response["data"]["payment_no"] = paymentNo;
                       response["data"]["amount"] = amount;
-                      response["data"]["status"] = rejectedByWechat ? "REFUND_FAIL" : "REFUNDING";
+                      response["data"]["status"] =
+                        certainlyNotRefunded ? "REFUND_FAIL" : "REFUNDING";
                       response["data"]["error"] = errorMessage;
                       response["data"]["wechat_response"] = errJson;
                       (*sharedCb)(response, std::error_code(1502, std::system_category()));

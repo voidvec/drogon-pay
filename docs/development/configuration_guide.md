@@ -65,6 +65,7 @@ at startup, so the file itself stays safe to commit.
             "platform_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CERT_PATH__",
             "platform_ca_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CA_CERT_PATH__",
             "cert_download_min_interval_seconds": 300,
+            "cert_refresh_interval_seconds": 43200,
             "notify_url": "__env_var:WECHAT_PAY_NOTIFY_URL__",
             "api_base": "https://api.mch.weixin.qq.com",
             "timeout_ms": 5000
@@ -107,10 +108,10 @@ at startup, so the file itself stays safe to commit.
 | `db_client` | Name of the Drogon `db_clients` entry (PostgreSQL) | No | `default` |
 | `redis_client` | Name of the Drogon `redis_clients` entry (**opt-in**) | No | (omitted → DB-only idempotency) |
 | `idempotency_ttl_seconds` | Idempotency record TTL (seconds) | No | 604800 (7 days) |
-| `reconcile.enabled` | Run the scheduled reconciliation timer | No | false |
+| `reconcile.enabled` | Run the scheduled reconciliation timer | No | true (absent block also starts it) |
 | `reconcile.interval_seconds` | Reconcile interval | No | 300 |
 | `reconcile.batch_size` | Reconcile batch size | No | 50 |
-| `channels.<name>.enabled` | Enable a channel; unknown/disabled → `CHANNEL_NOT_AVAILABLE` | No | false |
+| `channels.<name>.enabled` | Enable a channel; unknown/disabled → `CHANNEL_NOT_AVAILABLE` | No | true (absent object disables it) |
 
 ### WeChat Pay (`channels.wechat`)
 
