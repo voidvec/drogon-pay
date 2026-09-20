@@ -128,6 +128,35 @@ jobs:
           start=$(date +%s)
           deadline=$(( start + DEADLINE_MINUTES * 60 ))
           early_deadline=$(( start + EARLY_BAIL_SECONDS ))
+
+          # Every knob below is used in arithmetic or as a `sleep` argument, and an
+          # empty one silently becomes zero — `DEADLINE_MINUTES=` would give up on
+          # the first pass while looking like a real verdict. Reject anything that
+          # is not a number instead of interpreting it.
+          for knob in DEADLINE_MINUTES EARLY_BAIL_SECONDS POLL_SECONDS; do
+            if ! [[ "${!knob:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error::$knob is not a number ('${!knob:-}')" >&2
+              exit 1
+            fi
+          done
+
+          # This list is the entire policy, so a damaged one has to stop the
+          # release rather than certify it: an empty or truncated
+          # `REQUIRED_CHECKS` would leave `pending` empty on the first pass and
+          # print "green" having inspected nothing. Five is what ci.yml reports
+          # for a master push — three `* / build-test`, two `* / sdk-smoke`.
+          names=()
+          while IFS= read -r line; do
+            # `if` rather than `[ -n "$line" ] && names+=(...)`, because the AND
+            # list returns 1 on a blank entry and `set -e` would end the job with
+            # no message at all.
+            if [ -n "$line" ]; then names+=("$line"); fi
+          done <<< "$REQUIRED_CHECKS"
+          if [ "${#names[@]}" -ne 5 ]; then
+            echo "::error::REQUIRED_CHECKS lists ${#names[@]} context(s), expected 5; refusing to certify a release against a list that is not the pipeline's" >&2
+            exit 1
+          fi
+
           while :; do
             if ! runs=$(gh api "repos/$REPOSITORY/commits/$SHA/check-runs" --paginate \
                           --jq '.check_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion // "-")"'); then
@@ -143,8 +172,7 @@ jobs:
 
             pending=''
             failed=''
-            while IFS= read -r name; do
-              [ -n "$name" ] || continue
+            for name in "${names[@]}"; do
               # One verdict per name, taken from the highest check-run id. The
               # endpoint accumulates every run ever reported for the commit —
               # re-runs, and a second workflow_dispatch over the same SHA — and
@@ -152,27 +180,30 @@ jobs:
               # Requiring all siblings to be green would let a stale `cancelled`
               # lock the release forever, and no re-run of the green suite could
               # clear it.
-              state=$(printf '%s\n' "$runs" | awk -F'\t' -v want="$name" '
+              verdict=$(printf '%s\n' "$runs" | awk -F'\t' -v want="$name" '
                 $2 == want && (!seen || $1 + 0 > best) { seen = 1; best = $1 + 0; st = $3; co = $4 }
                 END {
                   if (!seen)                     print "unreported"
                   else if (st != "completed")    print "pending"
-                  else if (co != "success")      print "failed"
+                  else if (co != "success")      print "failed " co
                   else                           print "green"
                 }')
-              case "$state" in
+              case "$verdict" in
                 green) ;;
                 pending)    pending="${pending:+$pending; }${name}: still running" ;;
                 unreported) pending="${pending:+$pending; }${name}: no check run on this commit" ;;
-                failed)     failed="${failed:+$failed; }${name}: did not succeed" ;;
+                failed*)    failed="${failed:+$failed; }${name}: ${verdict#failed }" ;;
               esac
-            done <<< "$REQUIRED_CHECKS"
+            done
 
             # Annotations stay on one line: a workflow-command data value may not
             # contain a raw newline, so a multi-line list would be cut off at the
             # first line in the check UI and survive only in the raw log.
             if [ -n "$failed" ]; then
               echo "::error::the merge pipeline is red on $SHA: $failed" >&2
+              echo "Re-run the named leg against this commit and then re-run this" >&2
+              echo "release workflow: the verdict is taken from the newest attempt," >&2
+              echo "so a fresh green run replaces a cancellation or an old failure." >&2
               exit 1
             fi
             if [ -z "$pending" ]; then
