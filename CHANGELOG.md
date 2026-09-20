@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole WeChat Pay V3 flow against the official API — inbound notification
   path, outbound transaction/refund/certificate path — with each defect cited
   at `file:line`, the fix batch it landed in, and the items deliberately left
-  out (periodic certificate-refresh timer, per-channel response-parser
-  refactor).
+  out (the `pay_payment` booking the QR endpoint is missing, the bare-`this`
+  capture in the certificate-download callback, the Alipay timeout unit mix-up).
 - **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
   gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
   rejects backticked paths that don't exist in governance docs, bans
@@ -444,6 +444,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a fixed WeChat payload would have made money collectable on an order no
   callback can settle; WeChat QR creation now answers 501 until that booking
   gap closes, which keeps the endpoint honest rather than silently wrong.
+- **A business code in the body could ride an unrelated HTTP status.**
+  `mapErrorToHttpStatus` decides the status from `error.value()`, but several
+  `PaymentService` failures handed it `std::make_error_code(std::errc::...)`,
+  whose value is an `errno` (22, 5) matching no case — so a body saying `400`,
+  `1001` or `1005` arrived as HTTP 500, while the contract text claimed the two
+  were paired. The WeChat QR path now carries its business code through
+  `makePayError`, and 400 and 501 have mappings; the remaining paths still land
+  on 500, which `openapi.yaml` now states instead of over-promising. Classifying
+  every service error by business code is a separate change.
 - **An unmappable refund status defaulted to `REFUNDING`.** `RefundService`
   read `status` from the refund response and fell through to `REFUNDING` for
   anything it did not recognise — including an absent field, which is what a
@@ -456,7 +465,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeouts, 5xx and empty 2xx bodies no longer write the terminal
   `REFUND_FAIL` (which invites a retry under a fresh `out_refund_no`, i.e. a
   double refund) but keep the record `REFUNDING` for reconciliation, and only
-  the response the channel explicitly rejected reports `REFUND_FAIL`.
+  the response the channel explicitly rejected reports `REFUND_FAIL`. A channel
+  fault that never sent a request at all (missing config, client not ready) is
+  certainly not a refund and still books terminal, as it did before.
 - **The platform certificate trusted whoever said so.** `verifyCallback`
   accepted the statically configured platform certificate for any notification
   whose `Wechatpay-Serial` equalled the merchant's own `serial_no` — two

@@ -1337,7 +1337,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
         Json::Value response;
         response["code"] = 400;
         response["message"] = "Missing required parameters: order_no, amount";
-        sharedCb->call(response, std::make_error_code(std::errc::invalid_argument));
+        sharedCb->call(response, pay::makePayError(400, "missing required parameters"));
         return;
     }
 

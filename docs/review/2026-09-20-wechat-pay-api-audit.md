@@ -121,17 +121,17 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 | 项 | 落地 | 证据 |
 |----|------|------|
 | C1 | `sendWechatRequest` 对非 2xx 生成 `HTTP <status>: <code> <message>`（detail 截断 200 字节），body 仍原样上抛 | `WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure`（打真实监听器取 404） |
-| C2 | native/jsapi 分支按契约要求 `code_url` / `prepay_id`，缺失即失败 | `CreatePaymentIntegrationTest.cc` |
-| C3 | `createQRPayment` 复用 `createPayment` 的按通道 payload 构造，并解析 `code_url` | `PaymentService.cc` 扫码分支 |
+| C2 | native/jsapi 分支按契约要求**非空** `code_url` / `prepay_id`，缺失即失败 | 无直达用例（见第七节）：`CreatePaymentIntegrationTest.cc` 的两个微信用例在更早的 `missing appid/mchid/notify_url` 处就返回 |
+| C3 | `createQRPayment` 自建按通道 payload（与 `createPayment` 同形、各自独立，未抽公共函数） | 微信分支现被 501 闸门挡住，见 C5 |
 | C4 | 退款响应 `status` 白名单（`SUCCESS`/`CLOSED`/`PROCESSING`），否则走 `updateRefundWithError`；复审发现 `CLOSED` 仍漏进成功路径，见第六节 | `RefundQueryTest.cc` |
-| H1 | `setPlatformCert` 安装前强制：X509 可解析 + 有效期覆盖当前 + 证书内序列号与登记者一致 + （可选）链路到 `platform_ca_cert_path` | `WechatPayClient_SetPlatformCert_*` 三个用例 |
+| H1 | `setPlatformCert` 安装前强制：X509 可解析 + 有效期覆盖当前 + 证书内序列号与登记者一致 + （可选）链路到 `platform_ca_cert_path` | `WechatPayClient_SetPlatformCert_*` 四个用例 |
 | H2 | 没有新增 `platform_cert_serial` 配置：静态兜底证书改用**它自身**的序列号与通知头比对，配置无法与证书漂移；未知序列号触发自节流下载并按失败返回；缓存两侧统一走 `normalizeSerialHex` | `WechatPayClient_VerifyCallback_*`、`SetPlatformCert_BindsCacheKeyToCertificateSerial` |
 | H3 | 路径段百分号编码，抽到 `pay::utils::urlEncodePathSegment`（可单测），签名与请求共用编码后的串 | `PayUtils_UrlEncodePathSegment` |
 | M0 | `timeout_ms` 真正传入 `HttpClient::sendRequest`（毫秒→秒，0 表示不限时），超时错误为 `http request timed out after <n>ms`；~~`cert_refresh_interval_seconds` 作为无人读取的死配置从示例配置删除~~ 复审推翻，见 M5 行与第六节 | 编译 + 直读；见下方未覆盖项 |
 | M1 | `payer_total` 不做等值校验（有券时不等是合法的），~~只拒绝 `<=0` 的非法值~~ 复审改为只拒绝 `> total`（第六节），差额按 `LOG_WARN` 记录 | `PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards` |
 | M2 | `transaction_id` 与库内 `channel_trade_no` 不一致时整笔回滚并返回失败 | 同一用例 |
-| M3 | `nonce` 必须 12 字节、`api_v3_key` 必须 32 字节、密文长度必须大于标签，空明文不再 `&plaintext[0]` 越界取址 | `DecryptResource_RejectsShortNonce` / `InvalidKey` / `ShortCiphertext` / `InvalidTag` |
-| M4 | `verifyMessageWithCert` 校验证书有效期 | `SetPlatformCert_RejectsOutOfValidity` |
+| M3 | `nonce` 必须 12 字节、`api_v3_key` 必须 32 字节、密文至少要装得下标签（`< 16` 拒绝），空明文不再 `&plaintext[0]` 越界取址 | `DecryptResource_RejectsShortNonce` / `InvalidKey` / `ShortCiphertext` / `InvalidTag` |
+| M4 | `verifyMessageWithCert` 校验证书有效期 | 安装期的校验由 `SetPlatformCert_RejectsOutOfValidity` 覆盖；`verifyMessageWithCert` 自己那条过期分支（`WechatChannel.cc:209-215`）无直达用例，见第七节 |
 | M5 | ~~删除死配置~~ 复审推翻：定时器一直存在（`PayPlugin::startCertRefreshTimer` 硬编码 43200.0），改为让它读 `cert_refresh_interval_seconds`（下限 300 秒） | PayPlugin.cc/.h, config |
 
 ## 六、复审补记（同日，两个子代理评审 84ceaa5 之后）
@@ -166,4 +166,23 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 
 验证边界：本机没有 `.env`/Postgres 角色，DB 用例与 `clang-tidy`（需 `compile_commands.json`，只在 Linux
 preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.py --check`、全部 Python 门禁与非 DB 用例。
+
+## 七、第二轮复审补记（60d4afc 之后）
+
+- **退款终态判定的第一版太窄，会砸掉既有用例**：只按 `HTTP 4` 前缀认定"微信明确拒绝"，于是
+  "配置缺失""客户端未就绪"这类**请求根本没发出去**的失败也被留在 `REFUNDING`，与
+  `RefundQueryTest.cc:781,923,953,1087,1115,1257,1284,1456,1485,1660,1803` 的期望相反。
+  现在由 `refundCertainlyDidNotHappen()` 判定：本地故障与"带微信错误信封的 4xx"落终态；
+  5xx、无信封的 4xx（中间设备替我们回答）、超时、传输失败、2xx 无状态一律保持 `REFUNDING`。
+- **`/api/qrpay/create` 的状态码对不上是系统性的**：`mapErrorToHttpStatus` 读的是 `error.value()`，
+  而服务层不少地方传的是 `std::errc::*`（`EINVAL`=22、`EIO`=5），因此 body 里的 1001/400/500/1005
+  全落到 HTTP 500。本轮只把微信 QR 路径上的三处改成 `makePayError(400|501)`，并在映射表补 400/501；
+  其余通道/查询路径**未改**，`openapi.yaml` 的总述已改成如实描述这一限制。把服务层错误统一成业务码
+  是下一轮的独立改动。
+- **第五节的证据列有三处夸大，已就地更正**：C2（`code_url` 契约没有直达用例——两个微信建单用例在更早的
+  `missing appid/mchid/notify_url` 检查处就返回，补用例需要先给测试注入可用的微信配置）、C3（payload
+  构造是重复而非复用，且微信分支现处于 501 之后不可达）、M4（`verifyMessageWithCert` 的过期分支无直达
+  用例）、H1（四个用例不是三个）。
+- **配置文档的默认值与代码相反**：`reconcile.enabled` 与 `channels.<name>.enabled` 实际默认 `true`
+  （`PayPlugin.cc:48,62,139,220`），`configuration_guide.md` 原写 false，已改。
 
