@@ -1402,21 +1402,45 @@ void RefundService::invokeRefundChannel(
                   return;
               }
 
-              std::string refundStatus = "REFUNDING";
+              // V3 files a refund under SUCCESS / PROCESSING / CLOSED and puts a
+              // `code`/`message` envelope in everything else. Defaulting an
+              // unrecognised body to REFUNDING recorded a refund WeChat never
+              // accepted, and the REFUNDING row then blocked the retry.
               const std::string wechatStatus = result.get("status", "").asString();
               const std::string refundId = result.get("refund_id", "").asString();
-              if (wechatStatus == "SUCCESS")
+              const std::string mappedStatus = pay::utils::mapRefundStatus(wechatStatus);
+              if (mappedStatus.empty())
               {
-                  refundStatus = "REFUND_SUCCESS";
-              }
-              else if (wechatStatus == "CLOSED")
-              {
-                  refundStatus = "REFUND_FAIL";
+                  const std::string code = result.get("code", "").asString();
+                  std::string errorMessage = "WeChat refund response has no usable status";
+                  if (!code.empty())
+                  {
+                      errorMessage += ": " + code + " " + result.get("message", "").asString();
+                  }
+
+                  Json::Value errJson;
+                  errJson["error"] = errorMessage;
+                  updateRefundWithError(refundNo, errorMessage, errJson);
+                  if (*sharedCb)
+                  {
+                      Json::Value response;
+                      response["code"] = 1502;
+                      response["message"] = errorMessage;
+                      response["data"]["refund_no"] = refundNo;
+                      response["data"]["order_no"] = orderNo;
+                      response["data"]["payment_no"] = paymentNo;
+                      response["data"]["amount"] = amount;
+                      response["data"]["status"] = "REFUND_FAIL";
+                      response["data"]["error"] = errorMessage;
+                      response["data"]["wechat_response"] = errJson;
+                      (*sharedCb)(response, std::error_code(1502, std::system_category()));
+                  }
+                  return;
               }
 
               updateRefundWithSuccess(
                 refundNo,
-                refundStatus,
+                mappedStatus,
                 refundId,
                 result,
                 orderNo,

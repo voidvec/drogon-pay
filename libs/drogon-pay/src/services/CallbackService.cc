@@ -820,6 +820,78 @@ void CallbackService::handlePaymentCallback(
                                                             return;
                                                         }
 
+                                                        // `payer_total` is what the user handed
+                                                        // over; it sits below `total` whenever a
+                                                        // coupon covers the difference, which is
+                                                        // legitimate, so only a nonsensical value
+                                                        // is refused. The gap itself is logged
+                                                        // because the ledger books `total`.
+                                                        const int64_t payerTotalFen =
+                                                          amountJson.get("payer_total", 0)
+                                                            .asInt64();
+                                                        if (
+                                                          amountJson.isMember("payer_total") &&
+                                                          payerTotalFen <= 0
+                                                        )
+                                                        {
+                                                            transPtr->rollback();
+                                                            Json::Value error;
+                                                            error["code"] = "FAIL";
+                                                            error["message"] =
+                                                              "invalid payer_total in callback";
+                                                            (*cbPtr)(
+                                                              error,
+                                                              pay::makePayError(
+                                                                400, "invalid amount in callback"
+                                                              )
+                                                            );
+                                                            return;
+                                                        }
+                                                        if (
+                                                          payerTotalFen > 0 &&
+                                                          payerTotalFen != notifyTotalFen
+                                                        )
+                                                        {
+                                                            LOG_WARN
+                                                              << "[CallbackService] Paid "
+                                                                 "amount differs from the "
+                                                                 "order amount for order: "
+                                                              << orderNo
+                                                              << " payer_total=" << payerTotalFen
+                                                              << " total=" << notifyTotalFen;
+                                                        }
+
+                                                        // Two notifications for one order number
+                                                        // must name one channel transaction; a
+                                                        // different id means another transaction
+                                                        // is being booked under this order.
+                                                        const std::string bookedTxn =
+                                                          payment.getValueOfChannelTradeNo();
+                                                        if (
+                                                          !bookedTxn.empty() &&
+                                                          !transactionId.empty() &&
+                                                          bookedTxn != transactionId
+                                                        )
+                                                        {
+                                                            LOG_ERROR << "[CallbackService] "
+                                                                         "transaction_id differs "
+                                                                         "from the booked one for "
+                                                                         "order: "
+                                                                      << orderNo;
+                                                            transPtr->rollback();
+                                                            Json::Value error;
+                                                            error["code"] = "FAIL";
+                                                            error["message"] =
+                                                              "transaction_id mismatch";
+                                                            (*cbPtr)(
+                                                              error,
+                                                              pay::makePayError(
+                                                                400, "transaction_id mismatch"
+                                                              )
+                                                            );
+                                                            return;
+                                                        }
+
                                                         std::string orderStatus;
                                                         std::string paymentStatus;
                                                         pay::utils::mapTradeState(
