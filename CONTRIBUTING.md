@@ -144,6 +144,12 @@ trusted to have run), then `sdk-smoke` — the consumer
 and only then `publish`, which uses that CHANGELOG section as the release body. Use
 `/release` for the runbook; do not create the release by hand.
 
+`ci-gate` is `.github/workflows/_tag-gate.yml` called through `workflow_call`, and
+`.github/workflows/deploy.yml` calls the same file before it pushes an image or
+touches ECS: `jobs.*.needs` cannot cross workflows, so a red release would never
+have stopped that pipeline's production leg. A tag that fails the gate ships
+nothing, in either workflow.
+
 ## Contributing a payment channel
 
 New channels are host-side plugins, not library edits, in most cases:

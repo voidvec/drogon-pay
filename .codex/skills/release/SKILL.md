@@ -95,15 +95,19 @@ git push origin v1.1.0
 | Job | 内容 |
 |-----|------|
 | `version-check` | 第 4 步的两条断言在 CI 里再跑一次（秒级，失败即中止，不浪费构建时间） |
-| `ci-gate` | 先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；同名被多次上报时按 id 最大的那次判定（重跑后的旧红不算数），任一红立刻中止，最长等 `DEADLINE_MINUTES: 120` 分钟；一个 check run 都没有的 commit 5 分钟即早退（多 commit push 只在 tip 触发 CI） |
+| `ci-gate` | 门禁本体在 `.github/workflows/_tag-gate.yml`（`workflow_call`），此处只是被调用。先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；同名被多次上报时按 id 最大的那次判定（重跑后的旧红不算数），任一红立刻中止，最长等 `DEADLINE_MINUTES: 120` 分钟；一个 check run 都没有的 commit 5 分钟即早退（多 commit push 只在 tip 触发 CI） |
 | `sdk-smoke` | Linux + Windows 各一次 `conan create` + `test_package`，复用 RELEASE 门同一份 `_sdk-smoke.yml` |
 | `publish` | 取 `CHANGELOG.md` 对应版本段作为正文，`gh release create` |
 
-`ci-gate` 存在的原因：ruleset 的必需检查只管**合并**，tag 不是被合并进来的，所以
+`_tag-gate.yml` 存在的原因：ruleset 的必需检查只管**合并**，tag 不是被合并进来的，所以
 `git tag v1.1.0 <任意 commit>` 过去可以绕过整套门禁——`v1.0.0` 就是在
-`windows-build-and-test` 为 failure 的情况下发布出去的。因此 tag 必须打在 master 上
-CI 已跑完的 commit（正常顺序就是合并后直接在 master tip 打 tag）；如果刚合并就想打
-tag，`ci-gate` 会替你在原地等那一轮转完。
+`windows-build-and-test` 为 failure 的情况下发布出去的，而 `deploy.yml` 同样吃 `v*`
+push，任意 tag 还能直接把镜像推出去、滚动 production ECS。工作流之间的 `needs` 不成立，
+所以修法不是让 release.yml 去管 deploy.yml，而是两个调用同一份门禁：`release.yml` 的
+`ci-gate` 与 `deploy.yml` 的 `tag-gate`。因此 tag 必须打在 master 上 CI 已跑完的
+commit（正常顺序就是合并后直接在 master tip 打 tag）；如果刚合并就想打 tag，门禁会替
+你在原地等那一轮转完（最长 `DEADLINE_MINUTES`，两小时）。`deploy.yml` 从分支
+`workflow_dispatch` 时没有 tag 可证明，门禁原样放行——这是它仍能用于手动部署的原因。
 
 **不要再手工 `gh release create`**：release 由流水线创建，手工创建会撞名失败。
 
