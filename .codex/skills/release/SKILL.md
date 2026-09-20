@@ -95,7 +95,7 @@ git push origin v1.1.0
 | Job | 内容 |
 |-----|------|
 | `version-check` | 第 4 步的两条断言在 CI 里再跑一次（秒级，失败即中止，不浪费构建时间） |
-| `ci-gate` | 先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；有任一失败立刻中止，25 分钟仍未跑完则超时失败 |
+| `ci-gate` | 先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；同名被多次上报时按 id 最大的那次判定（重跑后的旧红不算数），任一红立刻中止，最长等 `DEADLINE_MINUTES: 120` 分钟；一个 check run 都没有的 commit 5 分钟即早退（多 commit push 只在 tip 触发 CI） |
 | `sdk-smoke` | Linux + Windows 各一次 `conan create` + `test_package`，复用 RELEASE 门同一份 `_sdk-smoke.yml` |
 | `publish` | 取 `CHANGELOG.md` 对应版本段作为正文，`gh release create` |
 

@@ -179,12 +179,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green — and then polls `commits/<sha>/check-runs` for the five contexts the
   merge pipeline reports (three `* / build-test`, two `* / sdk-smoke`, FAST
   excluded because MAIN `needs` it). A non-success conclusion fails immediately,
-  a missing or still-running check polls for 25 minutes and then fails with the
-  names that never arrived, and every run sharing a name must be successful so a
-  re-run's stale conclusion cannot certify a release. The tag name is
-  shape-checked against semver before it reaches an API path. `sdk-smoke` still
-  re-runs afterwards: "green on master" and "installs the way a consumer builds
-  it" are claims about different artifacts.
+  a check that has not finished (or not yet appeared) polls for
+  `DEADLINE_MINUTES: 120` minutes and then fails with the names that never
+  arrived — measured end to end, one green pass of the merge pipeline takes 32
+  minutes, so the window has to clear that with room left for a cold Conan cache,
+  and `timeout-minutes: 135` sits above it deliberately so the script's own
+  "which context is missing" message beats a bare runner cancel. When a name was
+  reported more than once (a re-run, a second dispatch over the same commit) the
+  verdict comes from the highest check-run id, so a re-run supersedes its own
+  predecessor; requiring every sibling to be green would let one stale
+  `cancelled` lock the release with nothing able to clear it. A commit with *no*
+  check runs at all can never grow them, so it exits after
+  `EARLY_BAIL_SECONDS: 300` with the reason instead of waiting two hours. The
+  tag name is shape-checked against semver before it reaches an API path. Run
+  against the live API, the loop reproduces the incident it exists for: pointed
+  at the v1.0.0 tag it dereferences the annotated tag to its commit, accepts that
+  the commit is inside master, and — judged by the check names that commit's own
+  pipeline reported — refuses the release on
+  `windows-build-and-test: did not succeed`. `sdk-smoke` still re-runs
+  afterwards: "green on master" and "installs the way a consumer builds it" are
+  claims about different artifacts.
 
 ### Changed
 
