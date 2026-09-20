@@ -29,6 +29,7 @@ set(TEST_SRC
     integration/QueryOrderTest.cc
     integration/ReconcileSummaryTest.cc
     integration/RefundQueryTest.cc
+    integration/RequestBodyShapeTest.cc  # P0: mistyped body members must answer, not throw
     integration/RouteRegistrationSmokeTest.cc
     integration/WechatCallbackIntegrationTest.cc
     integration/WechatPayClientTest.cc

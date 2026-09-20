@@ -21,11 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at `file:line`, the fix batch it landed in, and the items deliberately left
   out (the bare-`this` capture in the certificate-download callback, the Alipay
   timeout unit mix-up).
-- **`tests/integration/QrPaymentBookingTest.cc`**: drives `/api/qrpay/create`
-  through `PayPlugin::setTestChannels()` with a stub channel, so the QR booking
-  contract — payment row present, per-attempt rows on retry, the amount the
-  channel is offered in fen — is pinned by a test instead of by reading the
-  service.
+- **`tests/integration/QrPaymentBookingTest.cc`**: drives the service behind
+  `/api/qrpay/create` (with the channel injected through
+  `PayPlugin::setTestChannels()`) so the QR booking contract is pinned by a test
+  instead of by reading the service — payment row present, per-attempt rows on
+  retry, the amount and currency the channel is offered, the fields that survive
+  the handler (`user_id` on the order row, a public `notify_url` in the channel
+  payload), and what is refused *before* the channel is asked at all.
+- **`tests/integration/RequestBodyShapeTest.cc`**: one handler-level case per
+  body member whose JSON type used to fault the process, calling the controllers
+  directly. Every body there is refused during validation — so no plugin,
+  database or channel is reached, which is what makes the suite runnable where no
+  Postgres exists — except the int64-owner case, whose whole point is that a
+  legitimate tenant id gets *past* the guard.
 - **A `findOne` caveat in the DB rule** (`rules/db-operations.md`, mirrored to
   the other agent config): `Mapper::findOne` sends "no row" *and* "more than one
   row" down the error callback, so the rule now states that it is only for
@@ -411,6 +419,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **A request body whose member had the wrong JSON type stopped the process.**
+  Every write route read its body through jsoncpp's `asString()`/`asInt64()`
+  directly, and jsoncpp *throws* on a member of another type — `{"amount":{}}`
+  where a string was expected. Nothing caught it between the handler and the
+  event loop: trantor's `EventLoop::loop()` catches an escaping exception, stops
+  the loop and rethrows it as the stack unwinds, which returns from
+  `app().run()` and takes the gateway down with it. The notify endpoint is
+  anonymous, so that body came straight from the internet; the write routes sit
+  behind an API key, so one leaked key was enough. The four POST surfaces now
+  check the shape of every field they read before reading it
+  (`validateBodyTypes` in `PayHandlers.cc`, an explicit `event_type` test in
+  `CallbackHandlers.cc`) and answer 400, and `registerHttpHandlers` wraps every
+  registration in a `guarded()` barrier that answers 500 only when a handler
+  threw *before* responding — the wrapped callback fires at most once, so an
+  asynchronous completion is never answered twice.
+- **Money could be booked under an owner no query can name.** `/api/pay/create`
+  documents a 401 when no `user_id` is available, and that branch was dead on
+  arrival: it wrapped `req->attributes()->get<int64_t>("user_id")` in a
+  try/catch, but `Attributes::get` never throws — a missing key, and a key stored
+  under another type, both read back as a default-constructed `0` and only log
+  "Bad type". The request therefore continued into the database with
+  `userId = 0`, which `queryOrderList` reads as "no owner filter" — an order
+  booked under it has no owner: only the unfiltered listing shows it (any valid
+  API key may ask for that), and no owner-scoped query can name it. Nothing in
+  this repository ever sets that attribute, so no deployment path could reach the
+  intended 401. The presence test is now `find()` and the owner has to be
+  positive on both create paths; the QR route additionally read `user_id` with
+  `asInt()` and a `FieldType::Int` gate, which refused (and would have truncated)
+  any tenant id above 2^31−1, and
+  `PaymentService::createQRPayment` resolved a missing buyer from the *string*
+  default `"1"` — `asInt64()` on which throws for a direct service caller, and
+  which silently attributed the order to tenant 1 otherwise.
+- **`/api/qrpay/create` dropped the fields that decide where the money lands.**
+  The handler rebuilt the service request from scratch and copied four members
+  into it, so `currency`, `notify_url`, `buyer_id` and `idempotency_key` never
+  reached the service: every QR order was priced in CNY, bound to the globally
+  configured callback URL, never scoped to a buyer, and guarded only by the
+  derived `QR_<order_no>_<channel>` key — the documented `X-Idempotency-Key`
+  header had no effect on this route at all. The four now pass through (with the
+  header as fallback for `idempotency_key`), the currency is upper-cased and
+  validated as three letters before the channel is offered it, `notify_url`
+  through the same SSRF gate `/api/pay/create` applies, and the amount through the
+  same format check the other route has always run — without it an unrepresentable
+  `total_amount` went to Alipay verbatim and was booked on the order row.
+- **A second caller could replay another tenant's QR code.** The QR idempotency
+  request hash covered `order_no`, `amount`, `channel` and `subject` only, so a
+  request naming the same order number with a different `user_id`, `currency`,
+  `notify_url` or `buyer_id` hashed identically and was answered as a *replay* of
+  the first caller's code — one tenant paying into another's order, with the
+  callback URL of the first. Those four fields are now part of the hash, so the
+  collision surfaces as 1004 over HTTP 404 instead.
+- **A refused attempt could shadow the payable one.** `pay_payment` carries one
+  row per QR precreate attempt, and the callback and refund lookups both took
+  "the newest row for this order" — which, once a channel refusal had closed a
+  later attempt, was a row that can never settle. The settlement CAS then matched
+  nothing, the notification was ACKed as SUCCESS with no money booked, and a
+  refund asked WeChat to refund a transaction that never existed while the paid
+  attempt stayed unrefunded. Both paths now filter to the attempts that can carry
+  money (`INIT`/`PROCESSING`/`SUCCESS`/`REFUNDED`), matching the row the
+  settlement branch settles; an order whose attempts are all closed is reported
+  rather than acknowledged
+  (`PayPlugin_WechatCallback_ClosedAttemptDoesNotShadowThePayableOne`).
+- **An unfinalized idempotency reservation was acknowledged as a handled
+  callback.** Both callback branches answered the duplicate path — record the
+  delivery, return SUCCESS — as soon as a `pay_idempotency` row existed, ignoring
+  whether it had a response snapshot. A reservation with no snapshot is not
+  evidence the callback was handled: the delivery that took it is either still
+  running or died before its transaction committed, and acking it stops WeChat's
+  retries on money that is booked nowhere. Both branches now drop the stale
+  reservation and answer FAIL/1400, so the next delivery runs the full path —
+  where the settlement CAS leaves a concurrent winner's work intact
+  (`PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry`).
 - **The WeChat channel sent every outbound request with no timeout, and one of
   its certificate keys was read by nobody.** `timeout_ms` was documented
   (default 5000) and set in the example config, but `sendWechatRequest` never

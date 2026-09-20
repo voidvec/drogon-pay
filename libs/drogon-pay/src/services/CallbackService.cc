@@ -23,6 +23,25 @@ using PayLedgerModel = drogon_model::pay_test::PayLedger;
 namespace
 {
 
+// The payment attempts of one order that a notification may be matched against.
+// A QR order carries one row per precreate attempt, and an attempt a channel
+// refusal closed (FAIL/CLOSED) can never settle, so it must not be the row a
+// notification is booked on: "newest row wins" lets a refused later attempt
+// shadow the payable one, the settlement CAS then matches nothing, and the
+// delivery is ACKed as SUCCESS with no money booked. An order whose attempts are
+// all closed finds no row here and is reported, not silently acknowledged.
+drogon::orm::Criteria openAttemptsOfOrder(const std::string &orderNo)
+{
+    return drogon::orm::Criteria(
+             PayPaymentModel::Cols::_order_no, drogon::orm::CompareOperator::EQ, orderNo
+           ) &&
+           drogon::orm::Criteria(
+             PayPaymentModel::Cols::_status,
+             drogon::orm::CompareOperator::In,
+             std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
+           );
+}
+
 // TODO(dedup): duplicated in PaymentService.cc and RefundService.cc.
 // Extract to PayUtils.h/cc in a future refactoring iteration.
 void insertLedgerEntry(
@@ -461,7 +480,58 @@ void CallbackService::handlePaymentCallback(
             );
             idempMapper.findOne(
               idempCriteria,
-              [this, cbPtr, orderNo, body, signature, serialNo](const PayIdempotencyModel &) {
+              [this, cbPtr, orderNo, idempotencyKey, body, signature, serialNo](
+                const PayIdempotencyModel &existing
+              ) {
+                  // A reservation whose snapshot was never finalized is not proof the
+                  // callback was handled: the delivery that took it is either still
+                  // running or died before its transaction committed. Acknowledging
+                  // one as a duplicate stops the channel's retries and leaves the
+                  // money booked nowhere, so drop the stale reservation and answer
+                  // FAIL. The next delivery then takes the full path, where the
+                  // settlement CAS leaves a concurrent winner's work intact.
+                  if (!existing.getResponseSnapshot())
+                  {
+                      LOG_WARN << "[CallbackService] Idempotency record for order " << orderNo
+                               << " has no finalized snapshot; dropping the stale reservation";
+                      auto respondRetryLater = [cbPtr]() {
+                          Json::Value error;
+                          error["code"] = "FAIL";
+                          error["message"] = "callback still in progress";
+                          (*cbPtr)(error, pay::makePayError(1400, "callback still in progress"));
+                      };
+                      try
+                      {
+                          drogon::orm::Mapper<PayIdempotencyModel> staleRemover(dbClient_);
+                          staleRemover.deleteBy(
+                            drogon::orm::Criteria(
+                              PayIdempotencyModel::Cols::_idempotency_key,
+                              drogon::orm::CompareOperator::EQ,
+                              idempotencyKey
+                            ),
+                            [respondRetryLater](const size_t) { respondRetryLater(); },
+                            [respondRetryLater, orderNo](const drogon::orm::DrogonDbException &e) {
+                                LOG_ERROR << "[CallbackService] Could not drop the stale "
+                                             "idempotency reservation for order "
+                                          << orderNo << ": " << e.base().what();
+                                respondRetryLater();
+                            }
+                          );
+                      }
+                      catch (const std::exception &e)
+                      {
+                          LOG_ERROR << "[CallbackService] Could not drop the stale idempotency "
+                                       "reservation for order "
+                                    << orderNo << ": " << e.what();
+                          respondRetryLater();
+                      }
+                      catch (...)
+                      {
+                          respondRetryLater();
+                      }
+                      return;
+                  }
+
                   // Already processed - record callback and return success
                   LOG_DEBUG << "[CallbackService] Idempotency key found for order: " << orderNo
                             << ", recording callback";
@@ -489,16 +559,14 @@ void CallbackService::handlePaymentCallback(
                       // attempt keeps its row and the retry appends a new one), and
                       // findOne() answers that with "Found more than one row", which
                       // made this path reject the duplicate notification instead of
-                      // recording it. Take the row the settlement path settles.
+                      // recording it. Attach the audit row to the same attempt the
+                      // settlement path settles, so the trail names the row the money
+                      // is on rather than whichever insert happened to be last.
                       paymentLookup
                         .orderBy(PayPaymentModel::Cols::_created_at, drogon::orm::SortOrder::DESC)
                         .limit(1)
                         .findBy(
-                          drogon::orm::Criteria(
-                            PayPaymentModel::Cols::_order_no,
-                            drogon::orm::CompareOperator::EQ,
-                            orderNo
-                          ),
+                          openAttemptsOfOrder(orderNo),
                           [this, cbPtr, body, signature, serialNo, respondSuccess, respondDbError](
                             const std::vector<PayPaymentModel> &rows
                           ) {
@@ -668,11 +736,7 @@ void CallbackService::handlePaymentCallback(
                                         drogon::orm::Mapper<PayPaymentModel> paymentMapper(
                                           transPtr
                                         );
-                                        auto paymentCriteria = drogon::orm::Criteria(
-                                          PayPaymentModel::Cols::_order_no,
-                                          drogon::orm::CompareOperator::EQ,
-                                          orderNo
-                                        );
+                                        auto paymentCriteria = openAttemptsOfOrder(orderNo);
                                         paymentMapper
                                           .orderBy(
                                             PayPaymentModel::Cols::_created_at,
@@ -2137,9 +2201,55 @@ void CallbackService::handleRefundCallback(
             );
             idempMapper.findOne(
               idempCriteria,
-              [this, cbPtr, refundNo, body, signature, serialNo, plainJson](
-                const PayIdempotencyModel &
+              [this, cbPtr, refundNo, idempotencyKey, body, signature, serialNo, plainJson](
+                const PayIdempotencyModel &existing
               ) {
+                  // Same rule as the transaction branch: an unfinalized snapshot is
+                  // not evidence this refund notification was handled, so acking it
+                  // would stop the channel's retries on a refund that was never
+                  // booked. Drop the reservation and let the next delivery run.
+                  if (!existing.getResponseSnapshot())
+                  {
+                      LOG_WARN << "[CallbackService] Idempotency record for refund " << refundNo
+                               << " has no finalized snapshot; dropping the stale reservation";
+                      auto respondRetryLater = [cbPtr]() {
+                          Json::Value error;
+                          error["code"] = "FAIL";
+                          error["message"] = "callback still in progress";
+                          (*cbPtr)(error, pay::makePayError(1400, "callback still in progress"));
+                      };
+                      try
+                      {
+                          drogon::orm::Mapper<PayIdempotencyModel> staleRemover(dbClient_);
+                          staleRemover.deleteBy(
+                            drogon::orm::Criteria(
+                              PayIdempotencyModel::Cols::_idempotency_key,
+                              drogon::orm::CompareOperator::EQ,
+                              idempotencyKey
+                            ),
+                            [respondRetryLater](const size_t) { respondRetryLater(); },
+                            [respondRetryLater, refundNo](const drogon::orm::DrogonDbException &e) {
+                                LOG_ERROR << "[CallbackService] Could not drop the stale "
+                                             "idempotency reservation for refund "
+                                          << refundNo << ": " << e.base().what();
+                                respondRetryLater();
+                            }
+                          );
+                      }
+                      catch (const std::exception &e)
+                      {
+                          LOG_ERROR << "[CallbackService] Could not drop the stale idempotency "
+                                       "reservation for refund "
+                                    << refundNo << ": " << e.what();
+                          respondRetryLater();
+                      }
+                      catch (...)
+                      {
+                          respondRetryLater();
+                      }
+                      return;
+                  }
+
                   // Already processed - record callback and return success
                   LOG_DEBUG << "[CallbackService] Refund idempotency key found for refund: "
                             << refundNo << ", recording callback";
@@ -2179,16 +2289,15 @@ void CallbackService::handleRefundCallback(
                       drogon::orm::Mapper<PayPaymentModel> paymentLookup(dbClient_);
                       // Same reason as the transaction branch above: an order can
                       // carry several payment attempts, and findOne() treats that
-                      // as an error rather than handing back one row.
+                      // as an error rather than handing back one row. The closed
+                      // ones are excluded for the same reason the settle path
+                      // excludes them -- the audit row belongs to the attempt that
+                      // carried the money.
                       paymentLookup
                         .orderBy(PayPaymentModel::Cols::_created_at, drogon::orm::SortOrder::DESC)
                         .limit(1)
                         .findBy(
-                          drogon::orm::Criteria(
-                            PayPaymentModel::Cols::_order_no,
-                            drogon::orm::CompareOperator::EQ,
-                            tradeOrderNo
-                          ),
+                          openAttemptsOfOrder(tradeOrderNo),
                           [this, cbPtr, body, signature, serialNo, respondSuccess, respondDbError](
                             const std::vector<PayPaymentModel> &rows
                           ) {
