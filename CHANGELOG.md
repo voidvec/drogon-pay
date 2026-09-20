@@ -31,10 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel is asked at all.
 - **`tests/integration/RequestBodyShapeTest.cc`**: one handler-level case per
   body member whose JSON type used to fault the process, calling the controllers
-  directly. Every body there is refused during validation — so no plugin,
-  database or channel is reached, which is what makes the suite runnable where no
-  Postgres exists — except the int64-owner case, whose whole point is that a
-  legitimate tenant id gets *past* the guard.
+  directly, plus the cases pinning what a process with no `PayPlugin` answers.
+  None of them reaches a database or a channel, which is what makes the suite
+  runnable where no Postgres exists — but several do reach the plugin, and whether
+  the test process has one depends on the start directory (`tests/main.cc`
+  registers `PayPlugin` only when `./config.json` opens from there), so those
+  assertions are gated on the process state and the file is verified in both.
 - **A `findOne` caveat in the DB rule** (`rules/db-operations.md`, mirrored to
   the other agent config): `Mapper::findOne` sends "no row" *and* "more than one
   row" down the error callback, so the rule now states that it is only for
@@ -420,6 +422,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **An uncertain WeChat answer on `/api/pay/create` closed the attempt that the
+  callback needs to find.** Last round's rule — only an answer that *proves* the
+  channel refused may close a booked `pay_payment` row — was wired into
+  `createQRPayment` only, so the JSAPI failure branch still wrote `FAIL` (and the
+  order `FAILED`) unconditionally, including after a timeout or a transport fault.
+  `FAIL` is exactly the status `openAttemptsOfOrder()` hides, so a `prepay_id` that
+  did get created on WeChat's side produced a paid order no callback or reconcile
+  pass could locate: money landed and stayed unclaimed. Both create paths now
+  share one predicate (`attemptCertainlyNotCreated`, renamed from the QR-local
+  `qrAttemptCertainlyNotCreated`); an uncertain outcome logs a warning and leaves
+  the attempt in flight, and the response to the caller is unchanged (`1002`).
+  The predicate's two branches need PostgreSQL, so the local evidence here is the
+  compile plus the existing QR case that pins the predicate itself; the JSAPI
+  wiring waits on CI.
+- **The Alipay notify route could still fault the process after verifying a
+  signature.** `593813d` folded a missing plugin into the route's existing "no
+  client to verify with" refusal, but past verification it dereferenced
+  `plugin->paymentService()` unguarded — a different state: the plugin is
+  registered, the service is not. That is the one place in the flow where an
+  *already-verified* notification is about to be acknowledged, on a process that
+  cannot book it. The lookup is now a presence test answered the same way as the
+  client-missing branch (`{"code":"FAIL"}`, never an acknowledgement), so Alipay
+  redelivers on a process that can. Neither this branch nor the one above it is
+  reachable from a handler-level test — a test process that starts the plugin has
+  a service — so this is compile-only evidence, stated as such in the audit.
 - **A request that reached a handler with no plugin in the process stopped it.**
   Every route resolves its service through `drogon::app().getPlugin<PayPlugin>()`
   and then calls a member on what it gets back — ten places across
@@ -442,7 +469,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had for "no client to verify with" (the same fault to a signature verifier, and
   never an acknowledgement, so no notification is consumed by a process that
   cannot book it). `openapi.yaml` carries the new 503 on the notify route and
-  names the trigger in the shared `ServiceUnavailable` description. This also
+  names the trigger in the shared `ServiceUnavailable` description. Two claims
+  there were wrong and are corrected this round: that 503 carries the numeric
+  error shape, not `CallbackAck` (whose `code` is the `SUCCESS`/`FAIL` string
+  enum, and a refusal to handle is not an acknowledgement of anything); and the
+  shared description said all three 503 faults carry business code 1501, when the
+  auth layer answers plain text with no code at all and a channel this process has
+  no client for answers `1002` on `/api/pay/create` and `1005` on
+  `/api/qrpay/create`, both over HTTP 500 — only the refund routes report that
+  fault as `1501`. The route's own refusal count was also overstated in the audit:
+  eight lookups answer `1501`/503 (seven in `PayHandlers.cc`, one on the WeChat
+  notify route), the Alipay route answers `FAIL`. This also
   corrects the local-evidence note in
   `docs/review/2026-09-20-wechat-pay-api-audit.md`: `RequestBodyShapeTest.cc` was
   *not* green at `4f028d0` — the two cases that reach the dereference died with
@@ -458,8 +495,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beside `config.json`, which is how ctest starts it) — 18/18 in each.
 - **A request body whose member had the wrong JSON type stopped the process.**
   Every write route read its body through jsoncpp's `asString()`/`asInt64()`
-  directly, and jsoncpp *throws* on a member of another type — `{"amount":{}}`
-  where a string was expected. Nothing caught it between the handler and the
+  directly, and jsoncpp *throws* on a member it cannot convert — `{"amount":{}}`
+  where a string was expected. The fault is narrower than "any wrong type", and
+  since a reviewer's BLOCKER claimed otherwise, the pinned 1.9.5 was probed
+  directly: `asString()` converts int, unsigned, int64, bool and null (a numeric
+  `2200` reads back as `"2200"`) and throws only for an object or an array, while
+  `asInt64()` throws for a string as well as for an object. So a mistyped body
+  stops the process through exactly two doors — an object/array under a string
+  read, and a string/object under an int64 read — and those are the shapes the
+  guard refuses. Nothing caught it between the handler and the
   event loop: trantor's `EventLoop::loop()` catches an escaping exception, stops
   the loop and rethrows it as the stack unwinds, which returns from
   `app().run()` and takes the gateway down with it. The notify endpoint is

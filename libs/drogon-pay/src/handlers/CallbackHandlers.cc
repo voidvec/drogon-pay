@@ -189,9 +189,10 @@ void AlipayCallbackController::notify(
     // it is not in this process at all, which is the same fault from the
     // verifier's point of view -- we MUST reject the callback rather than
     // processing it unverified - accepting an unverified callback would let any
-    // party forge a payment-success notification (P0-1). The null check on
-    // `plugin` is also what keeps the later `plugin->paymentService()` honest:
-    // this branch returns first.
+    // party forge a payment-success notification (P0-1). `plugin` is checked here
+    // rather than relied on further down; the service lookup below guards itself
+    // too, because a verification path must not answer with an access violation
+    // on a state this project's own header documents as possible.
     auto plugin = drogon::app().getPlugin<PayPlugin>();
     auto alipayClient = plugin ? plugin->alipayClient() : nullptr;
     if (!alipayClient)
@@ -281,7 +282,24 @@ void AlipayCallbackController::notify(
     alipayResult["notify_type"] = notifyType;
     alipayResult["notify_id"] = notifyId;
 
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        // A verified notification is about to be acknowledged, and this is the
+        // one process state in which it cannot be booked. Answer the same refusal
+        // the unconfigured-client branch gives: never an acknowledgement here, so
+        // Alipay redelivers instead of treating the payment as delivered.
+        LOG_ERROR << "[ALIPAY_CALLBACK] Payment service unavailable: no PayPlugin registered in "
+                     "this process, rejecting callback";
+        Json::Value response;
+        response["code"] = "FAIL";
+        response["message"] = "Payment service not available in this process";
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setContentTypeString("application/json");
+        resp->addHeader("Content-Type", "application/json; charset=utf-8");
+        callback(resp);
+        return;
+    }
 
     // Call syncOrderStatusFromAlipay to update the database.
     paymentService->syncOrderStatusFromAlipay(
