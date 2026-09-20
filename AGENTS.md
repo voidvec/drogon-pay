@@ -123,7 +123,8 @@ section. A tag is never merged, so the ruleset's required checks do not cover
 it: release.yml's `ci-gate` job refuses to build unless the tagged commit is
 already on `master` **and** the merge pipeline reported green for it (v1.0.0
 shipped with a red `windows-build-and-test`, which is the hole this closes) — so
-tag the commit whose CI has finished, or let the job wait for it. Never
+tag the commit whose CI has finished, or let the job wait for it (`DEADLINE_MINUTES`,
+two hours; a commit with no check runs at all exits in five minutes). Never
 hand-write a version into a deploy/config comment: those strings were the drift
 source and have been deleted. Bumping = three declarations + a new CHANGELOG
 section, then tag.
