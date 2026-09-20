@@ -2239,6 +2239,21 @@ void PaymentService::syncOrderStatusFromAlipay(
     const std::string transactionId = result.get("trade_no", "").asString();
     const std::string responsePayload = pay::utils::toJsonString(result);
 
+    // Alipay mandates that the notification's total_amount equals the merchant
+    // order amount before the order is treated as paid. Resolve the notified
+    // amount to fen once; a PAID transition with an unverifiable amount is
+    // rejected below (defends against a low-value payment confirming a
+    // high-value order).
+    int64_t notifiedFen = -1;
+    if (orderStatus == "PAID")
+    {
+        const std::string notifiedAmount = result.get("total_amount", "").asString();
+        if (!pay::utils::parseAmountToFen(notifiedAmount, notifiedFen))
+        {
+            notifiedFen = -1;
+        }
+    }
+
     if (!dbClient_)
     {
         if (callback)
@@ -2263,9 +2278,14 @@ void PaymentService::syncOrderStatusFromAlipay(
           .limit(1)
           .findBy(
             paymentCriteria,
-            [this, orderNo, orderStatus, paymentStatus, transactionId, responsePayload, callback](
-              const std::vector<PayPaymentModel> &rows
-            ) {
+            [this,
+             orderNo,
+             orderStatus,
+             paymentStatus,
+             transactionId,
+             responsePayload,
+             notifiedFen,
+             callback](const std::vector<PayPaymentModel> &rows) {
                 if (rows.empty())
                 {
                     if (callback)
@@ -2284,6 +2304,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                                                 paymentStatus,
                                                 transactionId,
                                                 responsePayload,
+                                                notifiedFen,
                                                 payment,
                                                 paymentNo,
                                                 callback](
@@ -2311,7 +2332,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                             );
                             orderMapper.findOne(
                               orderCriteria,
-                              [orderStatus, paymentNo, callback, transPtr, transDb](
+                              [orderStatus, paymentNo, callback, transPtr, transDb, notifiedFen](
                                 PayOrderModel order
                               ) {
                                   if (order.getValueOfStatus() != "PAID")
@@ -2319,6 +2340,31 @@ void PaymentService::syncOrderStatusFromAlipay(
                                       const auto userId = order.getValueOfUserId();
                                       const auto orderAmount = order.getValueOfAmount();
                                       const auto orderNo = order.getValueOfOrderNo();
+                                      // Amount consistency gate: never credit a PAID order
+                                      // whose stored amount differs from what the callback
+                                      // says was actually paid (Alipay notification rule).
+                                      if (orderStatus == "PAID")
+                                      {
+                                          int64_t orderFen = 0;
+                                          if (
+                                            notifiedFen < 0 ||
+                                            !pay::utils::parseAmountToFen(orderAmount, orderFen) ||
+                                            orderFen != notifiedFen
+                                          )
+                                          {
+                                              LOG_ERROR << "Alipay reconcile REJECTED: amount "
+                                                           "mismatch for order "
+                                                        << orderNo << " (notified fen="
+                                                        << notifiedFen
+                                                        << ", order fen=" << orderFen << ")";
+                                              transPtr->rollback();
+                                              if (callback)
+                                              {
+                                                  callback("");
+                                              }
+                                              return;
+                                          }
+                                      }
                                       order.setStatus(orderStatus);
                                       try
                                       {
@@ -2450,7 +2496,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                       "SET status = $1, channel_trade_no = $2, response_payload = $3 "
                       "WHERE payment_no = $4 "
                       "AND status IN ('INIT', 'PROCESSING') RETURNING 1",
-                      [orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
+                      [orderNo, orderStatus, paymentNo, callback, transPtr, transDb, notifiedFen](
                         const Result &casResult
                       ) {
                           if (casResult.size() == 0)
@@ -2475,7 +2521,7 @@ void PaymentService::syncOrderStatusFromAlipay(
                               );
                               orderMapper.findOne(
                                 orderCriteria,
-                                [orderStatus, paymentNo, callback, transPtr, transDb](
+                                [orderStatus, paymentNo, callback, transPtr, transDb, notifiedFen](
                                   PayOrderModel order
                                 ) {
                                     if (order.getValueOfStatus() == "PAID")
@@ -2489,6 +2535,29 @@ void PaymentService::syncOrderStatusFromAlipay(
                                     const auto userId = order.getValueOfUserId();
                                     const auto orderAmount = order.getValueOfAmount();
                                     const auto orderNo = order.getValueOfOrderNo();
+                                    // Amount consistency gate (see Alipay notification rule).
+                                    if (orderStatus == "PAID")
+                                    {
+                                        int64_t orderFen = 0;
+                                        if (
+                                          notifiedFen < 0 ||
+                                          !pay::utils::parseAmountToFen(orderAmount, orderFen) ||
+                                          orderFen != notifiedFen
+                                        )
+                                        {
+                                            LOG_ERROR << "Alipay reconcile REJECTED: amount "
+                                                         "mismatch for order "
+                                                      << orderNo << " (notified fen="
+                                                      << notifiedFen << ", order fen=" << orderFen
+                                                      << ")";
+                                            transPtr->rollback();
+                                            if (callback)
+                                            {
+                                                callback("");
+                                            }
+                                            return;
+                                        }
+                                    }
                                     order.setStatus(orderStatus);
                                     try
                                     {

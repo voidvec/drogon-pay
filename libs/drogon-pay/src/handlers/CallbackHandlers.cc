@@ -214,6 +214,25 @@ void AlipayCallbackController::notify(
     LOG_DEBUG << "[ALIPAY_CALLBACK] out_trade_no=" << outTradeNo << " trade_no=" << tradeNo
               << " trade_status=" << tradeStatus << " total_amount=" << totalAmount;
 
+    // Merchant-identity re-check (Alipay notification mandate). The signature
+    // already binds app_id, but a notification carrying a foreign app_id means
+    // a mis-configured gateway or a cross-app replay and must not advance our
+    // orders. Only enforced when we know our own app_id.
+    const std::string expectedAppId = alipayClient->getAppId();
+    if (!expectedAppId.empty() && appId != expectedAppId)
+    {
+        LOG_WARN << "[ALIPAY_CALLBACK] app_id mismatch, rejecting callback. expected="
+                 << expectedAppId << " got=" << appId;
+        Json::Value response;
+        response["code"] = "FAIL";
+        response["message"] = "app_id mismatch";
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setContentTypeString("application/json");
+        resp->addHeader("Content-Type", "application/json; charset=utf-8");
+        callback(resp);
+        return;
+    }
+
     // Build a JSON result object in the shape syncOrderStatusFromAlipay expects.
     Json::Value alipayResult;
     alipayResult["code"] = "10000";  // Alipay success response code
