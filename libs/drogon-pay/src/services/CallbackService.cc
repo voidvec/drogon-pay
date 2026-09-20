@@ -821,17 +821,19 @@ void CallbackService::handlePaymentCallback(
                                                         }
 
                                                         // `payer_total` is what the user handed
-                                                        // over; it sits below `total` whenever a
-                                                        // coupon covers the difference, which is
-                                                        // legitimate, so only a nonsensical value
-                                                        // is refused. The gap itself is logged
+                                                        // over. It sits below `total` whenever a
+                                                        // coupon covers the difference, and a
+                                                        // full coupon makes it exactly 0, which
+                                                        // is legitimate. Only the impossible
+                                                        // direction -- paid more than the order
+                                                        // -- is refused; the gap itself is logged
                                                         // because the ledger books `total`.
                                                         const int64_t payerTotalFen =
                                                           amountJson.get("payer_total", 0)
                                                             .asInt64();
                                                         if (
                                                           amountJson.isMember("payer_total") &&
-                                                          payerTotalFen <= 0
+                                                          payerTotalFen > notifyTotalFen
                                                         )
                                                         {
                                                             transPtr->rollback();

@@ -230,7 +230,26 @@ void PayPlugin::initAndStart(const Json::Value &config)
     // 6. Channel lifecycle hooks (e.g. WechatPayClient::onStart warms up the
     //    platform certificates) + periodic certificate refresh.
     workerLoop->runInLoop([this]() { registry_.startAll(); });
-    startCertRefreshTimer(workerLoop);
+    double certRefreshSeconds = 43200.0;
+    const Json::Value wechatCfg =
+      config.get("channels", Json::Value()).get("wechat", Json::Value());
+    if (wechatCfg.isMember("cert_refresh_interval_seconds"))
+    {
+        const int configured = wechatCfg.get("cert_refresh_interval_seconds", 43200).asInt();
+        // Floor of five minutes: this timer signs and sends a request to
+        // api.mch.weixin.qq.com per tick, and WeChat rate-limits the merchant
+        // account, so an aggressive value hurts the integration it serves.
+        if (configured >= 300)
+        {
+            certRefreshSeconds = static_cast<double>(configured);
+        }
+        else
+        {
+            LOG_WARN << "'cert_refresh_interval_seconds' must be >= 300, using "
+                     << certRefreshSeconds << "s";
+        }
+    }
+    startCertRefreshTimer(workerLoop, certRefreshSeconds);
 
     // 7. Register HTTP routes programmatically (ADD_METHOD_TO static
     //    registration is gone: static-library builds drop those symbols).
@@ -454,7 +473,7 @@ void PayPlugin::setTestClients(
     setTestChannels(std::move(channels), std::move(dbClient));
 }
 
-void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop)
+void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop, double intervalSeconds)
 {
     // SPI whitelist: periodic certificate refresh is a wechat-only capability;
     // the initial download happens in WechatPayClient::onStart().
@@ -464,8 +483,9 @@ void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop)
         return;
     }
 
-    // Set up periodic refresh (every 12 hours by default)
-    certRefreshTimerId_ = loop->runEvery(43200.0, [wechatClient]() {
+    // Set up periodic refresh (channels.wechat.cert_refresh_interval_seconds,
+    // 12 hours by default)
+    certRefreshTimerId_ = loop->runEvery(intervalSeconds, [wechatClient]() {
         wechatClient->downloadCertificates([](const Json::Value &, const std::string &err) {
             if (!err.empty())
             {

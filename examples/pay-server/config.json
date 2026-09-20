@@ -207,6 +207,7 @@
                         "platform_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CERT_PATH__",
                         "platform_ca_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CA_CERT_PATH__",
                         "cert_download_min_interval_seconds": 300,
+                        "cert_refresh_interval_seconds": 43200,
                         "notify_url": "__env_var:WECHAT_PAY_NOTIFY_URL__",
                         "api_base": "https://api.mch.weixin.qq.com",
                         "timeout_ms": 5000

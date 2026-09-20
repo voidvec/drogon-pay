@@ -522,7 +522,12 @@ void sendWechatRequest(
               }
               if (detail.empty() || detail == " ")
               {
-                  detail = std::string(resp->body());
+                  // The body stays out of the error string on purpose: this text
+                  // is reflected into responses to our own API callers, and
+                  // `api_base` is configuration -- whatever answers there must
+                  // not be echoed through us.
+                  LOG_TRACE << "[WechatChannel] non-2xx body: " << resp->body();
+                  detail = "no error envelope";
               }
               (*cb)(bodyJson, httpFailureText(status, detail));
               return;
@@ -552,9 +557,11 @@ WechatPayClient::WechatPayClient(const Json::Value &config) : config_(config)
     apiBase_ = config.get("api_base", "https://api.mch.weixin.qq.com").asString();
     notifyUrl_ = config.get("notify_url", "").asString();
     certDownloadMinIntervalSeconds_ = config.get("cert_download_min_interval_seconds", 300).asInt();
-    if (certDownloadMinIntervalSeconds_ < 0)
+    // One second floor: the throttle is what keeps an unauthenticated inbound
+    // header from turning into an outbound signed request per notification.
+    if (certDownloadMinIntervalSeconds_ < 1)
     {
-        certDownloadMinIntervalSeconds_ = 0;
+        certDownloadMinIntervalSeconds_ = 1;
     }
     timeoutMs_ = config.get("timeout_ms", 5000).asInt();
     if (timeoutMs_ < 0)

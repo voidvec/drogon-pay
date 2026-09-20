@@ -409,13 +409,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pending forever with the idempotency reservation held. The value is now read
   in the constructor, converted to Drogon's seconds on the way down, and a
   timed-out call reports `http request timed out after <n>ms` rather than the
-  generic `http request failed`. `cert_refresh_interval_seconds: 43200` promised
-  a periodic certificate refresh the code does not have and does not need —
-  an unknown `Wechatpay-Serial` already triggers a throttled download and
-  rejects that one notification, so WeChat's retry finds the rotated
-  certificate cached — so the key is deleted from
-  `examples/pay-server/config.json` instead of implemented, and the guides now
-  state the rotation mechanism that actually exists. `AlipayChannel.cc:29,428`
+  generic `http request failed`. `cert_refresh_interval_seconds` was the mirror
+  image of the same carelessness: `PayPlugin::startCertRefreshTimer` did run a
+  periodic refresh, on a `43200.0` literal it never read from config, so the key
+  could neither lengthen nor shorten it. The timer now takes the configured
+  value with a 300-second floor (below that it warns and keeps the default),
+  which is what the example config and the two guides describe. `AlipayChannel.cc:29,428`
   passes its `timeout_ms` (30000) straight into the same seconds parameter, an
   eight-hour timeout in the same family; it is left to the Alipay track rather
   than changed beside this fix.
@@ -427,7 +426,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   during reconciliation, `refund`, `createTransactionNative` — then treated a
   rejected request as an accepted one. Non-2xx now yields
   `HTTP <status>: <code> <message>` (body text bounded at 200 chars, and
-  unparseable bodies still fail).
+  unparseable bodies still fail). The raw body stays out of that string when no
+  error envelope is present: the text is reflected into responses to our own API
+  callers, and `api_base` is configuration, so whatever answers there must not
+  be echoed through us — it goes to `LOG_TRACE` instead.
 - **`createQRPayment` spoke Alipay to WeChat and then reported success.** The
   QR endpoint built one payload for every channel (`total_amount`/`subject`,
   yuan as a string), which `/v3/pay/transactions/native` rejects outright
@@ -436,13 +438,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch never matched, and an error body produced `code: 0` with no `code_url`
   for the client to render. The payload is now built per channel and
   `channelResultError` decides success per channel (`code_url`/`prepay_id` for
-  WeChat), with a bad amount returning 400 and clearing the reservation.
+  WeChat, and a *non-empty* one — `{"code_url": null}` satisfied an `isMember`
+  test), with a bad amount returning 400 and clearing the reservation. The QR
+  endpoint inserts a `pay_order` but never a `pay_payment`, on either channel,
+  so a fixed WeChat payload would have made money collectable on an order no
+  callback can settle; WeChat QR creation now answers 501 until that booking
+  gap closes, which keeps the endpoint honest rather than silently wrong.
 - **An unmappable refund status defaulted to `REFUNDING`.** `RefundService`
   read `status` from the refund response and fell through to `REFUNDING` for
   anything it did not recognise — including an absent field, which is what a
   WeChat error body looks like. A refund that never started was therefore
   booked as in-flight. Unknown values now map to no status at all and take the
-  failure branch (`1502`, `REFUND_FAIL`).
+  failure branch (`1502`, `REFUND_FAIL`), and so do `CLOSED`/`ABNORMAL`, which
+  `mapRefundStatus` had already turned into `REFUND_FAIL` before the success
+  path stored them anyway — the order ended up `REFUNDED` with `code: 0` on a
+  refund WeChat refused. Conversely a *transport* failure is not a refusal:
+  timeouts, 5xx and empty 2xx bodies no longer write the terminal
+  `REFUND_FAIL` (which invites a retry under a fresh `out_refund_no`, i.e. a
+  double refund) but keep the record `REFUNDING` for reconciliation, and only
+  the response the channel explicitly rejected reports `REFUND_FAIL`.
 - **The platform certificate trusted whoever said so.** `verifyCallback`
   accepted the statically configured platform certificate for any notification
   whose `Wechatpay-Serial` equalled the merchant's own `serial_no` — two
@@ -456,18 +470,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against its validity window and optionally chained to
   `platform_ca_cert_path` before it is stored. An unseen serial triggers a
   throttled refresh and rejects the notification — WeChat retries, by which
-  time the rotation is cached.
+  time the rotation is cached. The throttle floor is one second: the callback
+  endpoint is public, so a configurable `0` turned every notification naming an
+  unknown serial into an outbound signed request.
 - **Merchant identifiers were interpolated into the signed URL unencoded.**
   `/v3/pay/transactions/out-trade-no/{no}?mchid=` and
   `/v3/refund/domestic/refunds/{no}` took the order/refund number as it came,
   and the signature covers exactly that string: a number carrying a literal
   `?`, `#`, `&` or `/` moved a validly signed request to another resource. Both
   path segments now go through `pay::utils::urlEncodePathSegment`.
-- **Callback amount guards.** A notification whose `amount.payer_total` is
-  present but non-positive is refused (a coupon legitimately puts it below
-  `total`, so the gap alone only logs), and one whose `transaction_id` differs
-  from the `channel_trade_no` already booked on that payment is refused —
-  otherwise a second WeChat transaction could be settled under another order.
+- **Callback amount guards.** A notification whose `amount.payer_total` exceeds
+  the order `total` is refused; the other direction has to pass, because a
+  coupon legitimately puts it below `total` and a fully covered order at exactly
+  0, so the gap alone only logs (the ledger books `total`). One whose
+  `transaction_id` differs from the `channel_trade_no` already booked on that
+  payment is refused — otherwise a second WeChat transaction could be settled
+  under another order.
 - **The AEAD IV length came from the payload.** `decryptAesGcm` set the GCM IV
   size from the notification's `nonce` field, letting a malformed resource
   choose the cipher parameters. WeChat fixes it at 12 bytes, so any other

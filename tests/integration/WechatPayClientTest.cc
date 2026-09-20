@@ -564,8 +564,10 @@ DROGON_TEST(WechatPayClient_SetPlatformCert_BindsCacheKeyToCertificateSerial)
     CHECK(client.getPlatformCert("99").empty());
     CHECK(client.setPlatformCert(kTestSerial, certPem));
     CHECK(client.getPlatformCert(kTestSerial) == certPem);
-    // A zero-padded spelling of the same serial lands on the same cache entry.
+    // A zero-padded spelling of the same serial lands on the same cache entry,
+    // on the read side as well as the write side.
     CHECK(client.setPlatformCert("0001", certPem));
+    CHECK(client.getPlatformCert("0001") == certPem);
     CHECK(client.getPlatformCert(kTestSerial) == certPem);
 
     EVP_PKEY_free(pkey);

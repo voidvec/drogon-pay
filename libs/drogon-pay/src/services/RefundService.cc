@@ -1382,9 +1382,25 @@ void RefundService::invokeRefundChannel(
               if (!error.empty())
               {
                   const std::string errorMessage = "WeChat error: " + error;
+                  // A 4xx is WeChat refusing the request: the refund certainly
+                  // did not happen, so the row may go terminal. A timeout, a 5xx
+                  // or a transport failure says nothing -- the request may have
+                  // been accepted -- and a terminal REFUND_FAIL there invites a
+                  // retry under a new out_refund_no, which WeChat would honour as
+                  // a second refund. The row stays REFUNDING and reconciliation
+                  // settles it from the channel's answer.
+                  const bool rejectedByWechat = error.rfind("HTTP 4", 0) == 0;
                   Json::Value errJson;
                   errJson["error"] = errorMessage;
-                  updateRefundWithError(refundNo, errorMessage, errJson);
+                  if (rejectedByWechat)
+                  {
+                      updateRefundWithError(refundNo, errorMessage, errJson);
+                  }
+                  else
+                  {
+                      LOG_WARN << "[RefundService] Refund outcome unknown for " << refundNo
+                               << " (channel call did not complete): " << errorMessage;
+                  }
                   if (*sharedCb)
                   {
                       Json::Value response;
@@ -1394,7 +1410,7 @@ void RefundService::invokeRefundChannel(
                       response["data"]["order_no"] = orderNo;
                       response["data"]["payment_no"] = paymentNo;
                       response["data"]["amount"] = amount;
-                      response["data"]["status"] = "REFUND_FAIL";
+                      response["data"]["status"] = rejectedByWechat ? "REFUND_FAIL" : "REFUNDING";
                       response["data"]["error"] = errorMessage;
                       response["data"]["wechat_response"] = errJson;
                       (*sharedCb)(response, std::error_code(1502, std::system_category()));
@@ -1402,17 +1418,21 @@ void RefundService::invokeRefundChannel(
                   return;
               }
 
-              // V3 files a refund under SUCCESS / PROCESSING / CLOSED and puts a
-              // `code`/`message` envelope in everything else. Defaulting an
-              // unrecognised body to REFUNDING recorded a refund WeChat never
-              // accepted, and the REFUNDING row then blocked the retry.
+              // V3 files an accepted refund under SUCCESS or PROCESSING and
+              // answers CLOSED / ABNORMAL to say the money did not move.
+              // Defaulting an unrecognised body to REFUNDING recorded a refund
+              // WeChat never accepted, and routing CLOSED through the success
+              // path booked a failed refund as one that succeeded.
               const std::string wechatStatus = result.get("status", "").asString();
               const std::string refundId = result.get("refund_id", "").asString();
               const std::string mappedStatus = pay::utils::mapRefundStatus(wechatStatus);
-              if (mappedStatus.empty())
+              if (mappedStatus.empty() || mappedStatus == "REFUND_FAIL")
               {
                   const std::string code = result.get("code", "").asString();
-                  std::string errorMessage = "WeChat refund response has no usable status";
+                  const bool definitive = !mappedStatus.empty() || !code.empty();
+                  std::string errorMessage = mappedStatus.empty()
+                                               ? "WeChat refund response has no usable status"
+                                               : "WeChat reported refund status " + wechatStatus;
                   if (!code.empty())
                   {
                       errorMessage += ": " + code + " " + result.get("message", "").asString();
@@ -1420,7 +1440,15 @@ void RefundService::invokeRefundChannel(
 
                   Json::Value errJson;
                   errJson["error"] = errorMessage;
-                  updateRefundWithError(refundNo, errorMessage, errJson);
+                  if (definitive)
+                  {
+                      updateRefundWithError(refundNo, errorMessage, errJson);
+                  }
+                  else
+                  {
+                      LOG_WARN << "[RefundService] Refund outcome unknown for " << refundNo
+                               << " (2xx answer carried no status): " << errorMessage;
+                  }
                   if (*sharedCb)
                   {
                       Json::Value response;
@@ -1430,7 +1458,7 @@ void RefundService::invokeRefundChannel(
                       response["data"]["order_no"] = orderNo;
                       response["data"]["payment_no"] = paymentNo;
                       response["data"]["amount"] = amount;
-                      response["data"]["status"] = "REFUND_FAIL";
+                      response["data"]["status"] = definitive ? "REFUND_FAIL" : "REFUNDING";
                       response["data"]["error"] = errorMessage;
                       response["data"]["wechat_response"] = errJson;
                       (*sharedCb)(response, std::error_code(1502, std::system_category()));
