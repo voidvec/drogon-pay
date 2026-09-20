@@ -56,14 +56,18 @@ jobs:
       # A commit the merge pipeline never ran on will never grow one of the five
       # contexts above, and their absence proves nothing on its own — they appear
       # only after FAST finishes, a quarter of an hour in. ci.yml's own entry jobs
-      # are the proof it ran at all: they report within seconds of a start. This
-      # is the case a multi-commit push leaves behind, where only the tip of the
-      # push got a run. Comma-separated, and matched by name against the same
-      # listing the five are judged from.
+      # are the proof it ran at all: their check runs exist as soon as its run is
+      # created, before any runner is handed a job. This is the case a
+      # multi-commit push leaves behind, where only the tip of the push got a run.
+      # Comma-separated, and matched by name against the same listing the five are
+      # judged from.
       ENTRY_CHECKS: static-analysis,clang-tidy
       # A tag on such a commit is a mistake the operator can fix in seconds, so
-      # say so after five minutes instead of holding the lane for two hours.
-      EARLY_BAIL_SECONDS: 300
+      # say so after fifteen minutes instead of holding the lane for two hours.
+      # The window has to clear a congested runner queue too: a ci.yml run that
+      # exists but has not been scheduled is exactly what a busy release day looks
+      # like, and bailing on that would be a false verdict on a healthy pipeline.
+      EARLY_BAIL_SECONDS: 900
       POLL_SECONDS: 30
 
     steps:
@@ -96,19 +100,37 @@ jobs:
             exit 1
           fi
 
+          # Every timing knob feeds an arithmetic expansion below, so all three are
+          # validated before anything reads them. Order matters here: inside
+          # `$(( start + DEADLINE_MINUTES * 60 ))` an empty value evaluates as zero
+          # and the job gives up on its first pass while looking like it reached a
+          # verdict, and a non-numeric one dies in bash's own arithmetic error,
+          # which names no knob at all.
+          for knob in DEADLINE_MINUTES EARLY_BAIL_SECONDS POLL_SECONDS; do
+            if ! [[ "${!knob:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error::$knob is not a number ('${!knob:-}')" >&2
+              exit 1
+            fi
+          done
+
           # The commits endpoint dereferences annotated tags, which is what this
-          # needs: a tag object's own SHA carries no check runs.
-          SHA=$(gh api "repos/$REPOSITORY/commits/$TAG_NAME" --jq .sha)
+          # needs: a tag object's own SHA carries no check runs. Guarded so that a
+          # 404 — a tag deleted between the push and this job — is reported as the
+          # read failure it is, with a message an operator can act on.
+          if ! SHA=$(gh api "repos/$REPOSITORY/commits/$TAG_NAME" --jq .sha); then
+            echo "::error::could not resolve tag $TAG_NAME to a commit" >&2
+            exit 1
+          fi
           echo "tag $TAG_NAME -> commit $SHA"
 
           # compare/<base>...<sha> answers "behind" or "identical" exactly when
           # <sha> is already inside the base branch's history, which is the
-          # containment test the API offers. The call is guarded explicitly
-          # because a failure inside a command substitution does not trip
-          # `set -e`, and a 403 or 404 must not be reported as a policy decision.
-          # `master` is hardcoded because the ruleset and the trunk are named
-          # that in this repository; a default branch rename would make this fail
-          # loudly, not release unmerged commits.
+          # containment test the API offers. `master` is hardcoded because the
+          # ruleset and the trunk are named that in this repository; a default
+          # branch rename would make this fail loudly, not release unmerged
+          # commits. The guard is for the message rather than the control flow: a
+          # plain `VAR=$(cmd)` assignment does trip `set -e`, and what the guard
+          # adds is the line saying the compare failed instead of bash's raw exit.
           if ! relation=$(gh api "repos/$REPOSITORY/compare/master...$SHA" --jq .status); then
             echo "::error::could not compare $SHA against master" >&2
             exit 1
@@ -125,17 +147,6 @@ jobs:
           deadline=$(( start + DEADLINE_MINUTES * 60 ))
           early_deadline=$(( start + EARLY_BAIL_SECONDS ))
 
-          # Every knob below is used in arithmetic or as a `sleep` argument, and an
-          # empty one silently becomes zero — `DEADLINE_MINUTES=` would give up on
-          # the first pass while looking like a real verdict. Reject anything that
-          # is not a number instead of interpreting it.
-          for knob in DEADLINE_MINUTES EARLY_BAIL_SECONDS POLL_SECONDS; do
-            if ! [[ "${!knob:-}" =~ ^[0-9]+$ ]]; then
-              echo "::error::$knob is not a number ('${!knob:-}')" >&2
-              exit 1
-            fi
-          done
-
           # This list is the entire policy, so a damaged one has to stop the
           # release rather than certify it: an empty or truncated
           # `REQUIRED_CHECKS` would leave `pending` empty on the first pass and
@@ -143,17 +154,27 @@ jobs:
           # for a master push — three `* / build-test`, two `* / sdk-smoke`.
           names=()
           while IFS= read -r line; do
-            # `if` rather than `[ -n "$line" ] && names+=(...)`, because the AND
-            # list returns 1 on a blank entry and `set -e` would end the job with
-            # no message at all.
-            if [ -n "$line" ]; then names+=("$line"); fi
+            # `if` rather than `[ -n "$line" ] && ...`: an AND list that ends the
+            # loop body returns 1 on a blank entry, and `set -e` would end the job
+            # with no message at all.
+            if [ -z "$line" ]; then continue; fi
+            # Each name reaches `awk -v want=...`, which expands backslash
+            # escapes, and a tab would break the field split — so a context is
+            # accepted only in the character set the real five use. Rejecting it
+            # here beats an `unreported` verdict that stalls the release for two
+            # hours over a name that could never match.
+            if ! [[ "$line" =~ ^[A-Za-z0-9._/-]+([[:space:]]+[A-Za-z0-9._/-]+)*$ ]]; then
+              echo "::error::REQUIRED_CHECKS holds an unsupported context name: '$line'" >&2
+              exit 1
+            fi
+            names+=("$line")
           done <<< "$REQUIRED_CHECKS"
           if [ "${#names[@]}" -ne 5 ]; then
             echo "::error::REQUIRED_CHECKS lists ${#names[@]} context(s), expected 5; refusing to certify a release against a list that is not the pipeline's" >&2
             exit 1
           fi
           # The same reasoning upside down: an empty ENTRY_CHECKS would make
-          # every release bail after five minutes, so a mangled value has to fail
+          # every release bail after fifteen minutes, so a mangled value has to fail
           # here rather than look like a policy decision later.
           if ! [[ "$ENTRY_CHECKS" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]]; then
             echo "::error::ENTRY_CHECKS is not a comma-separated list of check names ('$ENTRY_CHECKS')" >&2
@@ -180,7 +201,7 @@ jobs:
               ($2 in hit) && hit[$2] == 0 { hit[$2] = 1; hits++ }
               END { print hits + 0 }')
             if [ "$entry_hits" -eq 0 ] && [ "$(date +%s)" -ge "$early_deadline" ]; then
-              echo "::error::commit $SHA has no run from ci.yml's entry jobs ($ENTRY_CHECKS), so the merge pipeline never started on it and no verdict can arrive; tag a commit CI actually ran (a multi-commit push runs CI only on its tip) — or, if those jobs were renamed, this list drifted with them" >&2
+              echo "::error::no check run from ci.yml's entry jobs ($ENTRY_CHECKS) has appeared on $SHA in ${EARLY_BAIL_SECONDS}s, so nothing is coming: tag a commit CI actually ran (a multi-commit push runs CI only on its tip) — or, if those jobs were renamed, this list drifted with them" >&2
               exit 1
             fi
 
@@ -194,6 +215,17 @@ jobs:
               # Requiring all siblings to be green would let a stale `cancelled`
               # lock the release forever, and no re-run of the green suite could
               # clear it.
+              #
+              # Matching on the name alone is safe only because the left half of
+              # each of the five comes from a matrix `check_name` pinned through
+              # ci.yml's job `name:` key: release.yml's consumer legs call the
+              # same `_sdk-smoke.yml` from a job with no such pin, so their names
+              # are not the strings above. (No literal expression is written here
+              # on purpose — inside a `run:` block GitHub would substitute it.)
+              # The five were copied from what a real ci.yml run reports on
+              # master's tip, not written from the matrix. Give another workflow a
+              # pinned name in that shape and this has to scope by check-suite
+              # instead, because the max-id pick below is deliberately name-only.
               verdict=$(printf '%s\n' "$runs" | awk -F'\t' -v want="$name" '
                 $2 == want && (!seen || $1 + 0 > best) { seen = 1; best = $1 + 0; st = $3; co = $4 }
                 END {

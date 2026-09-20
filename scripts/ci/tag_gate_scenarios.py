@@ -44,22 +44,49 @@ REQUIRED_CHECKS = "\n".join(
 ENTRY_CHECKS = "static-analysis,clang-tidy"
 
 # Hard wall-clock budget per case, independent of the deadline a case sets for
-# the gate itself.
-CASE_TIMEOUT_SECONDS = 60
+# the gate itself. Every case decides on its first pass except the one that
+# polls, which sleeps once. Kept under ci.yml's `timeout-minutes: 10` even if
+# every case burned its full budget, so a broken gate shows up as a list of
+# failing case names rather than as a cancelled job.
+CASE_TIMEOUT_SECONDS = 20
 
 STUB_GH = """#!/usr/bin/env bash
-# Stand-in for the handful of `gh api` reads the gate performs. Paths select
-# the response; STUB_* hold the canned payloads.
+# Stand-in for the handful of `gh api` reads the gate performs. Paths select the
+# response; STUB_* hold the canned payloads and the *_FAIL switches reproduce the
+# transport errors the gate has to tell apart from a policy verdict. With
+# STUB_COUNTER set, the check-runs read answers STUB_RUNS the first time and
+# STUB_RUNS_NEXT on every pass after that, which is how the loop's
+# pending -> green transition gets exercised instead of assumed.
 set -euo pipefail
 path="${2:-}"
 case "$path" in
   *"/compare/"*)
+    if [ "${STUB_COMPARE_FAIL:-0}" = "1" ]; then
+      echo "stub gh: compare rejected" >&2
+      exit 1
+    fi
     printf '%s\\n' "${STUB_COMPARE:-behind}"
     ;;
   *check-runs*)
-    printf '%b' "${STUB_RUNS-}"
+    if [ "${STUB_RUNS_FAIL:-0}" = "1" ]; then
+      echo "stub gh: check-runs rejected" >&2
+      exit 1
+    fi
+    payload="${STUB_RUNS-}"
+    if [ -n "${STUB_COUNTER:-}" ]; then
+      if [ -e "$STUB_COUNTER" ]; then
+        payload="${STUB_RUNS_NEXT-$payload}"
+      else
+        : > "$STUB_COUNTER"
+      fi
+    fi
+    printf '%b' "$payload"
     ;;
   *commits*)
+    if [ "${STUB_SHA_FAIL:-0}" = "1" ]; then
+      echo "stub gh: commit lookup rejected" >&2
+      exit 1
+    fi
     printf '%s\\n' "${STUB_SHA:-0000000000000000000000000000000000000000}"
     ;;
   *)
@@ -81,7 +108,11 @@ def extract_gate_script(workflow: Path) -> str:
         )
     body: list[str] = []
     for line in lines[heads[0] + 1 :]:
-        stripped = line.rstrip("\n")
+        # `rstrip("\r\n")` rather than `rstrip("\n")`: this file executes the
+        # extracted bytes, so a CRLF checkout would hand bash a stray carriage
+        # return on every line and the suite would fail on the line endings
+        # instead of on the gate.
+        stripped = line.rstrip("\r\n")
         if stripped.strip() == "":
             body.append("")
             continue
@@ -104,6 +135,9 @@ def run(bash: str, workspace: Path, script: Path, env: dict[str, str]) -> tuple[
             env=env,
             capture_output=True,
             text=True,
+            # The gate writes UTF-8; decoding it under a Windows console's code
+            # page turns its em dashes into replacement characters.
+            encoding="utf-8",
             errors="replace",
             cwd=workspace,
             shell=False,
@@ -138,7 +172,7 @@ def stubbed_cases() -> list[tuple[str, str, dict[str, str], int]]:
         "103\\tsdk-smoke-linux / sdk-smoke\\tcompleted\\tsuccess\\n"
         "104\\tsdk-smoke-windows / sdk-smoke\\tcompleted\\tsuccess\\n"
     )
-    base = {"DEADLINE_MINUTES": "10", "EARLY_BAIL_SECONDS": "300", "POLL_SECONDS": "1"}
+    base = {"DEADLINE_MINUTES": "10", "EARLY_BAIL_SECONDS": "900", "POLL_SECONDS": "1"}
 
     def env_for(runs: str, **over: str) -> dict[str, str]:
         env = {"STUB_RUNS": runs, **base, **over}
@@ -152,9 +186,12 @@ def stubbed_cases() -> list[tuple[str, str, dict[str, str], int]]:
             1,
         ),
         (
+            # The knobs are validated before the API is called, so a case that
+            # wants to reach the containment test has to supply them; only the
+            # tag-shape check runs earlier than that.
             "tag on a commit outside master is refused",
             "is not on master",
-            {"TAG_NAME": "v1.1.0", "STUB_COMPARE": "ahead"},
+            {"TAG_NAME": "v1.1.0", "STUB_COMPARE": "ahead", **base},
             1,
         ),
         (
@@ -235,7 +272,7 @@ def stubbed_cases() -> list[tuple[str, str, dict[str, str], int]]:
             # commit, so an empty listing is not the signal; only ci.yml's entry
             # jobs prove the merge pipeline ever started here.
             "a commit the pipeline never ran on bails in seconds",
-            "the merge pipeline never started on it",
+            "so nothing is coming",
             env_for(
                 "200\\tversion-check\\tcompleted\\tsuccess\\n"
                 "201\\tci-gate / tag-gate\\tin_progress\\t-\\n",
@@ -254,6 +291,64 @@ def stubbed_cases() -> list[tuple[str, str, dict[str, str], int]]:
                 EARLY_BAIL_SECONDS="0",
                 DEADLINE_MINUTES="0",
             ),
+            1,
+        ),
+        (
+            # The loop's transition rather than its first iteration: every other
+            # case decides on pass one, which would leave `sleep` and the
+            # re-reading of a fresh listing entirely untested -- a loop that could
+            # never move pending -> green would still report all cases passing. The
+            # asserted substring is the *waiting* line, so the pass that saw
+            # `in_progress` has to have happened; exit 0 then says the second pass
+            # is what cleared it.
+            "pending on the first poll, green on the second, releases",
+            "Waiting on: macos-build / build-test: still running",
+            env_for(
+                "200\\tstatic-analysis\\tcompleted\\tsuccess\\n"
+                "100\\tlinux-build-and-test / build-test\\tcompleted\\tsuccess\\n"
+                "101\\twindows-build-and-test / build-test\\tcompleted\\tsuccess\\n"
+                "102\\tmacos-build / build-test\\tin_progress\\t-\\n"
+                "103\\tsdk-smoke-linux / sdk-smoke\\tcompleted\\tsuccess\\n",
+                TAG_NAME="v1.1.0",
+                STUB_RUNS_NEXT=green,
+            ),
+            0,
+        ),
+        (
+            "a check-runs read that fails is not read as an absent pipeline",
+            "could not read check runs",
+            env_for(green, TAG_NAME="v1.1.0", STUB_RUNS_FAIL="1"),
+            1,
+        ),
+        (
+            "a compare that fails is not read as 'not on master'",
+            "could not compare",
+            env_for(green, TAG_NAME="v1.1.0", STUB_COMPARE_FAIL="1"),
+            1,
+        ),
+        (
+            "a tag that will not resolve to a commit says so",
+            "could not resolve tag",
+            env_for(green, TAG_NAME="v1.1.0", STUB_SHA_FAIL="1"),
+            1,
+        ),
+        (
+            # Before the reorder this case died inside `$(( ))` on bash's own
+            # arithmetic error, naming no knob at all.
+            "a non-numeric knob is rejected before anything reads it",
+            "DEADLINE_MINUTES is not a number",
+            env_for(green, TAG_NAME="v1.1.0", DEADLINE_MINUTES="abc"),
+            1,
+        ),
+        (
+            "a context name that would not survive the matcher is refused",
+            "unsupported context name",
+            {
+                "TAG_NAME": "v1.1.0",
+                "REQUIRED_CHECKS": REQUIRED_CHECKS.replace("macos-build", "macos\\build"),
+                "STUB_RUNS": green,
+                **base,
+            },
             1,
         ),
         (
@@ -330,7 +425,7 @@ def live_cases() -> list[tuple[str, str, dict[str, str], int]]:
             "gitleaks",
         ]
     )
-    base = {"TAG_NAME": "v1.0.0", "DEADLINE_MINUTES": "10", "EARLY_BAIL_SECONDS": "300", "POLL_SECONDS": "1"}
+    base = {"TAG_NAME": "v1.0.0", "DEADLINE_MINUTES": "10", "EARLY_BAIL_SECONDS": "900", "POLL_SECONDS": "1"}
     return [
         (
             "live: v1.0.0 judged by today's five contexts",
@@ -354,6 +449,13 @@ def live_cases() -> list[tuple[str, str, dict[str, str], int]]:
 
 
 def main() -> int:
+    # Case output echoes the gate's own annotations, which carry em dashes and
+    # typographic quotes. On a Windows console the default code page cannot
+    # encode them, and a crash while *reporting* a result is worse than the
+    # result, so both streams get UTF-8 with replacement rather than a raise.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
     bash = shutil.which("bash")
     if not bash:
         raise SystemExit("bash is required to replay the gate (Git Bash on Windows)")
@@ -397,10 +499,16 @@ def main() -> int:
         else:
             env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
             env["GH_TOKEN"] = "stub-token"
+            env["STUB_COUNTER"] = str(workspace / "calls.count")
             cases = stubbed_cases()
 
         failures: list[str] = []
+        counter = env.get("STUB_COUNTER")
         for label, expect, over, want_code in cases:
+            # One file, deleted between cases: it is the stub's memory of whether
+            # this is the first poll or a later one, and no case may inherit it.
+            if counter:
+                Path(counter).unlink(missing_ok=True)
             code, out = run(bash, workspace, gate, {**env, **over})
             check(failures, label, expect, code, out, want_code)
 

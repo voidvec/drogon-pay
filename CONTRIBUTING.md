@@ -152,8 +152,8 @@ nothing, in either workflow. The gate closes that path going forward rather than
 retroactively, though — Actions runs the definition *stored in the tagged commit*,
 so a tag aimed at a commit older than the gate is still built by the file that
 commit carries. It also now rejects a `v*` tag outside `v` + three numeric
-segments, which turns the deploy lane red where such a tag previously built and
-rolled without complaint.
+segments, where such a tag previously reached the image-push and ECS-roll legs with
+nothing saying otherwise.
 
 ## Contributing a payment channel
 
