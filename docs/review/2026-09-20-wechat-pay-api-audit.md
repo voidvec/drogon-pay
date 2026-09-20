@@ -238,8 +238,9 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   API key 就够了。现在四个 POST 面先校验形状（`validateBodyTypes`、`CallbackHandlers` 的
   `event_type` 显式判定）再读，回 400；`registerHttpHandlers` 的 `authed`/`open` 两条注册路径统一
   套 `guarded()` 异常屏障，只在"响应之前抛出"时补一个 500，屏障内的回调被 `atomic` 收成至多一次，
-  异步完成不会被二次应答。`tests/integration/RequestBodyShapeTest.cc` 14 条按成员逐一对着 handler 打，
-  除"int64 属主必须放行"那条正向对照外都不碰插件/库/通道，因此本机可跑。
+  异步完成不会被二次应答。`tests/integration/RequestBodyShapeTest.cc` 按成员逐一对着 handler 打；
+  这一族不碰库与通道，所以不需要 PostgreSQL —— 但**它碰插件**，而插件在不在取决于启动目录能读到
+  `config.json`（详见 §十 那条更正：原先写"14 条因此本机可跑"既少算了用例，也没说出真正的分档条件）。
   **未做**：`guarded()` 自身没有"故意让 handler 抛出"的直达用例（要起一个真在注册后被打、且 handler
   内抛的 HTTP 服务）。它确实被间接穿过：`RouteRegistrationSmoke`、`HttpHeaders_*`、`HealthProbe_*`
   共 8 条用例打的都是注册后的路由，因此屏障在正常应答路径上是绿的——缺的只是那条故障分支。
@@ -358,11 +359,17 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   存在），配置里没有 `PayPlugin` 一项也得到同样的状态。在空指针上调成员函数不是"这一个请求丢了"，而是
   handler 内访问违例 —— 上一轮那道 `guarded()` 屏障拦不到它，因为屏障只套在注册后的路由上，而崩溃发生在
   进程里。更要紧的是 wechat 回调把这次解引用放在**校验之前**：形状守卫在它下面，在这个状态下正好是死代码。
-  现在九处统一"先判存在再取用"，缺失时由 `src/handlers/PluginGuard.h` 的 `respondPluginUnavailable()`
-  回 1501/503（本契约已用于"我们自己的依赖缺失"的那个码），第十处（`4f028d0` 的 `CallbackHandlers.cc:249`）
+  现在八处统一"先判存在再取用"、缺失时由 `src/handlers/PluginGuard.h` 的 `respondPluginUnavailable()`
+  回 1501/503（本契约已用于"我们自己的依赖缺失"的那个码）：`PayHandlers.cc` 七处（`262,430,478,625,671,773,819`）
+  加 wechat notify 一处（`CallbackHandlers.cc:107`）—— 本节初稿写"九处统一回 1501/503"是错的，多算的
+  那一处是 alipay，它回的不是这个码。第十处（`4f028d0` 的 `CallbackHandlers.cc:249`）
   只能在上一个提前 return 之后到达。wechat 侧把服务解析移到信封校验**之后**，因此不认识的通知仍按自身原因被拒；alipay
-  侧把"没有插件"折进它已有的"没有验签客户端"分支 —— 对验签方而言是同一种故障，且永不确认收到。
-  `openapi.yaml` 给 notify 路由补上 503，共享的 `ServiceUnavailable` 描述点名第三个触发条件。
+  侧把"没有插件"折进它已有的"没有验签客户端"分支 —— 对验签方而言是同一种故障，且永不确认收到（回
+  `{"code":"FAIL"}` + HTTP 200，见上面对 alipay 的说明，而不是 1501/503）。
+  `openapi.yaml` 给 notify 路由补上 503；本轮第五节再更正它两处：那条 503 的 body 是数值
+  `ErrorResponse`（`{"code":1501}`）而不是 `CallbackAck`（它的 `code` 是 `SUCCESS`/`FAIL` 串枚举 ——
+  回绝本来就不是确认），共享的 `ServiceUnavailable` 说明也按"auth 明文（无业务码）/ 没有插件回 1501 /
+  通道不可用：pay 回 1002、qrpay 回 1005、refund 回 1501"重写，原先那句"三种都带业务码 1501"不成立。
 - **上一轮"本机 14 条全绿"是错的（本轮更正，并据此改口）**：`RequestBodyShapeTest.cc` 里两条会走到那次
   解引用的用例 —— `PayHandlers_CreateQRPayment_OwnerAboveInt32Range_NotRefusedAsMistyped`（body 合法，
   过了校验才碰得到插件）与 `CallbackHandlers_WechatNotify_EventTypeObject_Answers400InsteadOfThrowing`
@@ -381,4 +388,75 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   PostgreSQL，本机那个角色连不上——直接跑是**挂住**而不是失败（探针跑了 4 分钟没有输出，只能杀掉），所以这两族
   按 §四/§六 已写明的本机边界（§八 记过同一件事）只在 CI 的 linux/windows 两条腿上验；本机这一侧能给的证据只有编译加上一条 `guarded()` 屏障与
   形状/插件守卫（18/18 × 两种进程状态）、`RouteRegistrationSmoke` 1/1、`HttpHeaders_*` 4/4、`HealthProbe_*` 3/3。
+
+## 十一、第五轮复审补记（593813d 之后，本轮）
+
+两个评审子代理对着 `593813d` 全量重读（包括第四轮那批守卫自己），另一个专查文档与契约。落地两条真缺陷；
+一条 BLOCKER 用可执行证据证伪；一条修复建议核对后判定**守卫方向相反、不改**；另有契约与代码对不上的
+六处更正。评审报告自己的机制描述也在对撞范围内：本轮一条 BLOCKER 就是这么证伪的（见下第三条）。
+
+- **jsapi 下单把不确定的结果也关成了 `FAIL`（Critical，本轮修）**：第八、九节立的"只有可证明的拒绝才关闭
+  该行"只接在 `createQRPayment` 上，`proceedCreatePayment` 的失败分支仍无条件把 `pay_payment` 写成 `FAIL`、
+  订单写成 `FAILED` —— 而 `FAIL` 正是 `openAttemptsOfOrder()` 要遮蔽的那个状态。一次超时之后 `prepay_id`
+  完全可能已在微信侧建起，用户真付了款，回调与对账就都找不到那行：钱落地而无人认领。现在两条建单路径共用
+  同一个判据 `attemptCertainlyNotCreated()`（原 `qrAttemptCertainlyNotCreated`，`PaymentService.cc:277`），
+  jsapi 分支只在判据为真时落库（`PaymentService.cc:714`），否则只 `LOG_WARN` 留在途（`967`）；对外应答
+  仍是 `1002`/500，没变。判据本身已由 §十 那条 `PayPlugin_QrBooking_AnswerWithoutCodeUrlKeepsTheAttemptInFlight`
+  覆盖，jsapi 这条**接线**要连 PostgreSQL，本机只能证明编译，等 CI 两条腿的证据 —— 本轮没有为它新增用例，
+  也没有假装它被本机跑过。
+- **alipay 回调在"能答之前"还留着一次空解引用（BLOCKER，本轮修）**：`593813d` 把"没有插件"折进了"没有验签
+  客户端"分支，但验签通过之后仍写死 `plugin->paymentService()`（`4f028d0` 起如此）。`PayPlugin` 在、而
+  `paymentService()` 为空是另一件事：`config.json` 里插件注册了、服务却没起来，这一状态原本会让整个网关在
+  一次**已经验过签**的通知上崩溃 —— 也就是在唯一一次"确认收到"即将发出的地方。现在服务取用也判存在
+  （`CallbackHandlers.cc:266-280`），回 `{"code":"FAIL"}` + HTTP 200：alipay 拿不到它要的 `success` 串，
+  于是按自己的重试策略再投，不会把一笔没入账的款当成已送达。
+- **一条 BLOCKER 被证伪（不改）**：评审称 `PayHandlers.cc:485` 对 int 成员调 `asString()` 会抛。对着 conan
+  锁定的 jsoncpp **1.9.5** 现编了个探针跑（源码放在 gitignore 的构建目录里，跑完已删）：
+  `asString()` 会**转换** int/unsigned/int64/bool/null（回 `"0"`、`"2200"`、`"true"`、`""`），只对 object 与
+  array 抛 `Type is not convertible to string`；反过来 `asInt64()` 对字符串抛 `Value is not convertible to
+  Int64.`、对 object 也抛。这条表同时说明 §九 那条"类型错的成员能打死进程"的论证只成立于 object/array
+  与 `asInt64()` 读字符串两种形状 —— 形状守卫该防的仍然是它们，而不是"任何类型不符"。断言与代码对撞之后，
+  本条按**代码对、评审报告错**结案（探针输出的完整表另记于 CHANGELOG 同一条目）。
+- **一条建议核对后判定方向相反（不改）**：评审 2 指出快照定稿写命中 0 行时仍会 COMMIT + 确认收到，提议
+  "回滚并回 FAIL"。核对着入账代码看：入账本身是 `UPDATE pay_payment ... WHERE status IN ('INIT',
+  'PROCESSING') RETURNING 1`（`CallbackService.cc:1073-1082`），命中 0 行的那一支已经先 `rollback()` 再记
+  审计、回 SUCCESS（`1102-1280`）。也就是说：幂等行消失只丢掉**去重证据**，钱该记的已经在事务里记完；
+  此时再回滚反而把一笔已成立的入账退回去，全指望渠道还肯再投一次 —— 支付宝重试到上限就不来了，那才是真
+  把钱晾在外面。故本条不改（守卫方向与代价都相反）。剩下那句诊断仍然成立：`dropUnfinalizedReservation()`
+  只按 `idempotency_key` 匹配、不认是谁的预留，所以它确实可以删掉别人在途的那条；要治本得给预留加
+  owner token，属独立改造，记在"仍未做"。
+- **一个格式化陷阱（本轮踩到，记录判据）**：`CallbackService.cc` 的 `handlePaymentCallback` 整体是**一个**
+  嵌套 lambda 表达式，`handleRefundCallback` 同。往它的任一层函数体里插进任何一条语句（哪怕两行），
+  pinned clang-format 22 就会从 `dbClient_->newTransactionAsync(` 起把整段重排 —— 本机实测：插入 25 行
+  → 2332 行 churn，四种换行写法（参数名另起一行、调用拆行、短参数名）全都躲不掉，且**逐字节验证只是空白
+  差异**（`git diff -w` 仍只剩我那一处）。所以这里的规矩是：新逻辑写在命名空间作用域的小函数里
+  （`dropUnfinalizedReservation`、`insertLedgerEntry` 就是这个形状），调用点能不插语句就不插；真要插，
+  就单独提一个纯格式化 commit 把 churn 与语义分开，别混在一条 commit 里逼评审读两千行空白。
+- **文档与契约对撞（本轮更正六处）**：
+  - `openapi.yaml` 的 `ServiceUnavailable` 原写"三种情况都带业务码 1501"：auth 层无 key 回的是
+    **明文字符串**、根本没有业务码（`src/handlers/AuthCheck.cc:158-165`）；"通道客户端没配"在两条下单路由上也各不相同
+    （pay 回 `1002`、qrpay 回 `1005`，都是 500），只有退款路由回 `1501`（`RefundService.cc:1297,1395`）。
+    已按三种故障重写。
+  - 同文件 wechat notify 的 503 原 `$ref: CallbackAck`，而 `respondPluginUnavailable()` 回的是数值
+    `{"code":1501}`（`CallbackAck.code` 是 `SUCCESS`/`FAIL` 串枚举）—— 改成 `ErrorResponse`，并在描述里
+    写明"回绝不是确认，所以不用 ack 形状"。
+  - `docs/api/pay-api-examples.md`：同一条"通道客户端未配置 → 1501/503"的错误断言出现在正文与 QR 拒因表
+    里，已改为按路由区分；另给 `/api/pay/create` 补一段"只有可证明的拒绝才关闭该行"（本轮那条判据）——
+    此前这条规则只在 QR 一节写过，读者会以为下单路由仍是无条件关闭。
+  - 本文件 §十 的"九处统一回 1501/503"数错：实际八处（`PayHandlers.cc` 七处 + `CallbackHandlers.cc:107`），
+    alipay 那两处回的是 `FAIL`；§九 的"14 条因此本机可跑"也补齐了真正的分档条件（插件按启动目录有无）。
+  - §十 里对 `TECH_SPECS.md:238,257` 的行号引用**核对后保留**：两处断言确实落在 238 与 257（评审报告说的
+    237/256-257 是错的），那次是文档对、代码错。
+- **本轮本机证据**（比前几轮多跑了一遍非 DB 的单元测试族）：MSVC Release 构建（三个改动文件重编、日志零 warning）+ 七个
+  Python 门禁全过 + `RequestBodyShapeTest.cc` 18/18 × 两种进程状态（有插件/无插件，两种状态各用一条
+  "启动日志里有没有 `Initializing PayPlugin`" 的判据确认过，不是靠目录猜的）+ 穿过屏障的路由族
+  `RouteRegistrationSmoke` 1/1、`HttpHeaders_*` 4/4、`HealthProbe_*` 3/3 + 非 DB 单元/通道客户端族 55 条
+  （`AuthCheck_*` 5、`ConfigLoader_*` 5、`ControllerMetrics_*` 3、`OnceCallback_*` 5、`PayAuthMetrics_*` 1、
+  `PayUtils_*` 7、`StartupValidator_*` 7、`PayErrorCategory_*` 4、`WechatPayClient_*` 18）全绿。
+  其中 `AuthCheck_OptionsPreflightPassesThrough` 在批量跑里出现一次 90 秒不起进程、单独 0.3 秒即绿 —— 就是
+  §十 记的那个启动产物，判绿要把它单独重跑一次再计数。jsapi 判据接线与 alipay 服务为空分支仍只有编译证据
+  （前者要 PostgreSQL，后者的状态在测试进程里造不出来 —— 起得来就一定带着 `paymentService`）。
+- **仍未做**：幂等预留加 owner token（上一条）；`guarded()` 的故障分支直达用例（§九）；jsapi/alipay 两条
+  新分支的用例；服务层残余 `std::errc::*` → 业务码（§七）；`AlipayChannel.cc:428` 毫秒当秒、
+  `downloadCertificates` 裸 `this`（§六）；`CallbackService` 两条回调的嵌套压平（本轮实测它是格式化陷阱）。
 

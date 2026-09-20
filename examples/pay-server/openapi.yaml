@@ -599,11 +599,14 @@ paths:
           description: >-
             This process has no PayPlugin registered, so no service can take the
             notification (business code 1501). Never an acknowledgement: WeChat
-            retries, and the next delivery is handled by a process that can book it.
+            retries, and the next delivery is handled by a process that can book
+            it. The body is the numeric error shape, not the agreed
+            `SUCCESS`/`FAIL` acknowledgement, because a refusal to handle is not
+            an acknowledgement of any kind.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CallbackAck'
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/pay/notify/alipay:
     post:
@@ -911,11 +914,15 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     ServiceUnavailable:
       description: |
-        Either the auth layer has no keys configured (`api key not configured`,
-        plain text), the channel client is not ready, or this process has no
-        PayPlugin registered at all -- every route resolves its service through
-        `getPlugin<PayPlugin>()`, which a static-library link can leave null. All
-        three carry business code 1501.
+        Two different faults, and only one of them is a JSON body. The auth layer
+        with no keys configured answers plain text (`api key not configured`) with
+        no business code at all. A process with no `PayPlugin` registered answers
+        business code 1501 -- every route resolves its service through
+        `getPlugin<PayPlugin>()`, which a static-library link can leave null, and
+        the refund routes also carry 1501 when the channel client they need is not
+        configured. The create routes report that last fault differently: an
+        unusable channel answers 1002 on `/api/pay/create` and 1005 on
+        `/api/qrpay/create`, both over HTTP 500.
       content:
         text/plain:
           schema:
