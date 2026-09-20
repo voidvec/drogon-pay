@@ -114,7 +114,7 @@ jobs:
       # a stand-in check-run API, which is where the dead bail in the first
       # version of that gate showed up: an empty listing is never the signal,
       # because the release workflow reports its own runs on the same commit.
-      # Offline, and needs only bash and awk.
+      # Offline; needs bash, awk, and the `date`/`sleep` the loop calls.
       - name: Tag gate decision table
         run: python3 scripts/ci/tag_gate_scenarios.py
 

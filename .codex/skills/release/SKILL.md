@@ -95,7 +95,7 @@ git push origin v1.1.0
 | Job | 内容 |
 |-----|------|
 | `version-check` | 第 4 步的两条断言在 CI 里再跑一次（秒级，失败即中止，不浪费构建时间） |
-| `ci-gate` | 门禁本体在 `.github/workflows/_tag-gate.yml`（`workflow_call`），此处只是被调用。先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；同名被多次上报时按 id 最大的那次判定（重跑后的旧红不算数），任一红立刻中止，最长等 `DEADLINE_MINUTES: 120` 分钟；`ENTRY_CHECKS: static-analysis,clang-tidy` 五分钟没出现即早退，意思是"合并流水线从未在这条 commit 上开始过"（多 commit push 只在 tip 触发 CI），而不是"清单为空"——本工作流自己也在同一个 commit 上上报，清单永不为空 |
+| `ci-gate` | 门禁本体在 `.github/workflows/_tag-gate.yml`（`workflow_call`），此处只是被调用。先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；同名被多次上报时按 id 最大的那次判定（重跑后的旧红不算数），任一红立刻中止，最长等 `DEADLINE_MINUTES: 120` 分钟；`ENTRY_CHECKS: static-analysis,clang-tidy` 十五分钟（`EARLY_BAIL_SECONDS: 900`，留足 runner 排队）没出现即早退，意思是"没有任何 ci.yml run 摸到过这条 commit"（多 commit push 只在 tip 触发 CI），而不是"清单为空"——本工作流自己也在同一个 commit 上上报，清单永不为空 |
 | `sdk-smoke` | Linux + Windows 各一次 `conan create` + `test_package`，复用 RELEASE 门同一份 `_sdk-smoke.yml` |
 | `publish` | 取 `CHANGELOG.md` 对应版本段作为正文，`gh release create` |
 
@@ -113,15 +113,17 @@ commit（正常顺序就是合并后直接在 master tip 打 tag）；如果刚�
 
 - **tag 名必须是 `v` + 三段数字**（与 `check_version_sync.py --tag` 同形）。门禁对形状不
   符的 `v*` 直接拒绝，`deploy.yml` 从今往后也会因此变红——以前 `v1.2`、`v1.0.0-rc.1` 这类
-  tag 会照常构建镜像并滚动 production，现在不会了。
+  tag 能一路走到推镜像与滚动 ECS 的作业前（本仓那两个作业随后因缺凭据自己跳过，所以从没真
+  正滚过——那是密钥缺口，不是门禁）。
 - **门禁只约束它上线之后新触发的 run**。Actions 按被 tag 的那个 commit 里的工作流文件执行，
   所以给早于本改动的 commit 打 tag，跑的仍是旧版（无门禁）定义。这挡不住事后对历史 commit
   补 tag，要防的是往前走发布流程时忘记这条路。
 
-门禁的判定表由 `scripts/ci/tag_gate_scenarios.py` 钉住：FAST 门每次 PR 都会从工作流文件里
-现场抽取 `run:` 正文、用打桩的 `gh` 复演 17 个场景（早退的正反两向都在里面），所以改坏一条
-判定就会在 PR 上变红。改完门禁本地先复跑一遍，需要连真实 API 一起验就加 `--live`（它复演
-v1.0.0 那次的三种判法，只做只读调用）。
+门禁的判定表由 `scripts/ci/tag_gate_scenarios.py` 钉住：FAST 门每次进 `master` 的 PR 都会从
+工作流文件里现场抽取 `run:` 正文、用打桩的 `gh` 复演 23 个场景（早退的正反两向、第一轮
+pending 第二轮绿、三个 API 读取各自失败的分支都在里面），所以改坏一条判定就会在 PR 上变红。
+改完门禁本地先复跑一遍，需要连真实 API 一起验就加 `--live`（它复演 v1.0.0 那次的三种判法，
+只做只读调用）。
 
 **不要再手工 `gh release create`**：release 由流水线创建，手工创建会撞名失败。
 

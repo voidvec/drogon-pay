@@ -124,12 +124,16 @@ it: `.github/workflows/_tag-gate.yml` — called by release.yml's `ci-gate` and 
 deploy.yml's `tag-gate`, the two workflows that trigger on a `v*` push — refuses to
 build unless the tagged commit is already on `master` **and** the merge pipeline
 reported green for it (v1.0.0 shipped with a red `windows-build-and-test`, which is
-the hole this closes, and an unmerged tag used to roll production ECS) — so
+the hole this closes; an unmerged tag could previously reach the ECS roll, secrets
+permitting) — so
 tag the commit whose CI has finished, or let the job wait for it (`DEADLINE_MINUTES`,
-two hours; a commit where ci.yml's own entry jobs never appeared exits in five
+two hours; a commit where ci.yml's own entry jobs never appeared exits in fifteen
 minutes — the release workflow reports check runs against the tagged commit too, so
-an empty listing proves nothing, while `static-analysis`/`clang-tidy` are proof the
-merge pipeline started). The FAST gate replays those verdicts on every PR
+an empty listing proves nothing, while a `static-analysis`/`clang-tidy` check run is
+proof a ci.yml run reached the commit; those two names also appear on `pull_request`
+runs, so the bail is a backstop against waiting 120 minutes for nothing, not a
+substitute for the containment test). The FAST gate replays those verdicts on every
+pull request into master
 (`scripts/ci/tag_gate_scenarios.py` drives the workflow's own `run:` bytes against
 a stand-in API), so re-run it before editing the gate. Never
 hand-write a version into a deploy/config comment: those strings were the drift

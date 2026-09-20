@@ -194,19 +194,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listing is *not* the "nothing is coming" signal — this same workflow reports
   check runs against the tagged commit, so the listing is never empty — and the
   five contexts only appear once FAST has finished, a quarter of an hour in. The
-  evidence that the merge pipeline started at all is ci.yml's own entry jobs, so
-  `ENTRY_CHECKS: static-analysis,clang-tidy` is polled for and its absence after
-  `EARLY_BAIL_SECONDS: 300` exits with the reason instead of waiting two hours.
-  The tag name is shape-checked against semver before it reaches an API path, the
-  three timing knobs are rejected unless they are numbers, and the context list
-  is rejected unless it holds exactly five entries — a truncated `env:` block
-  would otherwise leave nothing pending and print "green" having inspected
+  evidence that a pipeline reached this commit at all is ci.yml's own entry jobs,
+  so `ENTRY_CHECKS: static-analysis,clang-tidy` is polled for and fifteen minutes
+  without them (`EARLY_BAIL_SECONDS: 900`, a window wide enough to survive runner
+  queueing) exits with the reason instead of waiting two hours. That bail is a
+  backstop, not a merge test: those two names are reported on `pull_request` runs
+  too, and only the containment check above says the commit is on `master`. The tag
+  name is shape-checked against semver before it reaches an API path, the three
+  timing knobs are rejected unless they are numbers *and before anything does
+  arithmetic with them*, every context name is rejected unless it is made of the
+  characters the real five use (one containing a backslash could never match, since
+  `awk -v` unescapes it, and the release would stall for two hours over it), and
+  the list is rejected unless it holds exactly five entries — a truncated `env:`
+  block would otherwise leave nothing pending and print "green" having inspected
   nothing. `scripts/ci/tag_gate_scenarios.py` replays that table by extracting the
-  workflow's own `run:` bytes and driving them against a stand-in `gh` (17 cases,
-  including a positive control proving the entry bail does not fire when an entry
-  job *is* present), and with `--live` against the real read-only API. The
-  `static-analysis` job of `ci.yml` runs the stubbed mode on every PR, so a
-  verdict that drifts fails a pull request instead of a release. Replayed
+  workflow's own `run:` bytes and driving them against a stand-in `gh` (23 cases:
+  the entry bail in both directions, a listing that is pending on the first poll
+  and green on the second, and each of the three API reads failing, so a transport
+  error is never read as a verdict), and with `--live` against the real read-only
+  API. The `static-analysis` job of `ci.yml` runs the stubbed mode on every pull
+  request into master, so a verdict that drifts fails a pull request instead of a
+  release. Replayed
   live it reproduces the incident it exists
   for: pointed at the v1.0.0 tag it dereferences the annotated tag to its
   commit, accepts that the commit is inside master, and — judged by the check
@@ -270,8 +278,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
   and `deploy-production` legs depended only on `preflight` — which checks whether
   secrets exist, not whether the commit is sound — so `git tag v9.9.9 <commit>
-  && git push --tags` pushed a semver image and rolled the ECS service for any
-  commit at all, including one the tests never ran. A red release did not stop it:
+  && git push --tags` would push a semver image and roll the ECS service for any
+  commit at all, including one the tests never ran, wherever those credentials are
+  configured. A red release did not stop it:
   `jobs.*.needs` cannot cross workflows, so the two tag consumers shared no gate.
   The check now lives once, in `.github/workflows/_tag-gate.yml`, and both call it
   — `release.yml` as `ci-gate`, `deploy.yml` as `tag-gate`, which `build-and-push`
@@ -282,8 +291,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definition *stored in the tagged commit*, so a tag aimed at a commit older than
   this change is still built by the ungated file and the hole closes going
   forward rather than retroactively; and a `v*` tag outside `v` + three numeric
-  segments is now refused by the shape check, which turns the deploy lane red
-  where `v1.2` or `v1.0.0-rc.1` previously built an image and rolled ECS.
+  segments is now refused by the shape check, where such a tag previously reached
+  the image-push and ECS-roll legs with nothing saying otherwise (in this
+  repository those legs then stopped on their own missing-credential conditions,
+  which is why no `v*` tag has actually rolled production that way — the absence
+  of an incident is a secret gap, not a gate).
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
