@@ -191,14 +191,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cancelled` lock the release with nothing able to clear it. A commit with *no*
   check runs at all can never grow them, so it exits after
   `EARLY_BAIL_SECONDS: 300` with the reason instead of waiting two hours. The
-  tag name is shape-checked against semver before it reaches an API path. Run
-  against the live API, the loop reproduces the incident it exists for: pointed
-  at the v1.0.0 tag it dereferences the annotated tag to its commit, accepts that
-  the commit is inside master, and — judged by the check names that commit's own
-  pipeline reported — refuses the release on
-  `windows-build-and-test: did not succeed`. `sdk-smoke` still re-runs
-  afterwards: "green on master" and "installs the way a consumer builds it" are
-  claims about different artifacts.
+  tag name is shape-checked against semver before it reaches an API path, the
+  three timing knobs are rejected unless they are numbers, and the context list
+  is rejected unless it holds exactly five entries — a truncated `env:` block
+  would otherwise leave nothing pending and print "green" having inspected
+  nothing. Replayed against the live API it reproduces the incident it exists
+  for: pointed at the v1.0.0 tag it dereferences the annotated tag to its
+  commit, accepts that the commit is inside master, and — judged by the check
+  names that commit's own pipeline reported, since the five current contexts
+  postdate it — refuses with `windows-build-and-test: failure`. `sdk-smoke`
+  still re-runs afterwards:
+  "green on master" and "installs the way a consumer builds it" are claims about
+  different artifacts.
 
 ### Changed
 

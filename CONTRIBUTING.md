@@ -136,7 +136,10 @@ the checker existed.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: `version-check` (the same
 script with `--tag "$GITHUB_REF_NAME"`, so a tag whose version is not in the tree or
-whose CHANGELOG section is missing fails in seconds), then `sdk-smoke` — the consumer
+whose CHANGELOG section is missing fails in seconds), then `ci-gate` (the tagged
+commit must already be on `master` *and* the merge pipeline must have gone green on
+it — a tag is never merged, so the branch ruleset's required checks cannot be
+trusted to have run), then `sdk-smoke` — the consumer
 `conan create` + `test_package` gate from `_sdk-smoke.yml`, on Linux and Windows —
 and only then `publish`, which uses that CHANGELOG section as the release body. Use
 `/release` for the runbook; do not create the release by hand.
