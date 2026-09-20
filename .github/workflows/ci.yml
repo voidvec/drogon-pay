@@ -109,6 +109,15 @@ jobs:
       - name: Version sync guard
         run: python3 scripts/check_version_sync.py
 
+      # The tag gate is release policy written in bash, so nothing in the C++
+      # suite can cover it. This replays the workflow's own `run:` bytes against
+      # a stand-in check-run API, which is where the dead bail in the first
+      # version of that gate showed up: an empty listing is never the signal,
+      # because the release workflow reports its own runs on the same commit.
+      # Offline, and needs only bash and awk.
+      - name: Tag gate decision table
+        run: python3 scripts/ci/tag_gate_scenarios.py
+
       # Two halves of one gate, split so a stale spec and a stale exclusion
       # list produce different failing step names. The checker parses a
       # YAML subset with the stdlib only: GitHub's ubuntu runners ship

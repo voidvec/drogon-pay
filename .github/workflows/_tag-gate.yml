@@ -53,10 +53,16 @@ jobs:
       # room for a cold Conan cache without letting a drifted check name stall a
       # release indefinitely.
       DEADLINE_MINUTES: 120
-      # A commit with no check runs at all will never grow them: a multi-commit
-      # push runs CI only on its tip, so an interior master commit has no
-      # pipeline to wait for. Bail on that after five minutes instead of two
-      # hours, with a message that says which situation the operator is in.
+      # A commit the merge pipeline never ran on will never grow one of the five
+      # contexts above, and their absence proves nothing on its own — they appear
+      # only after FAST finishes, a quarter of an hour in. ci.yml's own entry jobs
+      # are the proof it ran at all: they report within seconds of a start. This
+      # is the case a multi-commit push leaves behind, where only the tip of the
+      # push got a run. Comma-separated, and matched by name against the same
+      # listing the five are judged from.
+      ENTRY_CHECKS: static-analysis,clang-tidy
+      # A tag on such a commit is a mistake the operator can fix in seconds, so
+      # say so after five minutes instead of holding the lane for two hours.
       EARLY_BAIL_SECONDS: 300
       POLL_SECONDS: 30
 
@@ -146,6 +152,13 @@ jobs:
             echo "::error::REQUIRED_CHECKS lists ${#names[@]} context(s), expected 5; refusing to certify a release against a list that is not the pipeline's" >&2
             exit 1
           fi
+          # The same reasoning upside down: an empty ENTRY_CHECKS would make
+          # every release bail after five minutes, so a mangled value has to fail
+          # here rather than look like a policy decision later.
+          if ! [[ "$ENTRY_CHECKS" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]]; then
+            echo "::error::ENTRY_CHECKS is not a comma-separated list of check names ('$ENTRY_CHECKS')" >&2
+            exit 1
+          fi
 
           while :; do
             if ! runs=$(gh api "repos/$REPOSITORY/commits/$SHA/check-runs" --paginate \
@@ -154,9 +167,20 @@ jobs:
               exit 1
             fi
 
-            # Nothing has ever reported against this commit. Waiting cannot help.
-            if [ -z "$runs" ] && [ "$(date +%s)" -ge "$early_deadline" ]; then
-              echo "::error::commit $SHA has no check runs at all; tag a commit the merge pipeline actually ran on (a multi-commit push runs CI only on its tip)" >&2
+            # Did the merge pipeline ever start on this commit? The release
+            # workflow itself reports check runs against the same commit, so an
+            # empty listing is not the signal — only the absence of ci.yml's own
+            # entry jobs says "nothing is coming". `($2 in hit)` rather than
+            # `hit[$2] == 0` alone: an unset element equals 0, so the bare
+            # comparison would register every unrelated check run (this workflow's
+            # own `version-check` among them) as an entry hit and the bail could
+            # never fire.
+            entry_hits=$(printf '%s\n' "$runs" | awk -F'\t' -v list="$ENTRY_CHECKS" '
+              BEGIN { n = split(list, want, ","); for (i = 1; i <= n; i++) hit[want[i]] = 0 }
+              ($2 in hit) && hit[$2] == 0 { hit[$2] = 1; hits++ }
+              END { print hits + 0 }')
+            if [ "$entry_hits" -eq 0 ] && [ "$(date +%s)" -ge "$early_deadline" ]; then
+              echo "::error::commit $SHA has no run from ci.yml's entry jobs ($ENTRY_CHECKS), so the merge pipeline never started on it and no verdict can arrive; tag a commit CI actually ran (a multi-commit push runs CI only on its tip) — or, if those jobs were renamed, this list drifted with them" >&2
               exit 1
             fi
 

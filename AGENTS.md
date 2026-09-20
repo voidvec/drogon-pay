@@ -126,7 +126,12 @@ build unless the tagged commit is already on `master` **and** the merge pipeline
 reported green for it (v1.0.0 shipped with a red `windows-build-and-test`, which is
 the hole this closes, and an unmerged tag used to roll production ECS) — so
 tag the commit whose CI has finished, or let the job wait for it (`DEADLINE_MINUTES`,
-two hours; a commit with no check runs at all exits in five minutes). Never
+two hours; a commit where ci.yml's own entry jobs never appeared exits in five
+minutes — the release workflow reports check runs against the tagged commit too, so
+an empty listing proves nothing, while `static-analysis`/`clang-tidy` are proof the
+merge pipeline started). The FAST gate replays those verdicts on every PR
+(`scripts/ci/tag_gate_scenarios.py` drives the workflow's own `run:` bytes against
+a stand-in API), so re-run it before editing the gate. Never
 hand-write a version into a deploy/config comment: those strings were the drift
 source and have been deleted. Bumping = three declarations + a new CHANGELOG
 section, then tag.
