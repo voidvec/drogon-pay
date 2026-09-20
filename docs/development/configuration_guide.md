@@ -124,7 +124,8 @@ at startup, so the file itself stays safe to commit.
 | `notify_url` | Payment callback URL | Yes | - |
 | `platform_cert_path` | Static platform certificate, used as a fallback only when the cache is cold *and* the certificate's own serial matches the notification's `Wechatpay-Serial` | No | - |
 | `platform_ca_cert_path` | Trust anchor bundle; when set, a downloaded platform certificate must chain to it before it is cached | No | - (chain check skipped) |
-| `cert_download_min_interval_seconds` | Minimum gap between `/v3/certificates` downloads | No | 300 |
+| `cert_download_min_interval_seconds` | Minimum gap between `/v3/certificates` downloads (floor: 1s) | No | 300 |
+| `cert_refresh_interval_seconds` | Periodic certificate refresh, read by `PayPlugin`'s timer (values below 300 are refused with a warning) | No | 43200 |
 | `api_base` | WeChat API base URL | No | https://api.mch.weixin.qq.com |
 | `timeout_ms` | Per-request timeout applied to every outbound WeChat call (`0` disables it) | No | 5000 |
 
@@ -138,12 +139,13 @@ a different numbering space) from the merchant certificate named by
 X.509, is outside its validity window, carries a serial other than the one it
 is filed under, or fails the optional `platform_ca_cert_path` chain check.
 
-When a notification names a serial that is not cached, WeChat has rotated: the
-channel triggers a throttled download and answers that notification as a
-failure, so WeChat retries it and finds the new certificate already cached.
-There is no independent refresh timer — an idle process holds a stale cache
-until the next unknown serial arrives, which is the trigger WeChat's own
-rotation already provides.
+Two mechanisms keep the cache current. When a notification names a serial that
+is not cached, WeChat has rotated: the channel triggers a throttled download
+and answers that notification as a failure, so WeChat retries it and finds the
+new certificate already cached. Independently of that, `PayPlugin` re-downloads
+the set on a timer every `cert_refresh_interval_seconds` (default 43200, below
+300 refused with a warning), so an idle process does not sit on a stale cache;
+`onStart()` covers the restart case with a warm-up.
 
 ### Alipay (`channels.alipay`)
 

@@ -106,9 +106,7 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 | 5 | M1 `payer_total`、M2 `transaction_id` 交叉校验 | CallbackService.cc |
 | 6 | 单测补齐 + CHANGELOG + openapi/配置文档同步 | tests/, CHANGELOG.md |
 
-不纳入本轮：通道层重构成按通道分派的响应解析器（改动面过大）。M5 以另一种方式收口：不新增定时器，
-而是把示例配置里那个无人读取的 `cert_refresh_interval_seconds` 删掉，让配置只声明代码真正提供的机制
-（未知序列号 → 节流下载 + 本条通知按失败返回 → 微信重投时新证书已入缓存），见第五节。
+不纳入本轮：通道层重构成按通道分派的响应解析器（改动面过大）。M5 的收口方式在复审中被推翻，见第六节。
 
 ## 四、验证口径
 
@@ -125,16 +123,41 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 | C1 | `sendWechatRequest` 对非 2xx 生成 `HTTP <status>: <code> <message>`（detail 截断 200 字节），body 仍原样上抛 | `WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure`（打真实监听器取 404） |
 | C2 | native/jsapi 分支按契约要求 `code_url` / `prepay_id`，缺失即失败 | `CreatePaymentIntegrationTest.cc` |
 | C3 | `createQRPayment` 复用 `createPayment` 的按通道 payload 构造，并解析 `code_url` | `PaymentService.cc` 扫码分支 |
-| C4 | 退款响应 `status` 白名单（`SUCCESS`/`CLOSED`/`PROCESSING`），否则走 `updateRefundWithError` | `RefundQueryTest.cc` |
+| C4 | 退款响应 `status` 白名单（`SUCCESS`/`CLOSED`/`PROCESSING`），否则走 `updateRefundWithError`；复审发现 `CLOSED` 仍漏进成功路径，见第六节 | `RefundQueryTest.cc` |
 | H1 | `setPlatformCert` 安装前强制：X509 可解析 + 有效期覆盖当前 + 证书内序列号与登记者一致 + （可选）链路到 `platform_ca_cert_path` | `WechatPayClient_SetPlatformCert_*` 三个用例 |
 | H2 | 没有新增 `platform_cert_serial` 配置：静态兜底证书改用**它自身**的序列号与通知头比对，配置无法与证书漂移；未知序列号触发自节流下载并按失败返回；缓存两侧统一走 `normalizeSerialHex` | `WechatPayClient_VerifyCallback_*`、`SetPlatformCert_BindsCacheKeyToCertificateSerial` |
 | H3 | 路径段百分号编码，抽到 `pay::utils::urlEncodePathSegment`（可单测），签名与请求共用编码后的串 | `PayUtils_UrlEncodePathSegment` |
-| M0 | `timeout_ms` 真正传入 `HttpClient::sendRequest`（毫秒→秒，0 表示不限时），超时错误为 `http request timed out after <n>ms`；`cert_refresh_interval_seconds` 作为无人读取的死配置从示例配置删除 | 编译 + 直读；见下方未覆盖项 |
-| M1 | `payer_total` 不做等值校验（有券时不等是合法的），只拒绝 `<=0` 的非法值，差额按 `LOG_WARN` 记录 | `PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards` |
+| M0 | `timeout_ms` 真正传入 `HttpClient::sendRequest`（毫秒→秒，0 表示不限时），超时错误为 `http request timed out after <n>ms`；~~`cert_refresh_interval_seconds` 作为无人读取的死配置从示例配置删除~~ 复审推翻，见 M5 行与第六节 | 编译 + 直读；见下方未覆盖项 |
+| M1 | `payer_total` 不做等值校验（有券时不等是合法的），~~只拒绝 `<=0` 的非法值~~ 复审改为只拒绝 `> total`（第六节），差额按 `LOG_WARN` 记录 | `PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards` |
 | M2 | `transaction_id` 与库内 `channel_trade_no` 不一致时整笔回滚并返回失败 | 同一用例 |
 | M3 | `nonce` 必须 12 字节、`api_v3_key` 必须 32 字节、密文长度必须大于标签，空明文不再 `&plaintext[0]` 越界取址 | `DecryptResource_RejectsShortNonce` / `InvalidKey` / `ShortCiphertext` / `InvalidTag` |
 | M4 | `verifyMessageWithCert` 校验证书有效期 | `SetPlatformCert_RejectsOutOfValidity` |
-| M5 | 以删除死配置收口，不引入定时器（理由见第三节） | 配置与文档 |
+| M5 | ~~删除死配置~~ 复审推翻：定时器一直存在（`PayPlugin::startCertRefreshTimer` 硬编码 43200.0），改为让它读 `cert_refresh_interval_seconds`（下限 300 秒） | PayPlugin.cc/.h, config |
+
+## 六、复审补记（同日，两个子代理评审 84ceaa5 之后）
+
+评审发现的**本轮修复自身**的问题，已一并修掉：
+
+- **C5（新增，未修）**：`/api/qrpay/create` 只插 `pay_order`，从不写 `pay_payment`（两个通道都如此，属既有缺口）。
+  C3 把微信扫码的 payload 修对之后，这条路径的净效果从"必然 400"变成"能建真交易但无法入账"——
+  回调找不到 payment 就回 FAIL，钱收了订单悬在 PAYING。因此本轮在 QR 入口对微信加了 501 闸门（资金安全优先），
+  payload 构造保留待 C5 的入账改动落地后放开。补 `pay_payment` 落库是下一轮的工作。
+- **M1 修过头**：`payer_total <= 0` 一律拒绝会杀掉全额代金券（`payer_total` 恰为 0）以及一切合法的低于 `total` 的差额，
+  方向反了。改为只拒绝 `payer_total > amount.total`（不可能值），差额仍 `LOG_WARN`；并补了一条正向对照用例。
+- **C4 收口不完整**：`CLOSED`/`ABNORMAL` 经 `mapRefundStatus` 得到 `REFUND_FAIL` 后仍走 `updateRefundWithSuccess`
+  （订单被置 `REFUNDED`、对外 `code:0`）。现在只有 `SUCCESS`/`PROCESSING` 进成功路径，其余进失败路径。
+- **C1 的超时副作用**：传输失败被写成终态 `REFUND_FAIL` 会诱导用新 `out_refund_no` 重试 → 双重退款。
+  现在只有微信明确拒绝（`HTTP 4xx` 或响应里的 `code`）才落终态，超时/5xx/2xx 无状态一律保持 `REFUNDING` 交给对账。
+- **C2 的 `isMember` 漏洞**：`{"code_url":null}` 与空串同样算通过，改为必须是非空字符串。
+- **H1 副作用**：`cert_download_min_interval_seconds` 配 0/负数会把节流整个关掉，而回调端点是公开的——
+  每条带未知序列号的通知都会变成一次签名出站请求。下限改为 1 秒。
+- **C1 副作用**：非 2xx 且响应无 `code`/`message` 时把响应体原文塞进 error，而这段文本会被反射进对我们 API 调用方的响应；
+  现在只回状态码，响应体进 `LOG_TRACE`。
+- **未修，需设计决策**：`WechatPayClient::downloadCertificates` 的 HTTP 回调捕获裸 `this`
+  （`onStart` 一直是这个形状，本轮的"未知序列号触发刷新"多了第二个入口）。`PayPlugin::setTestClients`
+  替换通道 shared_ptr 后，在途回调会打到已析构对象上。修法要么 `enable_shared_from_this`（但测试里通道是栈对象），
+  要么把证书缓存挪到一个 shared_ptr 持有的独立状态里；留给下一轮决定。
+- **未修，属支付宝线**：`AlipayChannel.cc:428` 把 `timeoutMs_`（30000）直接交给以秒计的参数，等于 8.3 小时。
 
 本轮**未加自动化测试**的一项：M0 的超时分支。要确定性地复现"连接已建立但对端不回包"，需要在测试里挂一个
 静默 `TcpServer`，其回调签名与 trantor 版本耦合；该改动是 4 行直读代码（构造函数取值 → 传参 → 单位换算 →

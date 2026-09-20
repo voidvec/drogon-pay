@@ -208,7 +208,14 @@ std::string channelResultError(const std::string &channel, const Json::Value &re
 
     if (channel == "wechat")
     {
-        if (result.isMember("code_url") || result.isMember("prepay_id"))
+        // `isMember` alone would pass on `{"code_url":null}` and on an empty
+        // string, which is the same phantom order under a different body.
+        const Json::Value codeUrl = result.get("code_url", "");
+        const Json::Value prepayId = result.get("prepay_id", "");
+        if (
+          (codeUrl.isString() && !codeUrl.asString().empty()) ||
+          (prepayId.isString() && !prepayId.asString().empty())
+        )
         {
             return {};
         }
@@ -1405,6 +1412,24 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // Alipay precreate takes `total_amount` in yuan, WeChat V3 native takes
           // `amount.total` in fen plus a `description`. Sending the Alipay field
           // names to WeChat made every WeChat QR order a 400 PARAM_ERROR.
+          //
+          // WeChat is gated until this endpoint also books a pay_payment row (see
+          // the C5 note in docs/review/2026-09-20-wechat-pay-api-audit.md): the
+          // payload below is V3-correct, so fixing only the payload would let a
+          // real chargeable transaction be created for an order the callback then
+          // cannot apply -- CallbackService answers FAIL without a payment row.
+          if (channel == "wechat")
+          {
+              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
+              Json::Value response;
+              response["code"] = 501;
+              response["message"] =
+                "WeChat QR payments are not available: this endpoint books no payment row";
+              sharedCb
+                ->call(response, pay::makePayError(501, "WeChat QR payments are not available"));
+              return;
+          }
+
           Json::Value payload;
           payload["out_trade_no"] = orderNo;
 
@@ -1417,7 +1442,8 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   Json::Value response;
                   response["code"] = 400;
                   response["message"] = "Invalid amount for WeChat native payment";
-                  sharedCb->call(response, std::make_error_code(std::errc::invalid_argument));
+                  sharedCb
+                    ->call(response, pay::makePayError(400, "invalid amount for native payment"));
                   return;
               }
               payload["description"] = subject;

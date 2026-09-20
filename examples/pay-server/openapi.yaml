@@ -195,6 +195,23 @@ paths:
                     message: "CHANNEL_NOT_AVAILABLE: paypal"
         "400":
           $ref: '#/components/responses/BadRequest'
+        "501":
+          description: |
+            `channel: wechat` only. The channel is configured and the request is
+            well-formed, but this endpoint writes a `pay_order` without a
+            `pay_payment` row, so the V3 notification for a paid WeChat QR order
+            could not be applied and the money would sit on an unsettled order.
+            Use `/api/pay/create` (native prepay) for WeChat until the QR path
+            books payments; Alipay QR is unaffected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                wechat-qr-disabled:
+                  value:
+                    code: 501
+                    message: "WeChat QR payments are not available: this endpoint books no payment row"
         "401":
           $ref: '#/components/responses/Unauthorized'
         "403":

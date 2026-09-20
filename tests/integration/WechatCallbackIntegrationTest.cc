@@ -5102,7 +5102,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards)
     std::vector<std::string> notifyIds;
     auto deliver = [&](
                      const std::string &transactionId,
-                     bool includePayerTotal,
+                     int payerTotalFen,
                      Json::Value &result,
                      std::error_code &error
                    ) {
@@ -5116,9 +5116,9 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards)
         plain["mchid"] = wechatConfig["mch_id"].asString();
         plain["amount"]["total"] = 999;
         plain["amount"]["currency"] = "CNY";
-        if (includePayerTotal)
+        if (payerTotalFen >= 0)
         {
-            plain["amount"]["payer_total"] = 0;
+            plain["amount"]["payer_total"] = payerTotalFen;
         }
 
         const std::string nonce = "nonce1234567";
@@ -5188,16 +5188,17 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards)
     // against the payment that already records another one.
     Json::Value foreignTxnResult;
     std::error_code foreignTxnError;
-    deliver("tx_foreign_" + drogon::utils::getUuid(), false, foreignTxnResult, foreignTxnError);
+    deliver("tx_foreign_" + drogon::utils::getUuid(), -1, foreignTxnResult, foreignTxnError);
     CHECK(foreignTxnError);
     CHECK(foreignTxnError.message().find("transaction_id mismatch") != std::string::npos);
     CHECK(foreignTxnResult.get("message", "").asString() == "transaction_id mismatch");
 
-    // payer_total is optional; when present it must be a real amount. A coupon
-    // makes it lower than total, which stays acceptable (see the gap warning).
+    // payer_total may not exceed what the order costs. The other direction is
+    // legitimate (a coupon, down to a fully covered 0), which the third
+    // delivery below pins so the guard cannot drift into refusing real money.
     Json::Value payerTotalResult;
     std::error_code payerTotalError;
-    deliver(bookedTxn, true, payerTotalResult, payerTotalError);
+    deliver(bookedTxn, 1000, payerTotalResult, payerTotalError);
     CHECK(payerTotalError);
     CHECK(payerTotalError.message().find("invalid amount in callback") != std::string::npos);
     CHECK(payerTotalResult.get("message", "").asString() == "invalid payer_total in callback");
@@ -5213,6 +5214,25 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards)
     const auto updatedOrder = orderMapper.findByPrimaryKey(order.getValueOfId());
     CHECK(updatedOrder.getValueOfStatus() == "PAYING");
 
+    // Positive control: the same fixture with a fully coupon-covered
+    // payer_total has to get past both guards. A guard that only ever fails is
+    // not a guard, and the direction it must not refuse is real money arriving.
+    Json::Value acceptedResult;
+    std::error_code acceptedError;
+    deliver(bookedTxn, 0, acceptedResult, acceptedError);
+    CHECK(!acceptedError);
+    CHECK(acceptedResult.get("message", "").asString() != "invalid payer_total in callback");
+
+    const auto acceptedCallbackRows =
+      client->execSqlSync("SELECT processed FROM pay_callback WHERE payment_no = $1", paymentNo);
+    CHECK(acceptedCallbackRows.size() == 1);
+    CHECK(acceptedCallbackRows.front()["processed"].as<bool>());
+
+    const auto acceptedPayment = paymentMapper.findByPrimaryKey(payment.getValueOfId());
+    CHECK(acceptedPayment.getValueOfStatus() == "SUCCESS");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
     for (const auto &notifyId : notifyIds)
