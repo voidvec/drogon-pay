@@ -505,7 +505,7 @@ DROGON_TEST(PayPlugin_WechatCallback_EndToEnd)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -540,7 +540,7 @@ DROGON_TEST(PayPlugin_WechatCallback_EndToEnd)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -722,7 +722,7 @@ DROGON_TEST(PayPlugin_WechatCallback_IdempotencyHitRecordsCallback)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -767,7 +767,7 @@ DROGON_TEST(PayPlugin_WechatCallback_IdempotencyHitRecordsCallback)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -977,7 +977,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -1022,7 +1022,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -1213,7 +1213,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionClosed)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -1248,7 +1248,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionClosed)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -1441,7 +1441,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionRevoked)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -1476,7 +1476,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionRevoked)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -1669,7 +1669,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionRefundState)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -1704,7 +1704,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionRefundState)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -1897,7 +1897,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionUserPaying)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -1932,7 +1932,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionUserPaying)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -2125,7 +2125,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionNotPay)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -2160,7 +2160,7 @@ DROGON_TEST(PayPlugin_WechatCallback_TransactionNotPay)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -2353,7 +2353,7 @@ DROGON_TEST(PayPlugin_WechatCallback_DuplicatePaymentNoDoubleLedger)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -2389,7 +2389,7 @@ DROGON_TEST(PayPlugin_WechatCallback_DuplicatePaymentNoDoubleLedger)
         req->addHeader("Wechatpay-Timestamp", timestamp);
         req->addHeader("Wechatpay-Nonce", headerNonce);
         req->addHeader("Wechatpay-Signature", signatureB64);
-        req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+        req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
         auto callbackService = plugin.callbackService();
         std::promise<Json::Value> resultPromise;
@@ -2568,7 +2568,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidSignature)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -2602,7 +2602,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidSignature)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -2773,7 +2773,7 @@ DROGON_TEST(PayPlugin_WechatCallback_DecryptFailure)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, correctApiV3Key);
     CHECK(!ciphertext.empty());
@@ -2808,7 +2808,7 @@ DROGON_TEST(PayPlugin_WechatCallback_DecryptFailure)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3070,7 +3070,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingResource)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3157,7 +3157,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidJson)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3251,7 +3251,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidResourceFields)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3318,7 +3318,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingEventType)
     auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
 
     const std::string plainText = "{}";
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3352,7 +3352,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingEventType)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3428,7 +3428,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundEventType)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3463,7 +3463,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundEventType)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3539,7 +3539,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTradeState)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3574,7 +3574,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTradeState)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3649,7 +3649,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingTransactionId)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3684,7 +3684,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingTransactionId)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3760,7 +3760,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundAssociatedData)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3795,7 +3795,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundAssociatedData)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -3871,7 +3871,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTransactionAssociatedData)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -3906,7 +3906,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTransactionAssociatedData)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4000,7 +4000,7 @@ DROGON_TEST(PayPlugin_WechatCallback_UnsupportedResourceType)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4094,7 +4094,7 @@ DROGON_TEST(PayPlugin_WechatCallback_UnsupportedAlgorithm)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4161,7 +4161,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidResourceJson)
     auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
 
     const std::string plainText = "{";
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -4196,7 +4196,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidResourceJson)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4449,7 +4449,7 @@ DROGON_TEST(PayPlugin_WechatCallback_AppIdMismatch)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -4484,7 +4484,7 @@ DROGON_TEST(PayPlugin_WechatCallback_AppIdMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4690,7 +4690,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MchIdMismatch)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -4725,7 +4725,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MchIdMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4893,7 +4893,7 @@ DROGON_TEST(PayPlugin_WechatCallback_AmountMismatch)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -4928,7 +4928,7 @@ DROGON_TEST(PayPlugin_WechatCallback_AmountMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -4965,6 +4965,260 @@ DROGON_TEST(PayPlugin_WechatCallback_AmountMismatch)
 
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+
+    EVP_PKEY_free(pkey);
+    std::error_code ec;
+    std::filesystem::remove(certPath, ec);
+}
+
+DROGON_TEST(PayPlugin_WechatCallback_TransactionIdAndPayerTotalGuards)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+      "idempotency_key VARCHAR(128) PRIMARY KEY,"
+      "request_hash VARCHAR(64) NOT NULL,"
+      "response_snapshot TEXT,"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_order ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "order_no VARCHAR(64) UNIQUE NOT NULL,"
+      "user_id BIGINT NOT NULL,"
+      "amount VARCHAR(32) NOT NULL,"
+      "currency VARCHAR(8) NOT NULL DEFAULT 'CNY',"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "channel VARCHAR(32) NOT NULL DEFAULT 'alipay',"
+      "title VARCHAR(512),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_payment ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "payment_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL REFERENCES pay_order(order_no),"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "channel_trade_no VARCHAR(64),"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_callback ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "payment_no VARCHAR(64) NOT NULL REFERENCES pay_payment(payment_no),"
+      "raw_body TEXT NOT NULL,"
+      "signature VARCHAR(512),"
+      "serial_no VARCHAR(64),"
+      "verified BOOLEAN NOT NULL DEFAULT FALSE,"
+      "processed BOOLEAN NOT NULL DEFAULT FALSE,"
+      "received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "ALTER TABLE pay_callback "
+      "ALTER COLUMN signature TYPE VARCHAR(512)"
+    );
+
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string paymentNo = "pay_" + drogon::utils::getUuid();
+    const std::string amount = "9.99";
+    const std::string bookedTxn = "tx_booked_" + drogon::utils::getUuid();
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(orderNo);
+    order.setUserId(10001);
+    order.setAmount(amount);
+    order.setCurrency("CNY");
+    order.setStatus("PAYING");
+    order.setChannel("wechat");
+    order.setTitle("Test Order");
+    order.setCreatedAt(trantor::Date::now());
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    using PayPayment = drogon_model::pay_test::PayPayment;
+    drogon::orm::Mapper<PayPayment> paymentMapper(client);
+    PayPayment payment;
+    payment.setPaymentNo(paymentNo);
+    payment.setOrderNo(orderNo);
+    payment.setStatus("PROCESSING");
+    payment.setAmount(amount);
+    payment.setRequestPayload("{}");
+    // A query (or an earlier notification) already booked which WeChat
+    // transaction this payment belongs to.
+    payment.setChannelTradeNo(bookedTxn);
+    payment.setCreatedAt(trantor::Date::now());
+    payment.setUpdatedAt(trantor::Date::now());
+    paymentMapper.insert(payment);
+
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto certPath = tempDir / ("wechatpay_cb_" + drogon::utils::getUuid() + ".pem");
+    {
+        std::ofstream out(certPath.string(), std::ios::binary);
+        out << certPem;
+    }
+
+    const std::string apiV3Key = "0123456789abcdef0123456789abcdef";
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = apiV3Key;
+    wechatConfig["platform_cert_path"] = certPath.string();
+    wechatConfig["serial_no"] = "SERIAL_TEST";
+    wechatConfig["app_id"] = "wx_app";
+    wechatConfig["mch_id"] = "mch_123";
+    wechatConfig["api_base"] = "http://127.0.0.1:9";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, nullptr, client);
+    auto callbackService = plugin.callbackService();
+
+    // Deliver one well-formed TRANSACTION.SUCCESS notification whose amounts
+    // match the order, varying only the two fields the guards read.
+    std::vector<std::string> notifyIds;
+    auto deliver = [&](
+                     const std::string &transactionId,
+                     bool includePayerTotal,
+                     Json::Value &result,
+                     std::error_code &error
+                   ) {
+        const std::string notifyId = "notify_" + drogon::utils::getUuid();
+        notifyIds.push_back(notifyId);
+        Json::Value plain;
+        plain["out_trade_no"] = orderNo;
+        plain["transaction_id"] = transactionId;
+        plain["trade_state"] = "SUCCESS";
+        plain["appid"] = wechatConfig["app_id"].asString();
+        plain["mchid"] = wechatConfig["mch_id"].asString();
+        plain["amount"]["total"] = 999;
+        plain["amount"]["currency"] = "CNY";
+        if (includePayerTotal)
+        {
+            plain["amount"]["payer_total"] = 0;
+        }
+
+        const std::string nonce = "nonce1234567";
+        const std::string aad = "transaction";
+        const std::string ciphertext = encryptAesGcm(toJsonCompact(plain), nonce, aad, apiV3Key);
+        CHECK(!ciphertext.empty());
+        if (ciphertext.empty())
+        {
+            return;
+        }
+
+        Json::Value notify;
+        notify["id"] = notifyId;
+        notify["event_type"] = "TRANSACTION.SUCCESS";
+        notify["resource_type"] = "encrypt-resource";
+        notify["resource"]["algorithm"] = "AEAD_AES_256_GCM";
+        notify["resource"]["ciphertext"] = ciphertext;
+        notify["resource"]["nonce"] = nonce;
+        notify["resource"]["associated_data"] = aad;
+        const std::string body = toJsonCompact(notify);
+
+        const std::string timestamp = std::to_string(
+          std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+          )
+            .count()
+        );
+        // A fresh header nonce per delivery keeps the replay cache from masking
+        // the guard under test.
+        const std::string headerNonce = "headerNonce_" + drogon::utils::getUuid();
+        std::string signatureB64;
+        CHECK(signMessage(timestamp + "\n" + headerNonce + "\n" + body + "\n", pkey, signatureB64));
+        if (signatureB64.empty())
+        {
+            return;
+        }
+
+        std::promise<Json::Value> resultPromise;
+        std::promise<std::error_code> errorPromise;
+        callbackService->handlePaymentCallback(
+          body,
+          signatureB64,
+          timestamp,
+          headerNonce,
+          WechatPayClient::certificateSerialHex(certPem),
+          [&resultPromise, &errorPromise](const Json::Value &r, const std::error_code &e) {
+              resultPromise.set_value(r);
+              errorPromise.set_value(e);
+          }
+        );
+
+        auto resultFuture = resultPromise.get_future();
+        auto errorFuture = errorPromise.get_future();
+        if (
+          resultFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready ||
+          errorFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready
+        )
+        {
+            CHECK(false);
+            return;
+        }
+        result = resultFuture.get();
+        error = errorFuture.get();
+    };
+
+    // A notification naming a different WeChat transaction must not be booked
+    // against the payment that already records another one.
+    Json::Value foreignTxnResult;
+    std::error_code foreignTxnError;
+    deliver("tx_foreign_" + drogon::utils::getUuid(), false, foreignTxnResult, foreignTxnError);
+    CHECK(foreignTxnError);
+    CHECK(foreignTxnError.message().find("transaction_id mismatch") != std::string::npos);
+    CHECK(foreignTxnResult.get("message", "").asString() == "transaction_id mismatch");
+
+    // payer_total is optional; when present it must be a real amount. A coupon
+    // makes it lower than total, which stays acceptable (see the gap warning).
+    Json::Value payerTotalResult;
+    std::error_code payerTotalError;
+    deliver(bookedTxn, true, payerTotalResult, payerTotalError);
+    CHECK(payerTotalError);
+    CHECK(payerTotalError.message().find("invalid amount in callback") != std::string::npos);
+    CHECK(payerTotalResult.get("message", "").asString() == "invalid payer_total in callback");
+
+    const auto callbackRows =
+      client->execSqlSync("SELECT id FROM pay_callback WHERE payment_no = $1", paymentNo);
+    CHECK(callbackRows.empty());
+
+    const auto updatedPayment = paymentMapper.findByPrimaryKey(payment.getValueOfId());
+    CHECK(updatedPayment.getValueOfStatus() == "PROCESSING");
+    CHECK(updatedPayment.getValueOfChannelTradeNo() == bookedTxn);
+
+    const auto updatedOrder = orderMapper.findByPrimaryKey(order.getValueOfId());
+    CHECK(updatedOrder.getValueOfStatus() == "PAYING");
+
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+    for (const auto &notifyId : notifyIds)
+    {
+        client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", notifyId);
+    }
 
     EVP_PKEY_free(pkey);
     std::error_code ec;
@@ -5099,7 +5353,7 @@ DROGON_TEST(PayPlugin_WechatCallback_CurrencyMismatch)
     plain["amount"]["currency"] = "USD";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "transaction";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -5134,7 +5388,7 @@ DROGON_TEST(PayPlugin_WechatCallback_CurrencyMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -5333,7 +5587,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundSuccess)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -5368,7 +5622,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundSuccess)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -5583,7 +5837,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundAmountMismatch)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -5618,7 +5872,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundAmountMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -5802,7 +6056,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundCurrencyMismatch)
     plain["amount"]["currency"] = "USD";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -5837,7 +6091,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundCurrencyMismatch)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -6009,7 +6263,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundNotFound)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -6044,7 +6298,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundNotFound)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -6223,7 +6477,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundMissingFields)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -6258,7 +6512,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundMissingFields)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -6343,7 +6597,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingRefundId)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -6378,7 +6632,7 @@ DROGON_TEST(PayPlugin_WechatCallback_MissingRefundId)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -6574,7 +6828,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundClosed)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -6609,7 +6863,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundClosed)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -6805,7 +7059,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundStatus)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -6840,7 +7094,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundStatus)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;
@@ -7024,7 +7278,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundAmount)
     plain["amount"]["currency"] = "CNY";
     const std::string plainText = toJsonCompact(plain);
 
-    const std::string nonce = "nonce123";
+    const std::string nonce = "nonce1234567";
     const std::string aad = "refund";
     const std::string ciphertext = encryptAesGcm(plainText, nonce, aad, apiV3Key);
     CHECK(!ciphertext.empty());
@@ -7059,7 +7313,7 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidRefundAmount)
     req->addHeader("Wechatpay-Timestamp", timestamp);
     req->addHeader("Wechatpay-Nonce", headerNonce);
     req->addHeader("Wechatpay-Signature", signatureB64);
-    req->addHeader("Wechatpay-Serial", "SERIAL_TEST");
+    req->addHeader("Wechatpay-Serial", WechatPayClient::certificateSerialHex(certPem));
 
     auto callbackService = plugin.callbackService();
     std::promise<Json::Value> resultPromise;

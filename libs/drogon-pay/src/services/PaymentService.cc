@@ -183,6 +183,47 @@ void reportMapperFailure(
         (*sharedCb)(dbErrorResponse(what), std::make_error_code(std::errc::io_error));
     }
 }
+
+// A 2xx transport result is not the same thing as a created transaction.
+// WeChat V3 answers native orders with `code_url` (jsapi with `prepay_id`) and
+// carries no business-code field; Alipay answers with business code "10000".
+// Without this gate an error body under a 200 moved the order to PAYING for a
+// transaction the channel never accepted.
+std::string channelResultError(const std::string &channel, const Json::Value &result)
+{
+    if (channel == "alipay")
+    {
+        const std::string code = result.get("code", "").asString();
+        if (code == "10000")
+        {
+            return {};
+        }
+        std::string detail = result.get("sub_msg", "").asString();
+        if (detail.empty())
+        {
+            detail = result.get("msg", "").asString();
+        }
+        return detail.empty() ? "Alipay error: code " + code : "Alipay error: " + detail;
+    }
+
+    if (channel == "wechat")
+    {
+        if (result.isMember("code_url") || result.isMember("prepay_id"))
+        {
+            return {};
+        }
+        const std::string code = result.get("code", "").asString();
+        if (code.empty())
+        {
+            return "WeChat response carries neither code_url nor prepay_id";
+        }
+        return "WeChat error: " + code + " " + result.get("message", "").asString();
+    }
+
+    // Custom channels define their own success shape; the channel SPI's `error`
+    // argument is the only signal available for them.
+    return {};
+}
 }  // namespace
 
 PaymentService::PaymentService(
@@ -569,8 +610,17 @@ void PaymentService::proceedCreatePayment(
                                       // 4. Channel API call (OUTSIDE transaction).
                                       auto paymentCallback = [this, request, paymentNo, sharedCb](
                                                                const Json::Value &result,
-                                                               const std::string &error
+                                                               const std::string &transportError
                                                              ) {
+                                          // `transportError` is what the channel
+                                          // reported; channelResultError adds the
+                                          // case where the call came back clean but
+                                          // the body does not describe an accepted
+                                          // transaction.
+                                          const std::string error =
+                                            transportError.empty()
+                                              ? channelResultError(request.channel, result)
+                                              : transportError;
                                           if (!error.empty())
                                           {
                                               // Handle payment error
@@ -1351,16 +1401,43 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
               return;
           }
 
-          // Proceed with QR payment creation
-          // Build QR payment payload for Alipay
+          // Proceed with QR payment creation. The payload shape is per channel:
+          // Alipay precreate takes `total_amount` in yuan, WeChat V3 native takes
+          // `amount.total` in fen plus a `description`. Sending the Alipay field
+          // names to WeChat made every WeChat QR order a 400 PARAM_ERROR.
           Json::Value payload;
           payload["out_trade_no"] = orderNo;
-          payload["total_amount"] = amount;
-          payload["subject"] = subject;
 
-          if (request.isMember("buyer_id"))
+          if (channel == "wechat")
           {
-              payload["buyer_id"] = request["buyer_id"].asString();
+              int64_t totalFen = 0;
+              if (!pay::utils::parseAmountToFen(amount, totalFen) || totalFen <= 0)
+              {
+                  idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
+                  Json::Value response;
+                  response["code"] = 400;
+                  response["message"] = "Invalid amount for WeChat native payment";
+                  sharedCb->call(response, std::make_error_code(std::errc::invalid_argument));
+                  return;
+              }
+              payload["description"] = subject;
+              payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
+              payload["amount"]["currency"] = request.get("currency", "CNY").asString();
+              const std::string notifyUrl = request.get("notify_url", "").asString();
+              if (!notifyUrl.empty())
+              {
+                  payload["notify_url"] = notifyUrl;
+              }
+          }
+          else
+          {
+              payload["total_amount"] = amount;
+              payload["subject"] = subject;
+
+              if (request.isMember("buyer_id"))
+              {
+                  payload["buyer_id"] = request["buyer_id"].asString();
+              }
           }
 
           LOG_DEBUG << "[PaymentService] Creating QR payment: channel=" << channel
@@ -1402,40 +1479,47 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                     return;
                 }
 
-                // Check Alipay response code
-                std::string alipayCode = result.get("code", "").asString();
-                if (alipayCode != "10000")
+                // Success is per channel: V3 has no business-code field, so a
+                // WeChat order is only accepted once it carries code_url.
+                const std::string resultError = channelResultError(channel, result);
+                if (!resultError.empty())
                 {
                     idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
-                    // Alipay business error
                     Json::Value response;
                     response["code"] = 500;
-                    std::string subMsg = result.get("sub_msg", "").asString();
-                    std::string msg = result.get("msg", "").asString();
-                    std::string fullMessage = "Alipay error: " + msg;
-                    if (!subMsg.empty())
+                    response["message"] = resultError;
+                    if (channel == "alipay")
                     {
-                        fullMessage += " - " + subMsg;
+                        response["alipay_code"] = result.get("code", "").asString();
+                        response["alipay_sub_code"] = result.get("sub_code", "").asString();
                     }
-                    response["message"] = fullMessage;
-                    response["alipay_code"] = alipayCode;
-                    response["alipay_sub_code"] = result.get("sub_code", "").asString();
+                    else
+                    {
+                        response["wechat_code"] = result.get("code", "").asString();
+                    }
                     sharedCb->call(response, std::make_error_code(std::errc::io_error));
                     return;
                 }
 
-                // Alipay precreate response contains qr_code
                 Json::Value data;
                 data["order_no"] = orderNo;
 
-                // Extract qr_code from Alipay response
-                if (result.isMember("qr_code"))
+                if (channel == "wechat")
                 {
-                    data["qr_code"] = result["qr_code"].asString();
+                    // Native transactions hand back a `weixin://` URL to render.
+                    data["code_url"] = result.get("code_url", "").asString();
                 }
-                if (result.isMember("out_trade_no"))
+                else
                 {
-                    data["out_trade_no"] = result["out_trade_no"].asString();
+                    // Extract qr_code from Alipay response
+                    if (result.isMember("qr_code"))
+                    {
+                        data["qr_code"] = result["qr_code"].asString();
+                    }
+                    if (result.isMember("out_trade_no"))
+                    {
+                        data["out_trade_no"] = result["out_trade_no"].asString();
+                    }
                 }
 
                 // Save order to database

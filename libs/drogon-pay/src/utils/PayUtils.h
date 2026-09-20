@@ -25,6 +25,13 @@ void mapTradeState(
 
 std::string mapRefundStatus(const std::string &wechatStatus);
 
+// Percent-encode a single URL path segment (RFC 3986 unreserved set passes
+// through). WeChat V3 addresses resources by merchant number inside the path
+// and signs exactly that string, so an identifier carrying a literal `?`, `#`,
+// `&` or `/` would move the request to another resource under a valid
+// signature.
+std::string urlEncodePathSegment(const std::string &raw);
+
 // Validate a callback notify URL. Returns true if the URL is empty (no notify
 // URL supplied is allowed) or passes scheme + length + host checks. On failure,
 // sets errorMessage. The host check rejects private/loopback/link-local

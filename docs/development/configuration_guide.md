@@ -63,6 +63,8 @@ at startup, so the file itself stays safe to commit.
             "api_v3_key": "__env_var:WECHAT_PAY_API_V3_KEY__",
             "private_key_path": "__env_var:WECHAT_PAY_PRIVATE_KEY_PATH__",
             "platform_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CERT_PATH__",
+            "platform_ca_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CA_CERT_PATH__",
+            "cert_download_min_interval_seconds": 300,
             "notify_url": "__env_var:WECHAT_PAY_NOTIFY_URL__",
             "api_base": "https://api.mch.weixin.qq.com",
             "timeout_ms": 5000
@@ -116,13 +118,32 @@ at startup, so the file itself stays safe to commit.
 |-----------|-------------|----------|---------|
 | `app_id` | WeChat AppID | Yes | - |
 | `mch_id` | Merchant ID | Yes | - |
-| `api_v3_key` | API v3 Key | Yes | - |
-| `serial_no` | Merchant certificate serial number | Yes | - |
+| `api_v3_key` | API v3 Key; must be exactly 32 bytes, callbacks cannot be decrypted without it | Yes | - |
+| `serial_no` | **Merchant** API certificate serial number. Sent in the `Authorization` header of outbound calls; it has no part in callback verification | Yes | - |
 | `private_key_path` | Merchant private key path | Yes | - |
-| `platform_cert_path` | WeChat platform certificate path | Yes | - |
 | `notify_url` | Payment callback URL | Yes | - |
+| `platform_cert_path` | Static platform certificate, used as a fallback only when the cache is cold *and* the certificate's own serial matches the notification's `Wechatpay-Serial` | No | - |
+| `platform_ca_cert_path` | Trust anchor bundle; when set, a downloaded platform certificate must chain to it before it is cached | No | - (chain check skipped) |
+| `cert_download_min_interval_seconds` | Minimum gap between `/v3/certificates` downloads | No | 300 |
 | `api_base` | WeChat API base URL | No | https://api.mch.weixin.qq.com |
-| `timeout_ms` | API timeout | No | 5000 |
+| `timeout_ms` | Per-request timeout applied to every outbound WeChat call (`0` disables it) | No | 5000 |
+
+#### Platform certificates and rotation
+
+Callback signatures are verified with the platform certificate named by the
+notification's `Wechatpay-Serial` header, which is a different certificate (and
+a different numbering space) from the merchant certificate named by
+`serial_no`. The channel warms the certificate set at start-up through
+`/v3/certificates`, refuses to cache a certificate that does not parse as
+X.509, is outside its validity window, carries a serial other than the one it
+is filed under, or fails the optional `platform_ca_cert_path` chain check.
+
+When a notification names a serial that is not cached, WeChat has rotated: the
+channel triggers a throttled download and answers that notification as a
+failure, so WeChat retries it and finds the new certificate already cached.
+There is no independent refresh timer — an idle process holds a stale cache
+until the next unknown serial arrives, which is the trigger WeChat's own
+rotation already provides.
 
 ### Alipay (`channels.alipay`)
 

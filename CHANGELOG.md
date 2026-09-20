@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`platform_ca_cert_path` on the WeChat channel** (optional): a PEM bundle of
+  trust anchors. When set, every downloaded platform certificate must chain to
+  one of them before it is cached or used to verify a notification; when unset
+  the channel behaves as before, so the key is an upgrade step rather than a
+  breaking default. Without an anchor, whoever answers for `api_base` decides
+  which certificate later validates payments.
+- **`docs/review/2026-09-20-wechat-pay-api-audit.md`**: code-level audit of the
+  whole WeChat Pay V3 flow against the official API — inbound notification
+  path, outbound transaction/refund/certificate path — with each defect cited
+  at `file:line`, the fix batch it landed in, and the items deliberately left
+  out (periodic certificate-refresh timer, per-channel response-parser
+  refactor).
 - **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
   gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
   rejects backticked paths that don't exist in governance docs, bans
@@ -389,6 +401,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **The WeChat channel sent every outbound request with no timeout, and one of
+  its certificate keys was read by nobody.** `timeout_ms` was documented
+  (default 5000) and set in the example config, but `sendWechatRequest` never
+  passed a timeout to `drogon::HttpClient::sendRequest`, whose default is `0` =
+  disabled, so a stalled `api.mch.weixin.qq.com` left create/query/refund calls
+  pending forever with the idempotency reservation held. The value is now read
+  in the constructor, converted to Drogon's seconds on the way down, and a
+  timed-out call reports `http request timed out after <n>ms` rather than the
+  generic `http request failed`. `cert_refresh_interval_seconds: 43200` promised
+  a periodic certificate refresh the code does not have and does not need —
+  an unknown `Wechatpay-Serial` already triggers a throttled download and
+  rejects that one notification, so WeChat's retry finds the rotated
+  certificate cached — so the key is deleted from
+  `examples/pay-server/config.json` instead of implemented, and the guides now
+  state the rotation mechanism that actually exists. `AlipayChannel.cc:29,428`
+  passes its `timeout_ms` (30000) straight into the same seconds parameter, an
+  eight-hour timeout in the same family; it is left to the Alipay track rather
+  than changed beside this fix.
+- **"WeChat answered" was being read as "WeChat succeeded" on the outbound
+  path.** `sendWechatRequest` parsed the body and only reported an error when
+  the transport failed, so a V3 `400/404` carrying `{"code":"ORDER_NOT_EXIST",
+  "message":"..."}` came back as a successful call with a JSON payload nobody
+  checked. Every caller that trusts the empty error string — `queryTransaction`
+  during reconciliation, `refund`, `createTransactionNative` — then treated a
+  rejected request as an accepted one. Non-2xx now yields
+  `HTTP <status>: <code> <message>` (body text bounded at 200 chars, and
+  unparseable bodies still fail).
+- **`createQRPayment` spoke Alipay to WeChat and then reported success.** The
+  QR endpoint built one payload for every channel (`total_amount`/`subject`,
+  yuan as a string), which `/v3/pay/transactions/native` rejects outright
+  (`description` plus integer-fen `amount.total` are required), and its success
+  gate tested the Alipay `code == "10000"` for all channels — so the WeChat
+  branch never matched, and an error body produced `code: 0` with no `code_url`
+  for the client to render. The payload is now built per channel and
+  `channelResultError` decides success per channel (`code_url`/`prepay_id` for
+  WeChat), with a bad amount returning 400 and clearing the reservation.
+- **An unmappable refund status defaulted to `REFUNDING`.** `RefundService`
+  read `status` from the refund response and fell through to `REFUNDING` for
+  anything it did not recognise — including an absent field, which is what a
+  WeChat error body looks like. A refund that never started was therefore
+  booked as in-flight. Unknown values now map to no status at all and take the
+  failure branch (`1502`, `REFUND_FAIL`).
+- **The platform certificate trusted whoever said so.** `verifyCallback`
+  accepted the statically configured platform certificate for any notification
+  whose `Wechatpay-Serial` equalled the merchant's own `serial_no` — two
+  unrelated numbering spaces — and `setPlatformCert` cached a downloaded
+  certificate under whatever serial the response body claimed. A signed
+  notification could thus be verified against a certificate bound to the wrong
+  name, and a spoofed `/v3/certificates` response could poison the cache. The
+  header must now name the serial *inside* the certificate (compared on the
+  normalised form, since WeChat writes uppercase hex without padding), the
+  cache is keyed by that same serial, and each certificate is parsed, checked
+  against its validity window and optionally chained to
+  `platform_ca_cert_path` before it is stored. An unseen serial triggers a
+  throttled refresh and rejects the notification — WeChat retries, by which
+  time the rotation is cached.
+- **Merchant identifiers were interpolated into the signed URL unencoded.**
+  `/v3/pay/transactions/out-trade-no/{no}?mchid=` and
+  `/v3/refund/domestic/refunds/{no}` took the order/refund number as it came,
+  and the signature covers exactly that string: a number carrying a literal
+  `?`, `#`, `&` or `/` moved a validly signed request to another resource. Both
+  path segments now go through `pay::utils::urlEncodePathSegment`.
+- **Callback amount guards.** A notification whose `amount.payer_total` is
+  present but non-positive is refused (a coupon legitimately puts it below
+  `total`, so the gap alone only logs), and one whose `transaction_id` differs
+  from the `channel_trade_no` already booked on that payment is refused —
+  otherwise a second WeChat transaction could be settled under another order.
+- **The AEAD IV length came from the payload.** `decryptAesGcm` set the GCM IV
+  size from the notification's `nonce` field, letting a malformed resource
+  choose the cipher parameters. WeChat fixes it at 12 bytes, so any other
+  length is now rejected, and the final tag write no longer lands one past the
+  end of the plaintext buffer.
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
   function in both `PaymentService.cc` and `RefundService.cc`, with no caller

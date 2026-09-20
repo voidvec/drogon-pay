@@ -42,7 +42,12 @@ class WechatPayClient : public drogon_pay::PaymentChannel
 
     void downloadCertificates(JsonCallback &&callback);
     std::string getPlatformCert(const std::string &serialNo) const;
-    void setPlatformCert(const std::string &serialNo, const std::string &certContent);
+    /// Cache a platform certificate, but only after it proves itself: the
+    /// content must parse as X.509, be within its validity window, carry
+    /// exactly the serial number it is filed under, and (when
+    /// `platform_ca_cert_path` is configured) chain to that trust anchor.
+    /// Returns false and leaves the cache untouched otherwise.
+    bool setPlatformCert(const std::string &serialNo, const std::string &certContent);
 
     std::string buildAuthorizationHeader(
       const std::string &method,
@@ -53,6 +58,10 @@ class WechatPayClient : public drogon_pay::PaymentChannel
       std::string &error
     ) const;
 
+    /// Verify a notification against the platform certificate named by
+    /// `serialNo`. Not const: a serial that is not in the cache triggers a
+    /// throttled certificate refresh so WeChat's next retry can be verified
+    /// (platform certificates rotate; the cache has to converge on the new one).
     bool verifyCallback(
       const std::string &timestamp,
       const std::string &nonce,
@@ -60,7 +69,7 @@ class WechatPayClient : public drogon_pay::PaymentChannel
       const std::string &signature,
       const std::string &serialNo,
       std::string &error
-    ) const;
+    );
 
     bool decryptResource(
       const std::string &ciphertext,
@@ -69,6 +78,11 @@ class WechatPayClient : public drogon_pay::PaymentChannel
       std::string &plaintext,
       std::string &error
     ) const;
+
+    /// Hex serial number of an X.509 certificate in the shape WeChat reports
+    /// them (uppercase, no leading zeros). Empty when the content does not
+    /// parse. Used to bind a cached certificate to the serial it is filed under.
+    static std::string certificateSerialHex(const std::string &certContent);
 
     const std::string &getAppId() const
     {
@@ -88,8 +102,10 @@ class WechatPayClient : public drogon_pay::PaymentChannel
     std::string apiV3Key_;
     std::string privateKeyPath_;
     std::string platformCertPath_;
+    std::string platformCaCertPath_;
     std::string apiBase_;
     std::string notifyUrl_;
+    int timeoutMs_{5000};
 
     std::map<std::string, std::string> platformCerts_;
     mutable std::shared_mutex certsMutex_;

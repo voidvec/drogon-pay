@@ -339,6 +339,28 @@ std::string mapRefundStatus(const std::string &wechatStatus)
     return "";
 }
 
+std::string urlEncodePathSegment(const std::string &raw)
+{
+    static const char *kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(raw.size());
+    for (unsigned char c : raw)
+    {
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+                                c == '~';
+        if (unreserved)
+        {
+            out.push_back(static_cast<char>(c));
+            continue;
+        }
+        out.push_back('%');
+        out.push_back(kHex[(c >> 4) & 0xF]);
+        out.push_back(kHex[c & 0xF]);
+    }
+    return out;
+}
+
 bool validateNotifyUrl(const std::string &url, std::string &errorMessage)
 {
     errorMessage.clear();

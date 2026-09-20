@@ -188,3 +188,27 @@ DROGON_TEST(PayUtils_ValidateNotifyUrl)
     // Plain public domain is allowed (DNS rebinding is an accepted limitation).
     CHECK(pay::utils::validateNotifyUrl("https://merchant.example.com/pay/notify", err));
 }
+
+DROGON_TEST(PayUtils_UrlEncodePathSegment)
+{
+    // The unreserved set passes through untouched: real order numbers are
+    // alphanumeric, and re-encoding them would change the string WeChat signed.
+    CHECK(pay::utils::urlEncodePathSegment("ORDER-2026_09.20~1") == "ORDER-2026_09.20~1");
+    CHECK(
+      pay::utils::urlEncodePathSegment("wx20260920abcdef0123456789") == "wx20260920abcdef0123456789"
+    );
+    CHECK(!pay::utils::urlEncodePathSegment("aZ09-_.").empty());
+
+    // The characters that would re-shape the request target.
+    CHECK(pay::utils::urlEncodePathSegment("o?1") == "o%3F1");
+    CHECK(pay::utils::urlEncodePathSegment("o/../../admin") == "o%2F..%2F..%2Fadmin");
+    CHECK(pay::utils::urlEncodePathSegment("o#frag") == "o%23frag");
+    CHECK(pay::utils::urlEncodePathSegment("o&a=1") == "o%26a%3D1");
+    CHECK(pay::utils::urlEncodePathSegment("o 1") == "o%201");
+    CHECK(pay::utils::urlEncodePathSegment("o\n1") == "o%0A1");
+
+    CHECK(pay::utils::urlEncodePathSegment("").empty());
+
+    // Non-ASCII bytes are encoded per byte, uppercase hex (U+516D in UTF-8).
+    CHECK(pay::utils::urlEncodePathSegment("\xE5\x85\xAD") == "%E5%85%AD");
+}
