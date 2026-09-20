@@ -469,72 +469,88 @@ void RefundService::proceedRefund(
     const std::string &reason = request.reason;
     const std::string &paymentNo = request.paymentNo;
 
-    // If paymentNo not provided, find the latest payment for this order
+    // If paymentNo not provided, find the payment of this order that carries the
+    // money. A QR order keeps one row per precreate attempt, which gives two
+    // rules. Closed attempts (FAIL) are dropped, so a row the channel refused is
+    // never the one WeChat is asked to refund. And a settled attempt beats a newer
+    // open one: an attempt whose channel answer never arrived can sit at INIT
+    // beside a later attempt the callback paid, so ordering by creation time alone
+    // picks the zombie and answers "payment not successful" for an order whose
+    // money really landed. The open statuses are kept as the fallback so an order
+    // that is genuinely unpaid still gets the 1409 it got before, rather than a
+    // 1404 that would say the order has no payment at all.
     if (paymentNo.empty())
     {
-        try
-        {
-            Mapper<PayPaymentModel> paymentMapper(dbClient_);
-            // "The latest payment" has to mean the latest attempt that could carry
-            // money: a QR order keeps one row per precreate attempt, and the newest
-            // one can be a row the channel refused. Refunding that one asks WeChat
-            // to refund a transaction that never existed while the paid attempt
-            // stays unrefunded. The closed statuses (FAIL/CLOSED) are dropped so
-            // this picks the same row the callback settles.
-            auto payCriteria =
-              Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
-              Criteria(
-                PayPaymentModel::Cols::_status,
-                CompareOperator::In,
-                std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
-              );
-            paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
-              .limit(1)
-              .findBy(
-                payCriteria,
-                [this,
-                 request,
-                 idempotencyKey,
-                 requestHash,
-                 refundNo,
-                 orderNo,
-                 amount,
-                 reason,
-                 sharedCb](const std::vector<PayPaymentModel> &rows) mutable {
-                    if (rows.empty())
-                    {
-                        if (*sharedCb)
-                        {
-                            Json::Value error;
-                            error["code"] = 1404;
-                            error["message"] = "Payment not found";
-                            (*sharedCb)(error, std::error_code(1404, std::system_category()));
+        auto answerWith =
+          [this, request, idempotencyKey, requestHash, refundNo, orderNo, amount, reason, sharedCb](
+            const std::string &chosenPaymentNo
+          ) mutable {
+              CreateRefundRequest newRequest = request;
+              newRequest.paymentNo = chosenPaymentNo;
+              proceedRefund(newRequest, idempotencyKey, requestHash, std::move(*sharedCb));
+          };
+        // Behind a shared_ptr so each attempt of the lookup holds the same object
+        // and exactly one of them can consume the callback.
+        auto proceedWith = std::make_shared<decltype(answerWith)>(std::move(answerWith));
+
+        auto attemptsFinder = [this, orderNo, sharedCb, proceedWith](
+                                std::vector<std::string> statuses, std::function<void()> thenEmpty
+                              ) -> std::function<void()> {
+            return [this, orderNo, sharedCb, proceedWith, statuses, thenEmpty]() {
+                try
+                {
+                    Mapper<PayPaymentModel> paymentMapper(dbClient_);
+                    auto payCriteria =
+                      Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+                      Criteria(PayPaymentModel::Cols::_status, CompareOperator::In, statuses);
+                    paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
+                      .limit(1)
+                      .findBy(
+                        payCriteria,
+                        [proceedWith, thenEmpty](const std::vector<PayPaymentModel> &rows) {
+                            if (rows.empty())
+                            {
+                                thenEmpty();
+                                return;
+                            }
+                            (*proceedWith)(rows.front().getValueOfPaymentNo());
+                        },
+                        [sharedCb](const DrogonDbException &e) mutable {
+                            if (*sharedCb)
+                            {
+                                Json::Value error;
+                                error["code"] = 1500;
+                                error["message"] =
+                                  std::string("Database error: ") + e.base().what();
+                                (*sharedCb)(error, std::error_code(1500, std::system_category()));
+                            }
                         }
-                        return;
-                    }
-                    CreateRefundRequest newRequest = request;
-                    newRequest.paymentNo = rows.front().getValueOfPaymentNo();
-                    proceedRefund(newRequest, idempotencyKey, requestHash, std::move(*sharedCb));
-                },
-                [sharedCb](const DrogonDbException &e) mutable {
-                    if (*sharedCb)
-                    {
-                        Json::Value error;
-                        error["code"] = 1500;
-                        error["message"] = std::string("Database error: ") + e.base().what();
-                        (*sharedCb)(error, std::error_code(1500, std::system_category()));
-                    }
+                      );
                 }
-              );
-        }
-        catch (const std::exception &e)
-        {
-            reportMapperFailure(sharedCb, e.what());
-        }
-        catch (...)
-        {
-            reportMapperFailure(sharedCb, "unknown exception");
-        }
+                catch (const std::exception &e)
+                {
+                    reportMapperFailure(sharedCb, e.what());
+                }
+                catch (...)
+                {
+                    reportMapperFailure(sharedCb, "unknown exception");
+                }
+            };
+        };
+
+        // Neither an attempt that holds money nor one still in flight: the order
+        // has no refundable payment row at all (or only closed attempts).
+        auto reportNoAttempt = [sharedCb]() {
+            if (*sharedCb)
+            {
+                Json::Value error;
+                error["code"] = 1404;
+                error["message"] = "Payment not found";
+                (*sharedCb)(error, std::error_code(1404, std::system_category()));
+            }
+        };
+        auto askOpenAttempts = attemptsFinder({"INIT", "PROCESSING"}, reportNoAttempt);
+        attemptsFinder({"SUCCESS", "REFUNDED"}, [askOpenAttempts]() { askOpenAttempts(); })();
         return;
     }
 

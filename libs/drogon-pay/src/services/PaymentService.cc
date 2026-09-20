@@ -184,6 +184,11 @@ void reportMapperFailure(
     }
 }
 
+// What `channelResultError` answers for a 2xx body that names no payable code.
+// A file-local constant because `qrAttemptCertainlyNotCreated` has to recognise
+// the same string: this is a contract violation, not a channel refusal.
+constexpr const char *kNoPayableCode = "WeChat response carries neither code_url nor prepay_id";
+
 // A 2xx transport result is not the same thing as a created transaction.
 // WeChat V3 answers native orders with `code_url` (jsapi with `prepay_id`) and
 // carries no business-code field; Alipay answers with business code "10000".
@@ -222,7 +227,7 @@ std::string channelResultError(const std::string &channel, const Json::Value &re
         const std::string code = result.get("code", "").asString();
         if (code.empty())
         {
-            return "WeChat response carries neither code_url nor prepay_id";
+            return kNoPayableCode;
         }
         return "WeChat error: " + code + " " + result.get("message", "").asString();
     }
@@ -280,6 +285,13 @@ bool qrAttemptCertainlyNotCreated(const std::string &failure)
     if (httpRefusal)
     {
         return true;
+    }
+    // A 2xx with no payable code says the answer made no sense, not that WeChat
+    // refused: the transaction can exist behind a body an intermediary rewrote,
+    // so this attempt has to stay in flight for the notification.
+    if (failure == kNoPayableCode)
+    {
+        return false;
     }
     const bool wentThroughHttp = failure.rfind("HTTP ", 0) == 0 ||
                                  failure.rfind("http request", 0) == 0 ||
@@ -1423,6 +1435,18 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
         return;
     }
 
+    // The currency is derived once, here, and both the request hash below and the
+    // booking further down use the same value. The order row has to record the
+    // currency the channel was actually offered: Alipay precreate only ever
+    // prices in CNY, while WeChat V3 takes a currency field and the callback
+    // compares it against the order. Hashing the raw field instead made the same
+    // booking conflict with itself -- `"cny"` against `"CNY"`, or an absent field
+    // against an explicit `"CNY"` -- and answered the second caller with 1004.
+    const std::string requestedCurrency =
+      channel == "wechat" ? request.get("currency", "CNY").asString() : std::string("CNY");
+    bool currencyValid = false;
+    const std::string currency = normalizeQrCurrency(requestedCurrency, currencyValid);
+
     // Idempotency: derive key from order_no + channel (same order can be re-requested).
     // (A1-4 fix: add idempotency protection to QR payment)
     std::string idempotencyKey =
@@ -1438,7 +1462,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
     // currency, buyer or callback URL -- for the same order number hashed to the
     // same request and was answered as a replay of the first caller's QR code.
     reqHashObj["user_id"] = static_cast<Json::Int64>(userId);
-    reqHashObj["currency"] = request.get("currency", "").asString();
+    reqHashObj["currency"] = currencyValid ? currency : requestedCurrency;
     reqHashObj["notify_url"] = request.get("notify_url", "").asString();
     reqHashObj["buyer_id"] = request.get("buyer_id", "").asString();
     std::string requestHash = drogon::utils::getSha256(pay::utils::toJsonString(reqHashObj));
@@ -1461,6 +1485,8 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
        channel,
        subject,
        userId,
+       currency,
+       currencyValid,
        request,
        sharedCb,
        idempotencyService,
@@ -1503,13 +1529,6 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // Alipay precreate takes `total_amount` in yuan, WeChat V3 native takes
           // `amount.total` in fen plus a `description`. Sending the Alipay field
           // names to WeChat made every WeChat QR order a 400 PARAM_ERROR.
-          // The order row has to record the currency the channel was actually
-          // offered: Alipay precreate only ever prices in CNY, while WeChat V3
-          // takes a currency field and the callback compares it against the order.
-          const std::string requestedCurrency =
-            channel == "wechat" ? request.get("currency", "CNY").asString() : std::string("CNY");
-          bool currencyValid = false;
-          const std::string currency = normalizeQrCurrency(requestedCurrency, currencyValid);
           if (!currencyValid)
           {
               idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
@@ -2850,7 +2869,10 @@ void PaymentService::syncOrderStatusFromAlipay(
     else if (tradeStatus == "TRADE_CLOSED")
     {
         orderStatus = "FAILED";
-        paymentStatus = "FAILED";
+        // The payment column's vocabulary is FAIL (what `mapTradeState` writes for
+        // the same outcome on the WeChat side); FAILED is an order status. Spelling
+        // it FAILED here left a row that no FAIL-keyed query could find.
+        paymentStatus = "FAIL";
     }
     else
     {

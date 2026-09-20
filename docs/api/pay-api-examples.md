@@ -83,6 +83,14 @@ but is invisible to the caller. A replay with a *changed* body is refused:
 collision with code `1004` over HTTP `404`. On `/api/qrpay/create` the derived
 key is `QR_<order_no>_<channel>` unless the body or header supplies one.
 
+Both create routes also answer `1501` over HTTP `503` when the process cannot
+serve them at all: no `PayPlugin` registered (the null-pointer case the plugin
+header documents for static-library linking), or the channel client they need is
+not configured. On the callback side the WeChat route answers that same
+`1501` / `503`, while the Alipay route answers `{"code":"FAIL"}` — neither one
+acknowledges, so the channel retries instead of treating a payment that was never
+booked as delivered.
+
 ## Create QR Payment
 
 ```bash
@@ -113,12 +121,13 @@ What each refusal means — read `code`, the HTTP status is coarser:
 
 | `code` | HTTP | Reason |
 |--------|------|--------|
-| `400` | 400 | Missing/mistyped member, a non-positive `user_id`, a currency that is not three letters, a private `notify_url`, or an existing order that is already settled or describes another amount, currency, channel or owner |
+| `400` | 400 | Missing/mistyped member, a non-positive `user_id`, a `currency` that is not three letters on a WeChat booking, a private `notify_url`, or an existing order that is already settled or describes another amount, currency, channel or owner |
 | `40001` | 400 | Amount shape the channels cannot represent (the same `^\d+(\.\d{1,2})?$` check the pay route runs) |
 | `1004` | 404 | The idempotency key was taken by a *different* body, or is still in flight |
 | `1005` | 500 | Unknown or unconfigured channel |
 | `500` | 500 | The channel refused the request |
 | `1003` | 500 | Database fault (including the idempotency check itself) |
+| `1501` | 503 | No `PayPlugin` registered in this process, or the channel client this route needs is not configured |
 
 A channel refusal closes that attempt's `pay_payment` row (`FAIL`) and leaves the
 order alone, so the next call with the same `order_no` appends a new attempt and

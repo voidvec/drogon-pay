@@ -25,7 +25,7 @@ namespace
 
 // The payment attempts of one order that a notification may be matched against.
 // A QR order carries one row per precreate attempt, and an attempt a channel
-// refusal closed (FAIL/CLOSED) can never settle, so it must not be the row a
+// refusal closed (FAIL) can never settle, so it must not be the row a
 // notification is booked on: "newest row wins" lets a refused later attempt
 // shadow the payable one, the settlement CAS then matches nothing, and the
 // delivery is ACKed as SUCCESS with no money booked. An order whose attempts are
@@ -40,6 +40,53 @@ drogon::orm::Criteria openAttemptsOfOrder(const std::string &orderNo)
              drogon::orm::CompareOperator::In,
              std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
            );
+}
+
+// Drop an idempotency reservation whose snapshot was never finalized -- and only
+// while it is still unfinalized. Between the read that found it and this delete
+// the delivery that took the reservation can finish and finalize the snapshot,
+// and deleting then would erase the proof a callback was handled: a later
+// delivery would run the settlement from scratch. `respond` answers the current
+// delivery either way, so a delete that matched nothing is a retry signal, not a
+// lost one.
+void dropUnfinalizedReservation(
+  const std::shared_ptr<drogon::orm::DbClient> &dbClient,
+  const std::string &idempotencyKey,
+  const std::string &label,
+  const std::function<void()> &respond
+)
+{
+    try
+    {
+        drogon::orm::Mapper<PayIdempotencyModel> staleRemover(dbClient);
+        staleRemover.deleteBy(
+          drogon::orm::Criteria(
+            PayIdempotencyModel::Cols::_idempotency_key,
+            drogon::orm::CompareOperator::EQ,
+            idempotencyKey
+          ) &&
+            drogon::orm::Criteria(
+              PayIdempotencyModel::Cols::_response_snapshot, drogon::orm::CompareOperator::IsNull
+            ),
+          [respond](const size_t) { respond(); },
+          [respond, label](const drogon::orm::DrogonDbException &e) {
+              LOG_ERROR << "[CallbackService] Could not drop the stale idempotency reservation "
+                           "for "
+                        << label << ": " << e.base().what();
+              respond();
+          }
+        );
+    }
+    catch (const std::exception &e)
+    {
+        LOG_ERROR << "[CallbackService] Could not drop the stale idempotency reservation for "
+                  << label << ": " << e.what();
+        respond();
+    }
+    catch (...)
+    {
+        respond();
+    }
 }
 
 // TODO(dedup): duplicated in PaymentService.cc and RefundService.cc.
@@ -500,35 +547,9 @@ void CallbackService::handlePaymentCallback(
                           error["message"] = "callback still in progress";
                           (*cbPtr)(error, pay::makePayError(1400, "callback still in progress"));
                       };
-                      try
-                      {
-                          drogon::orm::Mapper<PayIdempotencyModel> staleRemover(dbClient_);
-                          staleRemover.deleteBy(
-                            drogon::orm::Criteria(
-                              PayIdempotencyModel::Cols::_idempotency_key,
-                              drogon::orm::CompareOperator::EQ,
-                              idempotencyKey
-                            ),
-                            [respondRetryLater](const size_t) { respondRetryLater(); },
-                            [respondRetryLater, orderNo](const drogon::orm::DrogonDbException &e) {
-                                LOG_ERROR << "[CallbackService] Could not drop the stale "
-                                             "idempotency reservation for order "
-                                          << orderNo << ": " << e.base().what();
-                                respondRetryLater();
-                            }
-                          );
-                      }
-                      catch (const std::exception &e)
-                      {
-                          LOG_ERROR << "[CallbackService] Could not drop the stale idempotency "
-                                       "reservation for order "
-                                    << orderNo << ": " << e.what();
-                          respondRetryLater();
-                      }
-                      catch (...)
-                      {
-                          respondRetryLater();
-                      }
+                      dropUnfinalizedReservation(
+                        dbClient_, idempotencyKey, "order " + orderNo, respondRetryLater
+                      );
                       return;
                   }
 
@@ -2218,35 +2239,9 @@ void CallbackService::handleRefundCallback(
                           error["message"] = "callback still in progress";
                           (*cbPtr)(error, pay::makePayError(1400, "callback still in progress"));
                       };
-                      try
-                      {
-                          drogon::orm::Mapper<PayIdempotencyModel> staleRemover(dbClient_);
-                          staleRemover.deleteBy(
-                            drogon::orm::Criteria(
-                              PayIdempotencyModel::Cols::_idempotency_key,
-                              drogon::orm::CompareOperator::EQ,
-                              idempotencyKey
-                            ),
-                            [respondRetryLater](const size_t) { respondRetryLater(); },
-                            [respondRetryLater, refundNo](const drogon::orm::DrogonDbException &e) {
-                                LOG_ERROR << "[CallbackService] Could not drop the stale "
-                                             "idempotency reservation for refund "
-                                          << refundNo << ": " << e.base().what();
-                                respondRetryLater();
-                            }
-                          );
-                      }
-                      catch (const std::exception &e)
-                      {
-                          LOG_ERROR << "[CallbackService] Could not drop the stale idempotency "
-                                       "reservation for refund "
-                                    << refundNo << ": " << e.what();
-                          respondRetryLater();
-                      }
-                      catch (...)
-                      {
-                          respondRetryLater();
-                      }
+                      dropUnfinalizedReservation(
+                        dbClient_, idempotencyKey, "refund " + refundNo, respondRetryLater
+                      );
                       return;
                   }
 

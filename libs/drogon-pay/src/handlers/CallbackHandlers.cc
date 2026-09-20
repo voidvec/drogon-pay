@@ -3,6 +3,7 @@
 #include "../channels/AlipayChannel.h"
 #include "../services/CallbackService.h"
 #include "../services/PaymentService.h"
+#include "PluginGuard.h"
 #include <algorithm>
 #include <drogon/HttpAppFramework.h>
 #include <drogon/orm/DbClient.h>
@@ -22,11 +23,11 @@ void WechatCallbackController::notify(
     std::string nonce = std::string(req->getHeader("Wechatpay-Nonce"));
     std::string serialNo = std::string(req->getHeader("Wechatpay-Serial"));
 
-    // Get CallbackService from Plugin
-    auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto callbackService = plugin->callbackService();
+    // The service is resolved *after* the body is validated below: a malformed
+    // notification has to be refused for its own reason whatever the process
+    // looks like, and answering it is not the service's job.
+    // CallbackService comes from Plugin
 
-    // Route to appropriate callback handler based on event_type
     // Parse body to determine callback type
     Json::Value bodyJson;
     std::string eventType;
@@ -93,6 +94,17 @@ void WechatCallbackController::notify(
         auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
         resp->setStatusCode(drogon::k400BadRequest);
         callback(resp);
+        return;
+    }
+
+    // Get CallbackService from Plugin. The body is now known to be one this
+    // endpoint can route, so resolve the service it needs -- and answer the
+    // missing-plugin fault rather than calling a member on a null pointer.
+    auto plugin = drogon::app().getPlugin<PayPlugin>();
+    auto callbackService = plugin ? plugin->callbackService() : nullptr;
+    if (!callbackService)
+    {
+        respondPluginUnavailable(callback, "Callback service");
         return;
     }
 
@@ -173,11 +185,15 @@ void AlipayCallbackController::notify(
     // excludes 'sign', but we need the value here).
     const std::string sign = params.count("sign") ? params["sign"] : std::string{};
 
-    // Get the Alipay client. If it is not configured we MUST reject the callback
-    // rather than processing it unverified - accepting an unverified callback
-    // would let any party forge a payment-success notification (P0-1).
+    // Get the Alipay client. If it is not configured -- or the plugin that owns
+    // it is not in this process at all, which is the same fault from the
+    // verifier's point of view -- we MUST reject the callback rather than
+    // processing it unverified - accepting an unverified callback would let any
+    // party forge a payment-success notification (P0-1). The null check on
+    // `plugin` is also what keeps the later `plugin->paymentService()` honest:
+    // this branch returns first.
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto alipayClient = plugin->alipayClient();
+    auto alipayClient = plugin ? plugin->alipayClient() : nullptr;
     if (!alipayClient)
     {
         LOG_ERROR << "[ALIPAY_CALLBACK] Alipay client not configured, rejecting callback";

@@ -25,9 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/api/qrpay/create` (with the channel injected through
   `PayPlugin::setTestChannels()`) so the QR booking contract is pinned by a test
   instead of by reading the service — payment row present, per-attempt rows on
-  retry, the amount and currency the channel is offered, the fields that survive
-  the handler (`user_id` on the order row, a public `notify_url` in the channel
-  payload), and what is refused *before* the channel is asked at all.
+  retry, the amount and currency the channel is offered, what the service does
+  with the fields the handler passes through (`user_id` on the order row, a
+  public `notify_url` in the channel payload), and what is refused *before* the
+  channel is asked at all.
 - **`tests/integration/RequestBodyShapeTest.cc`**: one handler-level case per
   body member whose JSON type used to fault the process, calling the controllers
   directly. Every body there is refused during validation — so no plugin,
@@ -419,6 +420,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **A request that reached a handler with no plugin in the process stopped it.**
+  Every route resolves its service through `drogon::app().getPlugin<PayPlugin>()`
+  and then calls a member on what it gets back — ten places across
+  `PayHandlers.cc` and `CallbackHandlers.cc` — on a pointer this project's own
+  header documents may be null (`PayPlugin.h`: a host whose linker drops the
+  DrObject self-registration symbol sees exactly that, which is why
+  `ensureLinked()` exists; a config that registers the routes without a
+  `PayPlugin` entry gets the same state). Calling a member on it is not a lost
+  request but an access violation inside the handler — the one fault the new
+  exception barrier cannot contain, since the barrier is only where the routes are
+  registered. On the WeChat notify route the dereference also sat *before* body
+  validation, so a mistyped field there answered nothing at all: last round's
+  shape guard was unreachable in precisely that state. Each lookup is now a
+  presence test (`plugin ? plugin->paymentService() : nullptr`) answered with 1501
+  over HTTP 503 by `respondPluginUnavailable()` in the new
+  `src/handlers/PluginGuard.h` — the code this contract already uses for one of our
+  own dependencies being missing. The WeChat route resolves its service *after*
+  validating the envelope, so a body it cannot route is still refused for its own
+  reason, and the Alipay route folds a missing plugin into the branch it already
+  had for "no client to verify with" (the same fault to a signature verifier, and
+  never an acknowledgement, so no notification is consumed by a process that
+  cannot book it). `openapi.yaml` carries the new 503 on the notify route and
+  names the trigger in the shared `ServiceUnavailable` description. This also
+  corrects the local-evidence note in
+  `docs/review/2026-09-20-wechat-pay-api-audit.md`: `RequestBodyShapeTest.cc` was
+  *not* green at `4f028d0` — the two cases that reach the dereference died with
+  `0xC0000005`, reproducibly:
+  `PayHandlers_CreateQRPayment_OwnerAboveInt32Range_NotRefusedAsMistyped`, whose
+  body is legitimate, and
+  `CallbackHandlers_WechatNotify_EventTypeObject_Answers400InsteadOfThrowing`,
+  which the pre-validation lookup refused the shape guard the chance to answer. It
+  is the *test* that was right. Four
+  cases now assert the answered fault (three 1501 over 503, one the Alipay `FAIL`
+  the route already had), and the file is verified in both states: no
+  plugin (run from the repo root) and the plugin the test config registers (run
+  beside `config.json`, which is how ctest starts it) — 18/18 in each.
 - **A request body whose member had the wrong JSON type stopped the process.**
   Every write route read its body through jsoncpp's `asString()`/`asInt64()`
   directly, and jsoncpp *throws* on a member of another type — `{"amount":{}}`
@@ -433,7 +470,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CallbackHandlers.cc`) and answer 400, and `registerHttpHandlers` wraps every
   registration in a `guarded()` barrier that answers 500 only when a handler
   threw *before* responding — the wrapped callback fires at most once, so an
-  asynchronous completion is never answered twice.
+  asynchronous completion is never answered twice. The closure handed to a handler
+  is a *copy*: handing over the original moved its target away, and the fault path
+  then called an empty `std::function`, which threw out of the `catch` and escaped
+  the barrier it was inside. Its answer also has to carry the status, not only a
+  body saying `code: 500` — callers that branch on the HTTP status were being
+  handed a 200.
 - **Money could be booked under an owner no query can name.** `/api/pay/create`
   documents a 401 when no `user_id` is available, and that branch was dead on
   arrival: it wrapped `req->attributes()->get<int64_t>("user_id")` in a
@@ -469,7 +511,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `notify_url` or `buyer_id` hashed identically and was answered as a *replay* of
   the first caller's code — one tenant paying into another's order, with the
   callback URL of the first. Those four fields are now part of the hash, so the
-  collision surfaces as 1004 over HTTP 404 instead.
+  collision surfaces as 1004 over HTTP 404 instead. The currency enters the hash
+  as the value the booking actually uses rather than the string the caller typed:
+  WeChat takes an upper-case ISO code and the service normalises lowercase input,
+  so hashing the raw field made `"cny"` and `"CNY"` — and an absent field and an
+  explicit `"CNY"` — two different requests for one identical order.
 - **A refused attempt could shadow the payable one.** `pay_payment` carries one
   row per QR precreate attempt, and the callback and refund lookups both took
   "the newest row for this order" — which, once a channel refusal had closed a
@@ -480,7 +526,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   money (`INIT`/`PROCESSING`/`SUCCESS`/`REFUNDED`), matching the row the
   settlement branch settles; an order whose attempts are all closed is reported
   rather than acknowledged
-  (`PayPlugin_WechatCallback_ClosedAttemptDoesNotShadowThePayableOne`).
+  (`PayPlugin_WechatCallback_ClosedAttemptDoesNotShadowThePayableOne`). The
+  refund lookup goes one step further than the filter: among those rows it takes
+  the newest *settled* attempt before any open one, because a newer attempt that
+  never got an answer still holds no money, and picking it answered
+  "payment not successful" on an order that had genuinely been paid
+  (`PayPlugin_Refund_SettledAttemptIsPickedOverANewerOpenOne`).
 - **An unfinalized idempotency reservation was acknowledged as a handled
   callback.** Both callback branches answered the duplicate path — record the
   delivery, return SUCCESS — as soon as a `pay_idempotency` row existed, ignoring
@@ -490,7 +541,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retries on money that is booked nowhere. Both branches now drop the stale
   reservation and answer FAIL/1400, so the next delivery runs the full path —
   where the settlement CAS leaves a concurrent winner's work intact
-  (`PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry`).
+  (`PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry`). The
+  delete carries the condition the read checked: the delivery that took the
+  reservation can finalize its snapshot in between, and removing *that* row would
+  erase the only evidence the callback was handled and let a later delivery settle
+  it a second time. A delete that matches nothing answers the retry the same way.
+- **A QR answer that proved nothing was booked as a refusal, twice over.** The
+  gate that decides whether a failed QR attempt may be closed read
+  "did this string come through HTTP?" — so a 2xx body carrying neither
+  `code_url` nor `prepay_id` closed the payment row as `FAIL`, against the
+  direction its own comment, the `LOG_WARN` beside it and `TECH_SPECS.md` all
+  state: an answer that names no channel error proves nothing, and closing it
+  hides a code the buyer may still pay from the notification and from
+  reconciliation. That one case is now recognised by name and left in flight
+  (`PayPlugin_QrBooking_AnswerWithoutCodeUrlKeepsTheAttemptInFlight`). The same
+  row was also being spelled two different ways in one codebase: the Alipay
+  status-sync branch wrote `FAILED` into `pay_payment.status`, where every other
+  writer — `mapTradeState`, the QR close path — writes `FAIL` (`FAILED` is an
+  *order* status), and a row spelled the other way matched no `FAIL`-keyed query
+  and no open-attempt filter either.
 - **The WeChat channel sent every outbound request with no timeout, and one of
   its certificate keys was read by nobody.** `timeout_ms` was documented
   (default 5000) and set in the example config, but `sendWechatRequest` never
@@ -573,8 +642,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read `status` from the refund response and fell through to `REFUNDING` for
   anything it did not recognise — including an absent field, which is what a
   WeChat error body looks like. A refund that never started was therefore
-  booked as in-flight. Unknown values now map to no status at all and take the
-  failure branch (`1502`, `REFUND_FAIL`), and so do `CLOSED`/`ABNORMAL`, which
+  booked as in-flight. Unknown values now take the failure branch of that
+  response — `1502` over HTTP 502, which it shares with the uncertain outcomes
+  below, so the body's `data.status` is what distinguishes them — and so do
+  `CLOSED`/`ABNORMAL`, which
   `mapRefundStatus` had already turned into `REFUND_FAIL` before the success
   path stored them anyway — the order ended up `REFUNDED` with `code: 0` on a
   refund WeChat refused. Conversely a *transport* failure is not a refusal:
