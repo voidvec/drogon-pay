@@ -190,14 +190,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported more than once (a re-run, a second dispatch over the same commit) the
   verdict comes from the highest check-run id, so a re-run supersedes its own
   predecessor; requiring every sibling to be green would let one stale
-  `cancelled` lock the release with nothing able to clear it. A commit with *no*
-  check runs at all can never grow them, so it exits after
-  `EARLY_BAIL_SECONDS: 300` with the reason instead of waiting two hours. The
-  tag name is shape-checked against semver before it reaches an API path, the
+  `cancelled` lock the release with nothing able to clear it. An empty check-run
+  listing is *not* the "nothing is coming" signal — this same workflow reports
+  check runs against the tagged commit, so the listing is never empty — and the
+  five contexts only appear once FAST has finished, a quarter of an hour in. The
+  evidence that the merge pipeline started at all is ci.yml's own entry jobs, so
+  `ENTRY_CHECKS: static-analysis,clang-tidy` is polled for and its absence after
+  `EARLY_BAIL_SECONDS: 300` exits with the reason instead of waiting two hours.
+  The tag name is shape-checked against semver before it reaches an API path, the
   three timing knobs are rejected unless they are numbers, and the context list
   is rejected unless it holds exactly five entries — a truncated `env:` block
   would otherwise leave nothing pending and print "green" having inspected
-  nothing. Replayed against the live API it reproduces the incident it exists
+  nothing. `scripts/ci/tag_gate_scenarios.py` replays that table by extracting the
+  workflow's own `run:` bytes and driving them against a stand-in `gh` (17 cases,
+  including a positive control proving the entry bail does not fire when an entry
+  job *is* present), and with `--live` against the real read-only API. The
+  `static-analysis` job of `ci.yml` runs the stubbed mode on every PR, so a
+  verdict that drifts fails a pull request instead of a release. Replayed
+  live it reproduces the incident it exists
   for: pointed at the v1.0.0 tag it dereferences the annotated tag to its
   commit, accepts that the commit is inside master, and — judged by the check
   names that commit's own pipeline reported, since the five current contexts
@@ -268,7 +278,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `needs`. `deploy.yml` is also dispatchable from a branch, and there is no tag to
   certify there (its production leg already keys off a tag ref), so a non-tag ref
   passes the gate through instead of failing a manual deploy that has nothing to
-  check.
+  check. Two limits of the fix are worth stating: Actions runs the workflow
+  definition *stored in the tagged commit*, so a tag aimed at a commit older than
+  this change is still built by the ungated file and the hole closes going
+  forward rather than retroactively; and a `v*` tag outside `v` + three numeric
+  segments is now refused by the shape check, which turns the deploy lane red
+  where `v1.2` or `v1.0.0-rc.1` previously built an image and rolled ECS.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local

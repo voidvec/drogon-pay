@@ -148,7 +148,12 @@ and only then `publish`, which uses that CHANGELOG section as the release body. 
 `.github/workflows/deploy.yml` calls the same file before it pushes an image or
 touches ECS: `jobs.*.needs` cannot cross workflows, so a red release would never
 have stopped that pipeline's production leg. A tag that fails the gate ships
-nothing, in either workflow.
+nothing, in either workflow. The gate closes that path going forward rather than
+retroactively, though — Actions runs the definition *stored in the tagged commit*,
+so a tag aimed at a commit older than the gate is still built by the file that
+commit carries. It also now rejects a `v*` tag outside `v` + three numeric
+segments, which turns the deploy lane red where such a tag previously built and
+rolled without complaint.
 
 ## Contributing a payment channel
 
