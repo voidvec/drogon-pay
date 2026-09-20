@@ -738,6 +738,21 @@ DROGON_TEST(PayPlugin_WechatCallback_IdempotencyHitRecordsCallback)
     notify["resource"]["associated_data"] = aad;
     const std::string body = toJsonCompact(notify);
 
+    // A QR order can carry more than one payment attempt now (a refused
+    // attempt keeps its row and the retry appends a new one). Seed the older
+    // failed attempt so the duplicate-notification lookup has to choose a row
+    // rather than be handed the only one.
+    const std::string staleAttemptNo = "pay_" + drogon::utils::getUuid();
+    client->execSqlSync(
+      "INSERT INTO pay_payment "
+      "(payment_no, order_no, status, amount, request_payload, created_at, updated_at) "
+      "VALUES ($1, $2, 'FAIL', $3, '{}', NOW() - INTERVAL '60 seconds', "
+      "NOW() - INTERVAL '60 seconds')",
+      staleAttemptNo,
+      orderNo,
+      amount
+    );
+
     client->execSqlSync(
       "INSERT INTO pay_idempotency "
       "(idempotency_key, request_hash, response_snapshot, expire_at) "
@@ -808,9 +823,16 @@ DROGON_TEST(PayPlugin_WechatCallback_IdempotencyHitRecordsCallback)
     }
     CHECK(callbackCount >= 1);
 
+    // The audit row belongs to the attempt the settlement path would settle,
+    // not to an earlier refused one that the order also carries.
+    const auto staleCallbackRows =
+      client->execSqlSync("SELECT id FROM pay_callback WHERE payment_no = $1", staleAttemptNo);
+    CHECK(staleCallbackRows.empty());
+
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", notifyId);
     client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", staleAttemptNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 
     EVP_PKEY_free(pkey);
@@ -993,6 +1015,20 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback)
     notify["resource"]["associated_data"] = aad;
     const std::string body = toJsonCompact(notify);
 
+    // Same multi-attempt shape as the transaction branch: the refund callback
+    // resolves its audit row through the order, so an earlier refused attempt
+    // must not make that lookup fail.
+    const std::string staleAttemptNo = "pay_" + drogon::utils::getUuid();
+    client->execSqlSync(
+      "INSERT INTO pay_payment "
+      "(payment_no, order_no, status, amount, request_payload, created_at, updated_at) "
+      "VALUES ($1, $2, 'FAIL', $3, '{}', NOW() - INTERVAL '60 seconds', "
+      "NOW() - INTERVAL '60 seconds')",
+      staleAttemptNo,
+      orderNo,
+      "9.99"
+    );
+
     client->execSqlSync(
       "INSERT INTO pay_idempotency "
       "(idempotency_key, request_hash, response_snapshot, expire_at) "
@@ -1063,10 +1099,16 @@ DROGON_TEST(PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback)
     }
     CHECK(callbackCount >= 1);
 
+    // The audit row belongs to the newest attempt of the order.
+    const auto staleCallbackRows =
+      client->execSqlSync("SELECT id FROM pay_callback WHERE payment_no = $1", staleAttemptNo);
+    CHECK(staleCallbackRows.empty());
+
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", notifyId);
     client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1", refundNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", staleAttemptNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 
     EVP_PKEY_free(pkey);

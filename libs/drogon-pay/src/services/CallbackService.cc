@@ -485,56 +485,66 @@ void CallbackService::handlePaymentCallback(
                   try
                   {
                       drogon::orm::Mapper<PayPaymentModel> paymentLookup(dbClient_);
-                      paymentLookup.findOne(
-                        drogon::orm::Criteria(
-                          PayPaymentModel::Cols::_order_no,
-                          drogon::orm::CompareOperator::EQ,
-                          orderNo
-                        ),
-                        [this,
-                         cbPtr,
-                         orderNo,
-                         body,
-                         signature,
-                         serialNo,
-                         respondSuccess,
-                         respondDbError](const PayPaymentModel &payment) {
-                            const std::string paymentNo = payment.getValueOfPaymentNo();
+                      // An order can carry several payment attempts (a refused QR
+                      // attempt keeps its row and the retry appends a new one), and
+                      // findOne() answers that with "Found more than one row", which
+                      // made this path reject the duplicate notification instead of
+                      // recording it. Take the row the settlement path settles.
+                      paymentLookup
+                        .orderBy(PayPaymentModel::Cols::_created_at, drogon::orm::SortOrder::DESC)
+                        .limit(1)
+                        .findBy(
+                          drogon::orm::Criteria(
+                            PayPaymentModel::Cols::_order_no,
+                            drogon::orm::CompareOperator::EQ,
+                            orderNo
+                          ),
+                          [this, cbPtr, body, signature, serialNo, respondSuccess, respondDbError](
+                            const std::vector<PayPaymentModel> &rows
+                          ) {
+                              if (rows.empty())
+                              {
+                                  respondDbError(drogon::orm::UnexpectedRows("0 rows found"));
+                                  return;
+                              }
+                              const std::string paymentNo = rows.front().getValueOfPaymentNo();
 
-                            try
-                            {
-                                drogon::orm::Mapper<PayCallbackModel> callbackMapper(dbClient_);
-                                PayCallbackModel callbackRow;
-                                callbackRow.setPaymentNo(paymentNo);
-                                callbackRow.setRawBody(body);
-                                callbackRow.setSignature(signature);
-                                callbackRow.setSerialNo(serialNo);
-                                callbackRow.setVerified(true);
-                                callbackRow.setProcessed(true);
-                                callbackRow.setReceivedAt(trantor::Date::now());
+                              try
+                              {
+                                  drogon::orm::Mapper<PayCallbackModel> callbackMapper(dbClient_);
+                                  PayCallbackModel callbackRow;
+                                  callbackRow.setPaymentNo(paymentNo);
+                                  callbackRow.setRawBody(body);
+                                  callbackRow.setSignature(signature);
+                                  callbackRow.setSerialNo(serialNo);
+                                  callbackRow.setVerified(true);
+                                  callbackRow.setProcessed(true);
+                                  callbackRow.setReceivedAt(trantor::Date::now());
 
-                                callbackMapper.insert(
-                                  callbackRow,
-                                  [respondSuccess](const PayCallbackModel &) { respondSuccess(); },
-                                  respondDbError
-                                );
-                            }
-                            catch (const std::exception &e)
-                            {
-                                reportMapperFailure(cbPtr, e.what());
-                            }
-                            catch (...)
-                            {
-                                reportMapperFailure(cbPtr, "unknown exception");
-                            }
-                        },
-                        [cbPtr, respondDbError](const drogon::orm::DrogonDbException &e) {
-                            LOG_ERROR
-                              << "[CallbackService] Payment not found during idempotent callback: "
-                              << e.base().what();
-                            respondDbError(e);
-                        }
-                      );
+                                  callbackMapper.insert(
+                                    callbackRow,
+                                    [respondSuccess](const PayCallbackModel &) {
+                                        respondSuccess();
+                                    },
+                                    respondDbError
+                                  );
+                              }
+                              catch (const std::exception &e)
+                              {
+                                  reportMapperFailure(cbPtr, e.what());
+                              }
+                              catch (...)
+                              {
+                                  reportMapperFailure(cbPtr, "unknown exception");
+                              }
+                          },
+                          [respondDbError](const drogon::orm::DrogonDbException &e) {
+                              LOG_ERROR << "[CallbackService] Payment not found during "
+                                           "idempotent callback: "
+                                        << e.base().what();
+                              respondDbError(e);
+                          }
+                        );
                   }
                   catch (const std::exception &e)
                   {
@@ -2167,51 +2177,64 @@ void CallbackService::handleRefundCallback(
                   try
                   {
                       drogon::orm::Mapper<PayPaymentModel> paymentLookup(dbClient_);
-                      paymentLookup.findOne(
-                        drogon::orm::Criteria(
-                          PayPaymentModel::Cols::_order_no,
-                          drogon::orm::CompareOperator::EQ,
-                          tradeOrderNo
-                        ),
-                        [this, cbPtr, body, signature, serialNo, respondSuccess, respondDbError](
-                          const PayPaymentModel &payment
-                        ) {
-                            const std::string paymentNo = payment.getValueOfPaymentNo();
+                      // Same reason as the transaction branch above: an order can
+                      // carry several payment attempts, and findOne() treats that
+                      // as an error rather than handing back one row.
+                      paymentLookup
+                        .orderBy(PayPaymentModel::Cols::_created_at, drogon::orm::SortOrder::DESC)
+                        .limit(1)
+                        .findBy(
+                          drogon::orm::Criteria(
+                            PayPaymentModel::Cols::_order_no,
+                            drogon::orm::CompareOperator::EQ,
+                            tradeOrderNo
+                          ),
+                          [this, cbPtr, body, signature, serialNo, respondSuccess, respondDbError](
+                            const std::vector<PayPaymentModel> &rows
+                          ) {
+                              if (rows.empty())
+                              {
+                                  respondDbError(drogon::orm::UnexpectedRows("0 rows found"));
+                                  return;
+                              }
+                              const std::string paymentNo = rows.front().getValueOfPaymentNo();
 
-                            try
-                            {
-                                drogon::orm::Mapper<PayCallbackModel> callbackMapper(dbClient_);
-                                PayCallbackModel callbackRow;
-                                callbackRow.setPaymentNo(paymentNo);
-                                callbackRow.setRawBody(body);
-                                callbackRow.setSignature(signature);
-                                callbackRow.setSerialNo(serialNo);
-                                callbackRow.setVerified(true);
-                                callbackRow.setProcessed(true);
-                                callbackRow.setReceivedAt(trantor::Date::now());
+                              try
+                              {
+                                  drogon::orm::Mapper<PayCallbackModel> callbackMapper(dbClient_);
+                                  PayCallbackModel callbackRow;
+                                  callbackRow.setPaymentNo(paymentNo);
+                                  callbackRow.setRawBody(body);
+                                  callbackRow.setSignature(signature);
+                                  callbackRow.setSerialNo(serialNo);
+                                  callbackRow.setVerified(true);
+                                  callbackRow.setProcessed(true);
+                                  callbackRow.setReceivedAt(trantor::Date::now());
 
-                                callbackMapper.insert(
-                                  callbackRow,
-                                  [respondSuccess](const PayCallbackModel &) { respondSuccess(); },
-                                  respondDbError
-                                );
-                            }
-                            catch (const std::exception &e)
-                            {
-                                reportMapperFailure(cbPtr, e.what());
-                            }
-                            catch (...)
-                            {
-                                reportMapperFailure(cbPtr, "unknown exception");
-                            }
-                        },
-                        [cbPtr, respondDbError](const drogon::orm::DrogonDbException &e) {
-                            LOG_ERROR << "[CallbackService] Payment not found during idempotent "
-                                         "refund callback: "
-                                      << e.base().what();
-                            respondDbError(e);
-                        }
-                      );
+                                  callbackMapper.insert(
+                                    callbackRow,
+                                    [respondSuccess](const PayCallbackModel &) {
+                                        respondSuccess();
+                                    },
+                                    respondDbError
+                                  );
+                              }
+                              catch (const std::exception &e)
+                              {
+                                  reportMapperFailure(cbPtr, e.what());
+                              }
+                              catch (...)
+                              {
+                                  reportMapperFailure(cbPtr, "unknown exception");
+                              }
+                          },
+                          [respondDbError](const drogon::orm::DrogonDbException &e) {
+                              LOG_ERROR << "[CallbackService] Payment not found during idempotent "
+                                           "refund callback: "
+                                        << e.base().what();
+                              respondDbError(e);
+                          }
+                        );
                   }
                   catch (const std::exception &e)
                   {
