@@ -380,6 +380,7 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 |--------|------|
 | 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言三处一致 |
 | 打 tag | `release.yml` 的 `version-check` job 以 `--tag "$GITHUB_REF_NAME"` 再跑一次：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段，缺段硬失败（先于任何构建，不浪费一个 Conan 编译周期） |
+| tag 也要过 CI | `ci-gate` job（`version-check` 之后、`sdk-smoke` 之前）：tag 不是被合并进来的，分支 ruleset 的必需检查管不到它，所以该 job 先用 `compare/master...<sha>` 确认该 commit 已在 master 历史上（顺手排掉"未合并分支上的 commit 也带着绿色 PR 检查"这条路），再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`，FAST 不列是因为 MAIN `needs` 它），任一非 success 立即失败、25 分钟没跑完则超时失败、缺席同样算未通过；重跑留下的旧结论不能单独作数，同名 check 必须全部成功 |
 | 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 + 已发布包引用 → 提交 PR → 合并后打 tag |
 
 ### [MUST] 日志分级规范
