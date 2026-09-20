@@ -191,7 +191,7 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   构造是重复而非复用，且微信分支当时处于 501 之后不可达——C5 落地后已可达并由 QR 用例覆盖）、M4（`verifyMessageWithCert` 的过期分支无直达
   用例）、H1（四个用例不是三个）。
 - **配置文档的默认值与代码相反**：`reconcile.enabled` 与 `channels.<name>.enabled` 实际默认 `true`
-  （`PayPlugin.cc:48,62,139,220`），`configuration_guide.md` 原写 false，已改。
+  （`PayPlugin.cc:114,128,205,286`），`configuration_guide.md` 原写 false，已改。
 
 
 ## 八、C5 落地补记（本轮）
@@ -201,18 +201,19 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   幂等快照写入。入账分支不需要改：`CallbackService` 是按 `order_no` 取 payment，只把
   `SUCCESS`/`REFUNDED` 视为已终态，`INIT`/`PROCESSING` 都可入账，而 native 建单不回
   `transaction_id`，第五节 M2 的比对对空值放行。重复通知分支需要，见下一条。
-- **重复通知的审计分支被 C5 打破，已一并修**：两个分支（交易 `CallbackService.cc:536`、退款
-  `CallbackService.cc:2254`，行号为本轮）都用 `findOne(order_no)` 找 payment 来写 `pay_callback`，而 Drogon 的
+- **重复通知的审计分支被 C5 打破，已一并修**：两个分支（交易 `CallbackService.cc:590`、退款
+  `CallbackService.cc:2295`，行号按第十节那一轮重挂）都用 `findOne(order_no)` 找 payment 来写 `pay_callback`，而 Drogon 的
   `findOne` 在命中 0 行**或多行**时都走异常回调（`UnexpectedRows`，Drogon 的 Mapper 头文件里
   `r.size() > 1` 那一支）。一个订单只有一条 payment 时它没事；一旦"拒绝后重试"让同一订单带上两条
   payment，重复通知就会得到 `FAIL`/1400，而 WeChat 收到 FAIL 会一直重发，审计行反而永远写不下。
-  现在两处都改成 `created_at DESC LIMIT 1` 的 `findBy`，与入账分支（`CallbackService.cc:739`）取的
+  现在两处都改成 `created_at DESC LIMIT 1` 的 `findBy`，与入账分支（`CallbackService.cc:760`）取的
   是同一条 payment，空结果仍按原行为回 1400（`UnexpectedRows("0 rows found")`）。正向对照：
   `PayPlugin_WechatCallback_IdempotencyHitRecordsCallback` 与
   `PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback` 现在各多插一条 60 秒前的 `FAIL`
   尝试——旧代码在断言 `!error` 处就会失败，新代码另外断言审计行落在最新那条尝试上。
-  其余按 `order_no` 取 payment 的位置（`PaymentService.cc:2433,2882`、`RefundService.cc:484`）
-  本来就是有序的 `findBy`；它们与上面三处对"最新"的口径直到第九节才真正统一（状态白名单）。
+  其余按 `order_no` 取 payment 的位置（`PaymentService.cc:2464,2916`、`RefundService.cc` 的选单）
+  本来就是有序的 `findBy`；它们与上面三处对"最新"的口径直到第九节才真正统一（状态白名单），
+  而退款那条在第十节又被细化成"已结算的尝试优先"。
 - **通道拒绝不回滚订单**：只关闭这一条 payment。同一订单可能已有前一次尝试留下的可用二维码，
   把订单写成 `FAILED` 会掩盖真实可付的单子。
 - **重试可用**：`pay_order.order_no` 唯一（`sql/001_init_pay_tables.sql`），`pay_payment.order_no`
@@ -237,7 +238,7 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   API key 就够了。现在四个 POST 面先校验形状（`validateBodyTypes`、`CallbackHandlers` 的
   `event_type` 显式判定）再读，回 400；`registerHttpHandlers` 的 `authed`/`open` 两条注册路径统一
   套 `guarded()` 异常屏障，只在"响应之前抛出"时补一个 500，屏障内的回调被 `atomic` 收成至多一次，
-  异步完成不会被二次应答。`tests/integration/RequestBodyShapeTest.cc` 13 条按成员逐一对着 handler 打，
+  异步完成不会被二次应答。`tests/integration/RequestBodyShapeTest.cc` 14 条按成员逐一对着 handler 打，
   除"int64 属主必须放行"那条正向对照外都不碰插件/库/通道，因此本机可跑。
   **未做**：`guarded()` 自身没有"故意让 handler 抛出"的直达用例（要起一个真在注册后被打、且 handler
   内抛的 HTTP 服务）。它确实被间接穿过：`RouteRegistrationSmoke`、`HttpHeaders_*`、`HealthProbe_*`
@@ -290,11 +291,94 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
     交易号"的注释同上更正。
   - `docs/api/pay-api-examples.md`：401 的真实触发条件、QR 的拒因表（body 码 vs HTTP）、
     派生幂等键的完整式子（含 `sha256(amount + currency)`）。
-- **验证边界**：本轮本机证据 = MSVC Release 构建 + `RequestBodyShapeTest.cc` 13 条（非 DB）+
+- **验证边界**：本轮本机证据 = MSVC Release 构建 + `RequestBodyShapeTest.cc` 14 条（非 DB）+
   穿过屏障的路由级回归 8 条（`RouteRegistrationSmoke`、`HttpHeaders_*`×4、`HealthProbe_*`×3）+
-  全部 Python 门禁；`QrPaymentBookingTest.cc` 新增 6 条与 `WechatCallbackIntegrationTest.cc` 新增 2 条都要
+  全部 Python 门禁；`QrPaymentBookingTest.cc` 新增 10 条与 `WechatCallbackIntegrationTest.cc` 新增 2 条都要
   PostgreSQL，只有 CI 证据。
 - **仍未做**：`guarded()` 的路由级用例（上一条）；支付宝 QR 入账分支不比对 `total_amount` 与订单金额
   （微信侧比对了 `payer_total`）；服务层残余 `std::errc::*` → 业务码（第七节）；`AlipayChannel.cc:428`
   毫秒当秒（第六节）；`downloadCertificates` 裸 `this`（第六节）；`/api/pay/orders` 不带 `user_id` 时
   返回**全部**属主的单 —— 这是运维语义而非缺陷，但该在契约里明写，免得被当成越权查询的例外。
+
+## 十、第四轮复审补记（4f028d0 之后，本轮）
+
+两个评审子代理对着 `4f028d0` 全量重读，一条一条落到代码上核对。结论：**上一轮修的东西没有一处被推翻，
+但它自己带进四个新缺陷**，其中两个正好是 memory 里"核对守卫方向"该抓的形状。
+
+- **异常屏障自己会抛出（BLOCKER，本轮修）**：`guarded()` 用 `handler(req, std::move(onceCb))` 把闭包
+  交给 handler，这一步就把 `onceCb` 的目标**移走**了（`authed` 包装层与每个 controller 都按
+  `std::function&&` 继续 move）。于是 catch 分支里那句 `onceCb(...)` 调的是一个空的 `std::function` ——
+  `std::bad_function_call` 从 catch 里抛出，直接越过屏障，正是屏障要拦的那条"逃出 `app().run()`"路径。
+  现在改为交出副本（`PayPlugin.cc:85`），两份副本共享同一个 `answered`，至多一次的语义不变。
+  评审给的机制描述并不准确（被移走的是 `onceCb` 里的目标，不是调用方的 `cb`），但缺陷成立。
+- **屏障的 500 只有 body 是 500（MAJOR，本轮修）**：`fault` 组了 `{"code":500}` 却没
+  `setStatusCode(k500InternalServerError)`，HTTP 层回 200 —— 调用方按状态码分支的都会把这道故障当成功。
+  `PayPlugin.cc:74`。
+- **删过期预留可以顺手删掉刚定稿的那条（MAJOR，本轮修）**：`findOne` 与 `deleteBy` 之间，取走预留的
+  那一次投递完全可能已经写完 `response_snapshot`；原先的删除只按 `idempotency_key`，会把"已处理"的
+  证据抹掉，下一次投递于是重跑入账。两条回调分支合并成 `dropUnfinalizedReservation()`
+  （`CallbackService.cc:52`，调用点 `550`、`2242`），判据补 `response_snapshot IS NULL`；删除命中 0 行
+  仍回 FAIL/1400，微信再投一次就命中定稿快照。
+- **退款选单还会被较新的 `INIT` 遮蔽（MAJOR，本轮修）**：上一轮的白名单挡住了 `FAIL`，但"最新"仍可能
+  是一条新一点的 `INIT` 僵尸，而真正已付的那条在它下面 —— 于是回 1409，钱在库里、退款被拒。现在两段
+  查询：先 `SUCCESS`/`REFUNDED`，空了才看 `INIT`/`PROCESSING`，两边都空仍按原来的 1404
+  （`RefundService.cc:501-561`）。用例 `PayPlugin_Refund_SettledAttemptIsPickedOverANewerOpenOne`（CI-only）。
+- **没有 `code_url` 的 2xx 被当成明确拒绝（本轮修）**：`qrAttemptCertainlyNotCreated` 末尾那句
+  `return !wentThroughHttp` 把"渠道回了但没有可付码"判成关闭 —— 与该函数自己的注释、与
+  `TECH_SPECS.md:238,257`、与它上面那条 `LOG_WARN`（"leaving it in flight"）三处都相反。文档这次是对的：
+  交易可能在中间层改写的响应背后已经建起来，关闭就把它从回调与对账的视野里删掉。现在用一个文件内常量
+  把这条消息认出来并留在途（`PaymentService.cc:190,230,292`）。用例
+  `PayPlugin_QrBooking_AnswerWithoutCodeUrlKeepsTheAttemptInFlight`（CI-only）。
+- **payment 状态词表少了一个拼写（本轮修）**：支付宝同步分支把 payment 写成 `FAILED`
+  （`PaymentService.cc:2875` 现为 `FAIL`）。`FAILED` 是**订单**状态（`mapTradeState` 就是这么分的），
+  payment 侧从来只写 `FAIL`；拼错的那一行既不落在任何 `FAIL` 查询里，也不在开放尝试的白名单里。
+  同处顺手收紧了 §九 的措辞：payment 没有 `CLOSED` 这个词，被排除的闭合状态只有 `FAIL`。
+- **幂等哈希按原样币种算（本轮修）**：币种在入库前才归一化，哈希却用了请求里的原始串，于是同一笔单
+  `"cny"` 与 `"CNY"`、缺省与显式 `"CNY"` 都会被判成 1004。现在哈希与订单行、通道 payload 用同一个
+  派生值（`PaymentService.cc:1445,1465`），非法币种仍照原样入哈希（它压根进不到建单）。用例
+  `PayPlugin_QrBooking_CurrencySpellingIsNotAnIdempotencyConflict`（CI-only）。
+- **核对后不改的**：`Attributes::get<T>` 的类型不符确实回默认构造值并 `LOG_ERROR` 一句 "Bad type"
+  （Drogon `Attribute.h:39-56`），§九 那条关于 401 死代码的论证按原文成立。
+- **文档更正**：§九 的 `RequestBodyShapeTest.cc` 由 13 改 14、`QrPaymentBookingTest.cc` 新增由 6 改 10；
+  §七 里指向 `PayPlugin.cc` 的行号在屏障改写后已重挂。
+- **两处契约声明与代码对不上（本轮更正）**：
+  - `openapi.yaml` 的 `CreatePaymentRequest.required` 里挂着 `user_id`，而 handler 是"body 或
+    `user_id` 请求属性"二选一（`PayHandlers.cc:215-227`），只带属性的请求合法且不带这个 body 成员 —— 该
+    schema 自己的描述也这么写。现在 `required` 只剩 `[order_no, amount]`，`user_id` 的下界与"缺两者回
+    401"的说明留在字段描述里，并点明 QR 那条路由是**必须**写在 body 里（`PayHandlers.cc:306`）；
+    `docs/api/pay-api-examples.md:51-52` 早已按"body 或属性"描述，契约与示例从此一致。
+  - `CHANGELOG.md` 的退款条目原先写成"未知状态一律走 `1502` + `REFUND_FAIL`"，与同段后半句"只有渠道
+    明确拒绝才报 `REFUND_FAIL`"自相矛盾：`RefundService.cc:1476,1505` 的 `definitive` 只决定落库与
+    `data.status`，`1502`（HTTP 502，`PayHandlers.cc:32-33`）两种结局共用。现在改为按"整个分支都回
+    `1502`，区分只看 body 的 `data.status`"来描述。
+- **一个"文档里说可能为空"的指针被十处 handler 直接解引用（BLOCKER，本轮修）**：
+  `drogon::app().getPlugin<PayPlugin>()` 的返回值在 `4f028d0` 的 `PayHandlers.cc:257,420,463,605,646,743,784`
+  与 `CallbackHandlers.cc:27,180,249` 都是拿来就用（`plugin->paymentService()`）。而 `PayPlugin.h:20-23`
+  明写这个指针**可能为空**（静态库链接丢掉 DrObject 自注册符号时就是空，`ensureLinked()` 正是为此而
+  存在），配置里没有 `PayPlugin` 一项也得到同样的状态。在空指针上调成员函数不是"这一个请求丢了"，而是
+  handler 内访问违例 —— 上一轮那道 `guarded()` 屏障拦不到它，因为屏障只套在注册后的路由上，而崩溃发生在
+  进程里。更要紧的是 wechat 回调把这次解引用放在**校验之前**：形状守卫在它下面，在这个状态下正好是死代码。
+  现在九处统一"先判存在再取用"，缺失时由 `src/handlers/PluginGuard.h` 的 `respondPluginUnavailable()`
+  回 1501/503（本契约已用于"我们自己的依赖缺失"的那个码），第十处（`4f028d0` 的 `CallbackHandlers.cc:249`）
+  只能在上一个提前 return 之后到达。wechat 侧把服务解析移到信封校验**之后**，因此不认识的通知仍按自身原因被拒；alipay
+  侧把"没有插件"折进它已有的"没有验签客户端"分支 —— 对验签方而言是同一种故障，且永不确认收到。
+  `openapi.yaml` 给 notify 路由补上 503，共享的 `ServiceUnavailable` 描述点名第三个触发条件。
+- **上一轮"本机 14 条全绿"是错的（本轮更正，并据此改口）**：`RequestBodyShapeTest.cc` 里两条会走到那次
+  解引用的用例 —— `PayHandlers_CreateQRPayment_OwnerAboveInt32Range_NotRefusedAsMistyped`（body 合法，
+  过了校验才碰得到插件）与 `CallbackHandlers_WechatNotify_EventTypeObject_Answers400InsteadOfThrowing`
+  （body 本该被形状守卫拒掉，但解引用排在校验之前）—— 在 `4f028d0` 上把进程打成 `0xC0000005`
+  （连跑两次都复现，同一目录、同一二进制；PowerShell `Start-Process` 拿到原始退出码）。
+  原因是 stdout 全缓冲、崩溃时不落盘，所以看起来像"没输出"而不是"崩了"；判据改用退出码而非日志文本才看清。
+  崩溃点正是上一条的空指针解引用：用例断言的是"该按自身原因回 400/40003，或者合法地继续往下"，而代码在能答
+  之前先死了 —— 按 memory 的口径，这次是**代码错、测试对**。修完后这两种进程状态都跑：无插件（在仓库根跑，
+  `./config.json` 打不开）与有插件
+  （在 exe 旁边跑，即 ctest 的 `WORKING_DIRECTORY`），各 18/18。
+  **踩到的坑记下来**：`tests/main.cc` 只在能从当前目录读到 `config.json` 时才注册 PayPlugin，所以
+  "插件不存在"这一族断言天生依赖启动目录；ctest 跑的那个状态里插件是**在**的，因此这类断言必须按状态分档
+  （见 `pluginMissing()`），否则会在 CI 上红。另外本机短时间内连排起多个 drogon_test 进程会偶发
+  `exit=127` + 0 字节输出的启动失败，不是用例失败 —— 判绿要按"有没有 `All tests passed` + 输出字节数"两条一起看。
+- **本轮仍在本机之外才能验的部分**：`QrPaymentBookingTest.cc` 与 `RefundQueryTest.cc` 的用例要连
+  PostgreSQL，本机那个角色连不上——直接跑是**挂住**而不是失败（探针跑了 4 分钟没有输出，只能杀掉），所以这两族
+  按 §四/§六 已写明的本机边界（§八 记过同一件事）只在 CI 的 linux/windows 两条腿上验；本机这一侧能给的证据只有编译加上一条 `guarded()` 屏障与
+  形状/插件守卫（18/18 × 两种进程状态）、`RouteRegistrationSmoke` 1/1、`HttpHeaders_*` 4/4、`HealthProbe_*` 3/3。
+

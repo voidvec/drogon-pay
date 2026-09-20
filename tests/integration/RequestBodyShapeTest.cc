@@ -14,12 +14,14 @@
 ///         fault was one leaked key away from taking the gateway down.
 ///
 ///         These cases call the controllers directly, like
-///         CallbackControllerTest.cc does: every body here but one is refused
-///         during validation, so no plugin, database or channel is reached. The
-///         exception is the int64-owner case, which asserts a legitimate tenant
-///         id gets *past* the guard -- it then goes wherever the service makes it
-///         go, and the assertion only cares that the refusal is not the one the
-///         32-bit gate used to answer.
+///         CallbackControllerTest.cc does: a body refused during validation
+///         reaches no plugin, database or channel at all. Two kinds of case go
+///         further. The int64-owner case asserts a legitimate tenant id gets
+///         *past* the guard rather than being refused as mistyped, and the
+///         plugin-absent cases at the bottom assert what a body that routes does
+///         and does not get in a process with no PayPlugin registered -- which is
+///         every process this test binary runs, so no database is reached there
+///         either.
 /// =============================================================================
 
 #include <drogon/drogon.h>
@@ -30,6 +32,7 @@
 #include <string>
 #include <utility>
 
+#include "drogon_pay/PayPlugin.h"
 #include "handlers/CallbackHandlers.h"
 #include "handlers/PayHandlers.h"
 
@@ -53,16 +56,11 @@ std::string toJsonText(const Json::Value &json)
 using Handler = std::function<
   void(const drogon::HttpRequestPtr &, std::function<void(const drogon::HttpResponsePtr &)> &&)>;
 
-// Runs one handler against a crafted body and reports how it got home. `fault`
+// Runs one handler against a crafted request and reports how it got home. `fault`
 // names the escape that would otherwise have killed the process: an exception
 // leaving the handler, or no answer at all.
-Answer offer(const Handler &handler, const Json::Value &body)
+Answer offerRequest(const Handler &handler, const drogon::HttpRequestPtr &req)
 {
-    auto req = drogon::HttpRequest::newHttpRequest();
-    req->setMethod(drogon::Post);
-    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-    req->setBody(toJsonText(body));
-
     auto answered = std::make_shared<std::promise<Answer>>();
     auto future = answered->get_future();
     try
@@ -97,6 +95,15 @@ Answer offer(const Handler &handler, const Json::Value &body)
         return answer;
     }
     return future.get();
+}
+
+Answer offer(const Handler &handler, const Json::Value &body)
+{
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    req->setBody(toJsonText(body));
+    return offerRequest(handler, req);
 }
 
 // Whether the handler refused the body the way a shape guard should: with an
@@ -264,6 +271,12 @@ DROGON_TEST(PayHandlers_CreateQRPayment_NegativeAmount_Refused)
 // BIGINT: the QR route read it through the 32-bit gate, so it refused such an
 // id as "must be an integer" (and would have truncated it had the gate been
 // looser than the read).
+// This is the one body above that survives validation, so it goes wherever the
+// service makes it go -- and every route resolves that service through the plugin
+// pointer, which `getPlugin<PayPlugin>()` is documented to leave null. The
+// `WithNoPlugin` cases at the bottom make that state explicit, because a handler
+// that calls a member on the null plugin does not lose the request but stops the
+// event loop -- and the two callback routes reach it with no credential.
 DROGON_TEST(PayHandlers_CreateQRPayment_OwnerAboveInt32Range_NotRefusedAsMistyped)
 {
     PayController controller;
@@ -346,4 +359,101 @@ DROGON_TEST(CallbackHandlers_WechatNotify_EventTypeObject_Answers400InsteadOfThr
     const auto answer = offer(handler, body);
     CHECK(answer.fault.empty());
     CHECK(refusedWith(answer, 40003));
+}
+
+// =============================================================================
+// A process with no PayPlugin registered
+// =============================================================================
+
+// Whether this process reached a handler that has no PayPlugin to resolve its
+// service from. `tests/main.cc` loads `./config.json`, and ctest runs the binary
+// beside that file, so the answer is about where the run started rather than about
+// the case -- which is why the state-specific half of each assertion below is taken
+// only in the state it describes. What every state must give is an answer: the
+// fault these cases guard is the process dying inside the handler, and a run that
+// reaches any assertion has already proved it did not.
+bool pluginMissing()
+{
+    return drogon::app().getPlugin<PayPlugin>() == nullptr;
+}
+
+// A body that routes past validation must never be *refused as mistyped*, and with
+// no plugin it is answered 1501 over 503 -- the code this contract already uses
+// for a missing dependency of ours. It used to be an access violation: one
+// anonymous POST, no credential, and the gateway is down.
+DROGON_TEST(PayHandlers_CreateQRPayment_WellFormedBodyWithNoPlugin_Answers1501NotCrash)
+{
+    PayController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.createQRPayment(req, std::move(cb)); };
+    const auto answer = offer(
+      handler, qrBody(Json::Value("9.99"), Json::Value(static_cast<Json::Int64>(3000000000LL)))
+    );
+    CHECK(answer.status != drogon::k400BadRequest);
+    if (pluginMissing())
+    {
+        CHECK(answer.answered);
+        CHECK(answer.body.get("code", -1).asInt() == 1501);
+    }
+}
+
+DROGON_TEST(PayHandlers_CreatePayment_WellFormedBodyWithNoPlugin_Answers1501NotCrash)
+{
+    PayController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.createPayment(req, std::move(cb)); };
+    const auto answer = offer(handler, payBody(Json::Value("1.00"), Json::Value(7)));
+    CHECK(answer.status != drogon::k400BadRequest);
+    if (pluginMissing())
+    {
+        CHECK(answer.answered);
+        CHECK(answer.body.get("code", -1).asInt() == 1501);
+    }
+}
+
+// The order matters as much as the answer: a body this endpoint cannot route is
+// refused for its own reason whatever the process looks like (the 40003 case above
+// proves it), and only a well-formed one learns that this process has no service
+// to hand it to.
+DROGON_TEST(CallbackHandlers_WechatNotify_RoutableBodyWithNoPlugin_Answers1501NotCrash)
+{
+    WechatCallbackController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.notify(req, std::move(cb)); };
+    Json::Value body;
+    body["id"] = "notify_shape_" + drogon::utils::getUuid();
+    body["event_type"] = "TRANSACTION.SUCCESS";
+    const auto answer = offer(handler, body);
+    CHECK(answer.status != drogon::k400BadRequest);
+    if (pluginMissing())
+    {
+        CHECK(answer.answered);
+        CHECK(answer.body.get("code", -1).asInt() == 1501);
+    }
+}
+
+// Alipay's callback route answers in Alipay's own vocabulary, and the branch it
+// already had for "no client to verify with" is the right one for a missing
+// plugin too: never ack, never process unverified. It used to be unreachable,
+// because the null plugin was dereferenced one line above it.
+DROGON_TEST(CallbackHandlers_AlipayNotify_NoVerifiableClient_AnswersFailNotCrash)
+{
+    AlipayCallbackController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.notify(req, std::move(cb)); };
+    auto req = drogon::HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Post);
+    req->setBody("out_trade_no=trd_shape&trade_status=TRADE_SUCCESS&sign=deadbeef");
+    const auto answer = offerRequest(handler, req);
+    CHECK(answer.fault.empty());
+    CHECK(answer.answered);
+    CHECK(answer.body.get("code", "").asString() == "FAIL");
 }

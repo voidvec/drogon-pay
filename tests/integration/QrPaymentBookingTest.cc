@@ -398,6 +398,79 @@ DROGON_TEST(PayPlugin_QrBooking_UncertainOutcomeKeepsTheAttemptInFlight)
     CHECK(orderStatusOf(client, orderNo) == "CREATED");
 }
 
+// The third flavour of an uncertain answer, and the one the code used to read
+// backwards: a 2xx body that names no payable code. WeChat may have created the
+// transaction behind a response an intermediary rewrote, so this attempt has to
+// stay in flight like the 5xx above -- and it is reported as a failure either way,
+// because there is no code to hand back.
+DROGON_TEST(PayPlugin_QrBooking_AnswerWithoutCodeUrlKeepsTheAttemptInFlight)
+{
+    auto client = makeTestClient();
+    REQUIRE(client != nullptr);
+    ensureQrTables(client);
+
+    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    // An empty object is what a 200 with no `code_url`, no `prepay_id` and no
+    // `code` looks like from the channel's side.
+    auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
+
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    const auto answer = offerQrPayment(plugin.paymentService(), qrRequest(orderNo, "6.66"), stub);
+    CHECK(answer.error);
+    CHECK(answer.result.get("code", 0).asInt() == 500);
+    CHECK(answer.channelCalls == 1);
+
+    const auto payments = paymentsOf(client, orderNo);
+    REQUIRE(payments.size() == 1);
+    CHECK(payments.front().first == "INIT");
+    CHECK(orderStatusOf(client, orderNo) == "CREATED");
+}
+
+// The request hash covers the currency the booking actually uses, not the string
+// the caller typed: WeChat takes an upper-case ISO code and the service
+// normalises what it offers to the channel, so `cny` and `CNY` are one and the
+// same order. Hashing the raw field answered the second caller with 1004.
+DROGON_TEST(PayPlugin_QrBooking_CurrencySpellingIsNotAnIdempotencyConflict)
+{
+    auto client = makeTestClient();
+    REQUIRE(client != nullptr);
+    ensureQrTables(client);
+
+    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
+    Json::Value accepted;
+    accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=case";
+    stub->succeedWith(accepted);
+
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    auto lowerCase = qrRequest(orderNo, "3.21");
+    lowerCase["currency"] = "cny";
+    const auto first = offerQrPayment(plugin.paymentService(), lowerCase, stub);
+    CHECK(!first.error);
+    REQUIRE(first.result.get("code", -1).asInt() == 0);
+    // What the channel was offered and what the order records are the normalised
+    // code, which is the reason the hash may use it too.
+    CHECK(stub->lastPayload()["amount"]["currency"].asString() == "CNY");
+    const auto booked =
+      client->execSqlSync("SELECT currency FROM pay_order WHERE order_no = $1", orderNo);
+    REQUIRE(!booked.empty());
+    CHECK(booked.front()["currency"].as<std::string>() == "CNY");
+
+    auto upperCase = qrRequest(orderNo, "3.21");
+    upperCase["currency"] = "CNY";
+    const auto second = offerQrPayment(plugin.paymentService(), upperCase, stub);
+    CHECK(!second.error);
+    CHECK(second.result.get("code", -1).asInt() == 0);
+    // A replay of the first answer, not a second transaction: the channel was
+    // asked exactly once across both calls.
+    CHECK(second.channelCalls == 0);
+    CHECK(second.result["data"]["code_url"].asString() == "weixin://wxpay/bizpayurl?pr=case");
+}
+
 // An attempt that carries money rules out a second code even when the order row
 // never moved: the status writes for order and payment are separate steps on this
 // path, so an order can still read CREATED under a payment that succeeded.

@@ -70,11 +70,19 @@ auto guarded(Handler handler)
               Json::Value body;
               body["code"] = 500;
               body["message"] = "Internal server error";
-              onceCb(drogon::HttpResponse::newHttpJsonResponse(body));
+              auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+              resp->setStatusCode(drogon::k500InternalServerError);
+              onceCb(resp);
           };
           try
           {
-              handler(req, std::move(onceCb));
+              // A copy, not `std::move(onceCb)`: passing the original would move
+              // its target into the handler, and the fault path below then calls
+              // an empty std::function -- which throws out of the catch block and
+              // takes the process down, the exact failure this barrier exists to
+              // stop. Both copies share `answered`, so the once-only guarantee
+              // holds whichever one the handler reaches.
+              handler(req, std::function<void(const drogon::HttpResponsePtr &)>(onceCb));
           }
           catch (const std::exception &e)
           {

@@ -595,6 +595,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CallbackAck'
+        "503":
+          description: >-
+            This process has no PayPlugin registered, so no service can take the
+            notification (business code 1501). Never an acknowledgement: WeChat
+            retries, and the next delivery is handled by a process that can book it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackAck'
 
   /api/pay/notify/alipay:
     post:
@@ -903,7 +912,10 @@ components:
     ServiceUnavailable:
       description: |
         Either the auth layer has no keys configured (`api key not configured`,
-        plain text) or the channel client is not ready (business code 1501).
+        plain text), the channel client is not ready, or this process has no
+        PayPlugin registered at all -- every route resolves its service through
+        `getPlugin<PayPlugin>()`, which a static-library link can leave null. All
+        three carry business code 1501.
       content:
         text/plain:
           schema:
@@ -1050,7 +1062,7 @@ components:
 
     CreatePaymentRequest:
       type: object
-      required: [order_no, amount, user_id]
+      required: [order_no, amount]
       properties:
         order_no:
           type: string
@@ -1078,10 +1090,14 @@ components:
           format: int64
           minimum: 1
           description: |
-            Owner of the order, stored verbatim on `pay_order.user_id`. A request
-            that supplies neither this field nor the `user_id` request attribute
-            is answered 401 rather than booked under owner 0 -- the value
-            `GET /api/pay/orders` treats as "no owner filter".
+            Owner of the order, stored verbatim on `pay_order.user_id`. Required
+            in practice, but not by this schema: the handler reads it from the
+            body *or* from a `user_id` request attribute an auth layer may set,
+            so the body member is what a plain API-key caller must send. A
+            request that supplies neither is answered 401 rather than booked
+            under owner 0 -- the value `GET /api/pay/orders` treats as "no owner
+            filter". Unlike `/api/qrpay/create`, which always names this field
+            in the body.
         scene_info:
           type: object
           description: Channel-specific scene payload, forwarded verbatim.

@@ -1808,6 +1808,149 @@ DROGON_TEST(PayPlugin_Refund_DefaultPaymentNo)
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 }
 
+// A QR order keeps one payment row per precreate attempt, so an attempt whose
+// channel answer never arrived can still sit at INIT beside a later attempt the
+// notification paid. Selecting "the newest row" by creation time then refused the
+// refund of money that had genuinely been taken (1409 "payment not successful"),
+// and the paid attempt stayed unrefunded. The lookup has to prefer the attempt
+// that holds the money; the refund row names the payment it was raised against,
+// which is what this case reads back.
+DROGON_TEST(PayPlugin_Refund_SettledAttemptIsPickedOverANewerOpenOne)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    const auto &db = root["db_clients"][0];
+    auto client = drogon::orm::DbClient::newPgClient(buildPgConnInfo(db), 1);
+    REQUIRE(client != nullptr);
+
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_order ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "order_no VARCHAR(64) UNIQUE NOT NULL,"
+      "user_id BIGINT NOT NULL,"
+      "amount VARCHAR(32) NOT NULL,"
+      "currency VARCHAR(8) NOT NULL DEFAULT 'CNY',"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "channel VARCHAR(32) NOT NULL DEFAULT 'alipay',"
+      "title VARCHAR(512),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_payment ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "payment_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "channel_trade_no VARCHAR(64),"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_refund ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "refund_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "payment_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "channel_refund_no VARCHAR(64),"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string settledNo = "pay_" + drogon::utils::getUuid();
+    const std::string zombieNo = "pay_" + drogon::utils::getUuid();
+    const std::string amount = "9.99";
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(orderNo);
+    order.setUserId(30011);
+    order.setAmount(amount);
+    order.setCurrency("CNY");
+    order.setStatus("PAID");
+    order.setChannel("wechat");
+    order.setTitle("Refund picks the settled attempt");
+    order.setCreatedAt(trantor::Date::now().after(-600.0));
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    using PayPayment = drogon_model::pay_test::PayPayment;
+    drogon::orm::Mapper<PayPayment> paymentMapper(client);
+    // The two rows differ only by status and by time: the older one holds the
+    // money, the newer one is the attempt that never got an answer.
+    PayPayment paid;
+    paid.setOrderNo(orderNo);
+    paid.setPaymentNo(settledNo);
+    paid.setStatus("SUCCESS");
+    paid.setAmount(amount);
+    paid.setCreatedAt(trantor::Date::now().after(-300.0));
+    paid.setUpdatedAt(trantor::Date::now().after(-300.0));
+    paymentMapper.insert(paid);
+
+    PayPayment zombie;
+    zombie.setOrderNo(orderNo);
+    zombie.setPaymentNo(zombieNo);
+    zombie.setStatus("INIT");
+    zombie.setAmount(amount);
+    zombie.setCreatedAt(trantor::Date::now());
+    zombie.setUpdatedAt(trantor::Date::now());
+    paymentMapper.insert(zombie);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, nullptr, client);
+
+    CreateRefundRequest request;
+    request.orderNo = orderNo;
+    request.amount = amount;
+
+    std::promise<Json::Value> resultPromise;
+    std::promise<std::error_code> errorPromise;
+    plugin.refundService()->createRefund(
+      request,
+      "",
+      [&resultPromise, &errorPromise](const Json::Value &result, const std::error_code &error) {
+          resultPromise.set_value(result);
+          errorPromise.set_value(error);
+      }
+    );
+
+    auto resultFuture = resultPromise.get_future();
+    auto errorFuture = errorPromise.get_future();
+    REQUIRE(resultFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(errorFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto result = resultFuture.get();
+    const auto error = errorFuture.get();
+
+    // The refund reached the channel and failed there for want of configuration (the
+    // sibling case above documents that answer); what this case pins is that it was
+    // not refused at the payment row, which is the 1409 the old selection answered.
+    CHECK(error.value() != 1409);
+    CHECK(result.get("code", 0).asInt() != 1409);
+
+    const auto refunds =
+      client->execSqlSync("SELECT payment_no, status FROM pay_refund WHERE order_no = $1", orderNo);
+    REQUIRE(!refunds.empty());
+    CHECK(refunds.front()["payment_no"].as<std::string>() == settledNo);
+
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+}
+
 DROGON_TEST(PayPlugin_Refund_OrderNotPaid)
 {
     Json::Value root;

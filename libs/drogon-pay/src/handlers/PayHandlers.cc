@@ -2,6 +2,7 @@
 #include "drogon_pay/PayPlugin.h"
 #include "../services/PaymentService.h"
 #include "../services/RefundService.h"
+#include "PluginGuard.h"
 #include <drogon/HttpAppFramework.h>
 #include <drogon/orm/DbClient.h>
 #include <json/json.h>
@@ -255,7 +256,12 @@ void PayController::createPayment(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        respondPluginUnavailable(callback, "Payment service");
+        return;
+    }
 
     paymentService->createPayment(
       request, idempotencyKey, [callback](const Json::Value &result, const std::error_code &error) {
@@ -418,7 +424,12 @@ void PayController::createQRPayment(
 
     // Get service and call QR payment
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        respondPluginUnavailable(callback, "Payment service");
+        return;
+    }
 
     paymentService->createQRPayment(
       request, [callback](const Json::Value &result, const std::error_code &error) {
@@ -461,7 +472,12 @@ void PayController::queryOrder(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        respondPluginUnavailable(callback, "Payment service");
+        return;
+    }
 
     paymentService->queryOrder(
       orderNo, [callback, orderNo](const Json::Value &result, const std::error_code &error) {
@@ -603,7 +619,12 @@ void PayController::refund(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto refundService = plugin->refundService();
+    auto refundService = plugin ? plugin->refundService() : nullptr;
+    if (!refundService)
+    {
+        respondPluginUnavailable(callback, "Refund service");
+        return;
+    }
 
     refundService->createRefund(
       request, idempotencyKey, [callback](const Json::Value &result, const std::error_code &error) {
@@ -644,7 +665,12 @@ void PayController::queryRefund(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto refundService = plugin->refundService();
+    auto refundService = plugin ? plugin->refundService() : nullptr;
+    if (!refundService)
+    {
+        respondPluginUnavailable(callback, "Refund service");
+        return;
+    }
 
     refundService
       ->queryRefund(refundNo, [callback](const Json::Value &result, const std::error_code &error) {
@@ -741,7 +767,12 @@ void PayController::queryOrderList(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        respondPluginUnavailable(callback, "Payment service");
+        return;
+    }
 
     paymentService->queryOrderList(
       status,
@@ -782,7 +813,12 @@ void PayController::reconcileSummary(
 
     // Get service and call
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        respondPluginUnavailable(callback, "Payment service");
+        return;
+    }
 
     paymentService
       ->reconcileSummary(date, [callback](const Json::Value &result, const std::error_code &error) {
