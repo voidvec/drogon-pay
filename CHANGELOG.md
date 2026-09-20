@@ -166,6 +166,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already carry that section. Six `# Version: 1.0.0` comment lines in
   `examples/pay-server/deploy/` were deleted as the drift they had already
   caused.
+- **Release gate waits for the pipeline that certifies the tag** (`ci-gate` job
+  in `.github/workflows/release.yml`, between `version-check` and `sdk-smoke`).
+  Branch protection cannot cover a tag: the ruleset's required contexts gate
+  merges, and `git tag v1.1.0 <commit> && git push --tags` is not a merge, so any
+  commit could be released without ever having gone through the pipeline —
+  v1.0.0 was, with `windows-build-and-test` reported as `failure` on that very
+  commit. The job resolves the tag to its commit (the API dereferences
+  annotated tags, whose own object SHA carries no check runs), refuses anything
+  that `compare/master...<sha>` does not place inside master's history — which
+  also excludes a tag on an unmerged branch commit, whose PR checks may look
+  green — and then polls `commits/<sha>/check-runs` for the five contexts the
+  merge pipeline reports (three `* / build-test`, two `* / sdk-smoke`, FAST
+  excluded because MAIN `needs` it). A non-success conclusion fails immediately,
+  a missing or still-running check polls for 25 minutes and then fails with the
+  names that never arrived, and every run sharing a name must be successful so a
+  re-run's stale conclusion cannot certify a release. The tag name is
+  shape-checked against semver before it reaches an API path. `sdk-smoke` still
+  re-runs afterwards: "green on master" and "installs the way a consumer builds
+  it" are claims about different artifacts.
 
 ### Changed
 

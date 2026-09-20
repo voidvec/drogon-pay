@@ -95,8 +95,15 @@ git push origin v1.1.0
 | Job | 内容 |
 |-----|------|
 | `version-check` | 第 4 步的两条断言在 CI 里再跑一次（秒级，失败即中止，不浪费构建时间） |
+| `ci-gate` | 先确认 tag 指向的 commit **已在 `master` 历史上**，再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`），全绿才放行；有任一失败立刻中止，25 分钟仍未跑完则超时失败 |
 | `sdk-smoke` | Linux + Windows 各一次 `conan create` + `test_package`，复用 RELEASE 门同一份 `_sdk-smoke.yml` |
 | `publish` | 取 `CHANGELOG.md` 对应版本段作为正文，`gh release create` |
+
+`ci-gate` 存在的原因：ruleset 的必需检查只管**合并**，tag 不是被合并进来的，所以
+`git tag v1.1.0 <任意 commit>` 过去可以绕过整套门禁——`v1.0.0` 就是在
+`windows-build-and-test` 为 failure 的情况下发布出去的。因此 tag 必须打在 master 上
+CI 已跑完的 commit（正常顺序就是合并后直接在 master tip 打 tag）；如果刚合并就想打
+tag，`ci-gate` 会替你在原地等那一轮转完。
 
 **不要再手工 `gh release create`**：release 由流水线创建，手工创建会撞名失败。
 
@@ -137,6 +144,7 @@ git tag -d v1.1.0
 ## 发布检查清单
 
 - [ ] `master` 三平台 MAIN 门全绿
+- [ ] tag 打在 CI 已跑完的 master commit 上（`ci-gate` 会校验，不等它也要过它）
 - [ ] `check_version_sync.py --tag v<version>` 本地通过
 - [ ] `CHANGELOG.md` 已有该版本段且日期正确
 - [ ] release.yml 的 `sdk-smoke`（Linux + Windows）通过

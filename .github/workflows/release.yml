@@ -33,12 +33,133 @@ jobs:
       - name: Version sync + changelog section
         run: python3 scripts/check_version_sync.py --tag "$GITHUB_REF_NAME"
 
+  # A tag is the one ref no branch rule protects. The ruleset's required
+  # contexts gate merges into `master`, and a tag is never merged, so before
+  # this job existed `git tag v1.2.3 <any commit> && git push --tags` released
+  # whatever that commit happened to be — including one no test ever ran, or one
+  # that only ever lived on an abandoned branch. So: prove the tagged commit is
+  # on master's history, then wait for the five contexts the merge pipeline
+  # reports for it. sdk-smoke below still re-runs the consumer smoke; "green on
+  # master" and "installs the way a consumer builds it" are claims about
+  # different artifacts, and this job cannot substitute for either.
+  ci-gate:
+    needs: version-check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+
+    env:
+      # FAST is absent on purpose: MAIN and RELEASE both `need` it, so a green
+      # build-test already carries static-analysis and clang-tidy on the same
+      # commit. These are the contexts the pipeline really reports, suffix
+      # included — the bare names went away with the legacy per-platform
+      # workflows, and an `unreported` line below is what a stale name looks
+      # like.
+      REQUIRED_CHECKS: |
+        linux-build-and-test / build-test
+        windows-build-and-test / build-test
+        macos-build / build-test
+        sdk-smoke-linux / sdk-smoke
+        sdk-smoke-windows / sdk-smoke
+      # The job gets five minutes more than the poll window, so a timeout
+      # reports which check is still missing instead of a bare cancellation.
+      DEADLINE_MINUTES: 25
+      POLL_SECONDS: 30
+
+    steps:
+      - name: Wait for the merge pipeline on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # TAG_NAME is an event-field value that ends up inside an API path, so
+          # it gets a shape check before it is used: a version tag is
+          # `v` + dot-separated numerics with an optional prerelease/build suffix
+          # (semver), and nothing that could navigate the path elsewhere.
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::refusing unexpected tag name: $TAG_NAME" >&2
+            exit 1
+          fi
+
+          # The commits endpoint dereferences annotated tags, which is what this
+          # needs: a tag object's own SHA carries no check runs.
+          SHA=$(gh api "repos/$REPOSITORY/commits/$TAG_NAME" --jq .sha)
+          echo "tag $TAG_NAME -> commit $SHA"
+
+          # compare/<base>...<sha> answers "behind" or "identical" exactly when
+          # <sha> is already contained in the base branch, which is the
+          # containment test the API offers. `master` is hardcoded because the
+          # ruleset and the trunk are named that in this repository; a default
+          # branch rename would make this fail loudly, not release unmerged
+          # commits.
+          case "$(gh api "repos/$REPOSITORY/compare/master...$SHA" --jq .status)" in
+            behind|identical) ;;
+            *)
+              echo "::error::commit $SHA is not on master: a release must ship a merged commit" >&2
+              exit 1
+              ;;
+          esac
+
+          deadline=$(( $(date +%s) + DEADLINE_MINUTES * 60 ))
+          while :; do
+            runs=$(gh api "repos/$REPOSITORY/commits/$SHA/check-runs" --paginate \
+                     --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"' \
+                   || { echo "could not read check runs for $SHA" >&2; exit 1; })
+
+            pending=''
+            failed=''
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              # All runs sharing the name must be completed and successful: a
+              # re-run leaves the old conclusion behind in the list, and the
+              # release must not be certified by the stale one.
+              state=$(printf '%s\n' "$runs" | awk -F'\t' -v want="$name" '
+                $1 == want {
+                  seen = 1
+                  if ($2 != "completed")    incomplete = 1
+                  else if ($3 != "success") bad = 1
+                }
+                END {
+                  if (!seen)           print "unreported"
+                  else if (incomplete) print "pending"
+                  else if (bad)        print "failed"
+                  else                 print "green"
+                }')
+              case "$state" in
+                green) ;;
+                pending)    pending+=$'\n  '"$name: still running" ;;
+                unreported) pending+=$'\n  '"$name: no check run on this commit" ;;
+                failed)     failed+=$'\n  '"$name: did not succeed" ;;
+              esac
+            done <<< "$REQUIRED_CHECKS"
+
+            if [ -n "$failed" ]; then
+              echo "::error::the merge pipeline is red on $SHA:$failed" >&2
+              exit 1
+            fi
+            if [ -z "$pending" ]; then
+              echo "Merge pipeline is green on $SHA; releasing."
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::gave up after ${DEADLINE_MINUTES}m waiting for:$pending" >&2
+              exit 1
+            fi
+            echo "Waiting on:$pending"
+            sleep "$POLL_SECONDS"
+          done
+
   # Consumer-view validation, from the same reusable workflow the RELEASE gate
   # of ci.yml uses — the release path is not a second, weaker definition of
   # "this package works" (the old copy here only ran Windows-only and never
   # exercised the plugin routes).
   sdk-smoke:
-    needs: version-check
+    needs: [version-check, ci-gate]
     strategy:
       fail-fast: false
       matrix:
