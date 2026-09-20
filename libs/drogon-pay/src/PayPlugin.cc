@@ -11,8 +11,11 @@
 #include "handlers/PayMetricsHandlers.h"
 #include "handlers/AuthCheck.h"
 #include <drogon/drogon.h>
+#include <atomic>
 #include <future>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 PayPlugin::PayPlugin() = default;
 PayPlugin::~PayPlugin() = default;
@@ -38,6 +41,61 @@ const std::map<std::string, std::string> kLegacyKeyMigration = {
   {"wechat_pay", "channels.wechat"},
   {"alipay_sandbox", "channels.alipay"},
 };
+
+// Exception barrier for every registered route. A handler that lets an exception
+// escape does not merely lose that request: trantor catches it in
+// `EventLoop::loop()`, stops the loop and rethrows it once the loop unwinds,
+// which takes `app().run()` -- and with it the process -- down. Before this
+// barrier a single anonymous request with a mistyped JSON body (`{"amount":{}}`,
+// which jsoncpp converts by throwing) killed the whole gateway. The barrier
+// answers 500 only when the handler threw before responding, so an asynchronous
+// completion that arrives later is never answered twice.
+template <typename Handler>
+auto guarded(Handler handler)
+{
+    return
+      [handler = std::move(handler)](
+        const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb
+      ) {
+          auto answered = std::make_shared<std::atomic<bool>>(false);
+          auto onceCb = [answered, cb = std::move(cb)](const drogon::HttpResponsePtr &resp) {
+              bool expected = false;
+              if (answered->compare_exchange_strong(expected, true))
+              {
+                  cb(resp);
+              }
+          };
+          const auto fault = [&onceCb](const std::string &reason) {
+              LOG_ERROR << "[PayPlugin] Handler faulted before responding: " << reason;
+              Json::Value body;
+              body["code"] = 500;
+              body["message"] = "Internal server error";
+              onceCb(drogon::HttpResponse::newHttpJsonResponse(body));
+          };
+          try
+          {
+              handler(req, std::move(onceCb));
+          }
+          catch (const std::exception &e)
+          {
+              if (!answered->load())
+              {
+                  fault(e.what());
+                  return;
+              }
+              LOG_ERROR << "[PayPlugin] Handler threw after responding: " << e.what();
+          }
+          catch (...)
+          {
+              if (!answered->load())
+              {
+                  fault("unknown exception type");
+                  return;
+              }
+              LOG_ERROR << "[PayPlugin] Handler threw after responding (unknown type)";
+          }
+      };
+}
 }  // namespace
 
 void PayPlugin::registerBuiltinChannels(const Json::Value &channelsConfig)
@@ -268,23 +326,23 @@ void PayPlugin::registerHttpHandlers()
     // Wraps a handler member function with the checkAuth() precheck that
     // replaced the old PayAuthFilter (null result = authorized).
     const auto authed = [this](auto controller, auto memFn) {
-        return [this, controller, memFn](
-                 const drogon::HttpRequestPtr &req,
-                 std::function<void(const drogon::HttpResponsePtr &)> &&cb
-               ) {
+        return guarded([this, controller, memFn](
+                         const drogon::HttpRequestPtr &req,
+                         std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                       ) {
             if (auto resp = drogon_pay::checkAuth(req, basePath_))
             {
                 cb(resp);
                 return;
             }
             ((*controller).*memFn)(req, std::move(cb));
-        };
+        });
     };
     const auto open = [](auto controller, auto memFn) {
-        return [controller, memFn](
-                 const drogon::HttpRequestPtr &req,
-                 std::function<void(const drogon::HttpResponsePtr &)> &&cb
-               ) { ((*controller).*memFn)(req, std::move(cb)); };
+        return guarded([controller, memFn](
+                         const drogon::HttpRequestPtr &req,
+                         std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                       ) { ((*controller).*memFn)(req, std::move(cb)); });
     };
 
     auto &app = drogon::app();

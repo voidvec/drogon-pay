@@ -63,6 +63,24 @@ void WechatCallbackController::notify(
         return;
     }
 
+    if (!bodyJson["event_type"].isString())
+    {
+        // `asString()` on a member of another type throws, and an exception
+        // escaping a handler is rethrown out of the event loop by trantor, which
+        // stops the loop and unwinds `app().run()`. This endpoint is unsigned
+        // until the service verifies the headers, so the body is attacker-chosen:
+        // `{"event_type":{}` POSTed to the notify URL would have taken the whole
+        // gateway down with it.
+        LOG_WARN << "[WECHAT_CALLBACK] event_type is not a string";
+        Json::Value response;
+        response["code"] = 40003;
+        response["message"] = "Missing event_type";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+        resp->setStatusCode(drogon::k400BadRequest);
+        callback(resp);
+        return;
+    }
+
     eventType = bodyJson["event_type"].asString();
 
     // Reject unknown event types that are neither TRANSACTION nor REFUND.

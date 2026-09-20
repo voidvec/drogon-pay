@@ -231,6 +231,61 @@ std::string channelResultError(const std::string &channel, const Json::Value &re
     // argument is the only signal available for them.
     return {};
 }
+
+// WeChat V3 takes an ISO-4217 three-letter code, and the order row has to keep
+// exactly what was offered: the callback refuses to settle when
+// `pay_order.currency` differs from the currency in the notification, so a
+// malformed or case-shifted code here becomes money that cannot be booked.
+// Lowercase input is normalised, anything that is not three letters is refused.
+std::string normalizeQrCurrency(const std::string &currency, bool &valid)
+{
+    valid = currency.size() == 3;
+    if (!valid)
+    {
+        return {};
+    }
+    std::string normalized;
+    for (const char c : currency)
+    {
+        if (c < 'A' || c > 'Z')
+        {
+            if (c < 'a' || c > 'z')
+            {
+                valid = false;
+                return {};
+            }
+            normalized.push_back(static_cast<char>(c - 'a' + 'A'));
+            continue;
+        }
+        normalized.push_back(c);
+    }
+    return normalized;
+}
+
+// Whether a QR attempt may be booked as closed. Only an answer that proves the
+// channel refused may close the row: a timeout, a transport fault, a body that
+// carries no code_url, or a 4xx answered by an intermediary prove nothing, and
+// closing those makes a transaction the user can still pay invisible to every
+// recovery filter -- the same rule `refundCertainlyDidNotHappen` applies to a
+// refund row. An attempt left at INIT is still settled by the callback.
+bool qrAttemptCertainlyNotCreated(const std::string &failure)
+{
+    // The channel's own error envelope, from either the body or `HTTP 4xx`.
+    if (failure.rfind("Alipay error: ", 0) == 0 || failure.rfind("WeChat error: ", 0) == 0)
+    {
+        return true;
+    }
+    const bool httpRefusal =
+      failure.rfind("HTTP 4", 0) == 0 && failure.find("no error envelope") == std::string::npos;
+    if (httpRefusal)
+    {
+        return true;
+    }
+    const bool wentThroughHttp = failure.rfind("HTTP ", 0) == 0 ||
+                                 failure.rfind("http request", 0) == 0 ||
+                                 failure == "invalid json response";
+    return !wentThroughHttp;
+}
 }  // namespace
 
 PaymentService::PaymentService(
@@ -1352,6 +1407,22 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
         return;
     }
 
+    // The owner is resolved once, here. Both reads this replaces defaulted to
+    // buyer "1" when the field was absent -- and that default was a *string*,
+    // which jsoncpp's `asInt64()` throws on, so an absent field faulted the
+    // booking while a present-but-zero one booked the order under the id that
+    // `queryOrderList` reads as "no owner filter".
+    const Json::Value userIdValue = request.get("user_id", Json::Value());
+    const int64_t userId = userIdValue.isInt64() ? userIdValue.asInt64() : 0;
+    if (userId <= 0)
+    {
+        Json::Value response;
+        response["code"] = 400;
+        response["message"] = "Missing or invalid user_id";
+        sharedCb->call(response, pay::makePayError(400, "missing user_id"));
+        return;
+    }
+
     // Idempotency: derive key from order_no + channel (same order can be re-requested).
     // (A1-4 fix: add idempotency protection to QR payment)
     std::string idempotencyKey =
@@ -1362,6 +1433,14 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
     reqHashObj["amount"] = amount;
     reqHashObj["channel"] = channel;
     reqHashObj["subject"] = subject;
+    // The hash has to cover every field that changes the booking. It used to stop
+    // at `subject`, so a second caller naming another `user_id` -- or another
+    // currency, buyer or callback URL -- for the same order number hashed to the
+    // same request and was answered as a replay of the first caller's QR code.
+    reqHashObj["user_id"] = static_cast<Json::Int64>(userId);
+    reqHashObj["currency"] = request.get("currency", "").asString();
+    reqHashObj["notify_url"] = request.get("notify_url", "").asString();
+    reqHashObj["buyer_id"] = request.get("buyer_id", "").asString();
     std::string requestHash = drogon::utils::getSha256(pay::utils::toJsonString(reqHashObj));
 
     auto idempotencyService = idempotencyService_;
@@ -1381,6 +1460,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
        amount,
        channel,
        subject,
+       userId,
        request,
        sharedCb,
        idempotencyService,
@@ -1423,6 +1503,23 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // Alipay precreate takes `total_amount` in yuan, WeChat V3 native takes
           // `amount.total` in fen plus a `description`. Sending the Alipay field
           // names to WeChat made every WeChat QR order a 400 PARAM_ERROR.
+          // The order row has to record the currency the channel was actually
+          // offered: Alipay precreate only ever prices in CNY, while WeChat V3
+          // takes a currency field and the callback compares it against the order.
+          const std::string requestedCurrency =
+            channel == "wechat" ? request.get("currency", "CNY").asString() : std::string("CNY");
+          bool currencyValid = false;
+          const std::string currency = normalizeQrCurrency(requestedCurrency, currencyValid);
+          if (!currencyValid)
+          {
+              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
+              Json::Value response;
+              response["code"] = 400;
+              response["message"] = "Invalid currency: expected a three-letter ISO-4217 code";
+              sharedCb->call(response, pay::makePayError(400, "invalid currency"));
+              return;
+          }
+
           Json::Value payload;
           payload["out_trade_no"] = orderNo;
 
@@ -1441,10 +1538,25 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
               }
               payload["description"] = subject;
               payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
-              payload["amount"]["currency"] = request.get("currency", "CNY").asString();
+              payload["amount"]["currency"] = currency;
               const std::string notifyUrl = request.get("notify_url", "").asString();
               if (!notifyUrl.empty())
               {
+                  // A caller-supplied callback address is forwarded to WeChat, so it
+                  // goes through the same SSRF gate `/api/pay/create` applies (P1-3):
+                  // without it this endpoint became a way to make WeChat POST payment
+                  // notifications to an address inside the deployment network.
+                  std::string urlError;
+                  if (!pay::utils::validateNotifyUrl(notifyUrl, urlError))
+                  {
+                      idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {
+                      });
+                      Json::Value response;
+                      response["code"] = 400;
+                      response["message"] = urlError;
+                      sharedCb->call(response, pay::makePayError(400, urlError));
+                      return;
+                  }
                   payload["notify_url"] = notifyUrl;
               }
           }
@@ -1537,16 +1649,14 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // the client is handed the code: payment INIT -> PROCESSING with the
           // channel payload, then order CREATED -> PAYING.
           auto promoteQrRows = [this, respondQr](
-                                 PayPaymentModel payment,
-                                 PayOrderModel order,
+                                 const PayPaymentModel &payment,
+                                 const PayOrderModel &order,
                                  const Json::Value &result,
                                  const Json::Value &data
                                ) {
               Json::Value channelResponse;
               channelResponse["channel_response"] = result;
-              payment.setStatus("PROCESSING");
-              payment.setResponsePayload(pay::utils::toJsonString(channelResponse));
-              order.setStatus("PAYING");
+              const std::string responseText = pay::utils::toJsonString(channelResponse);
 
               // A row update that faults still answers with the code. Withholding a
               // payable QR would only lose money that is already offered, and
@@ -1561,60 +1671,124 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   respondQr(data);
               };
 
+              // Both writes name the columns they change and require the row to still
+              // be in the state this attempt left it. A full-row write from the copy
+              // taken before the channel answered would roll back whatever a fast
+              // notification or reconcile already booked: the payment back from
+              // SUCCESS to PROCESSING, the order back from PAID to PAYING.
               try
               {
                   Mapper<PayPaymentModel> paymentUpdater(dbClient_);
-                  paymentUpdater.update(
-                    payment,
-                    [this, order, answer](const size_t) {
+                  paymentUpdater.updateBy(
+                    {PayPaymentModel::Cols::_status, PayPaymentModel::Cols::_response_payload},
+                    [this, order, answer, payment](const size_t updated) {
+                        if (updated == 0)
+                        {
+                            answer(
+                              "payment " + payment.getValueOfPaymentNo() +
+                              " had already moved out of INIT/PROCESSING"
+                            );
+                            return;
+                        }
                         try
                         {
                             Mapper<PayOrderModel> orderUpdater(dbClient_);
-                            orderUpdater.update(
-                              order,
+                            orderUpdater.updateBy(
+                              {PayOrderModel::Cols::_status},
                               [answer](const size_t) { answer(""); },
-                              [answer](const DrogonDbException &e) { answer(e.base().what()); }
+                              [answer](const DrogonDbException &e) { answer(e.base().what()); },
+                              Criteria(
+                                PayOrderModel::Cols::_order_no,
+                                CompareOperator::EQ,
+                                order.getValueOfOrderNo()
+                              ) &&
+                                Criteria(
+                                  PayOrderModel::Cols::_status,
+                                  CompareOperator::In,
+                                  std::vector<std::string>{"CREATED", "PAYING"}
+                                ),
+                              "PAYING"
                             );
                         }
                         catch (const std::exception &e)
                         {
                             answer(e.what());
                         }
+                        catch (...)
+                        {
+                            answer("unknown error");
+                        }
                     },
-                    [answer](const DrogonDbException &e) { answer(e.base().what()); }
+                    [answer](const DrogonDbException &e) { answer(e.base().what()); },
+                    Criteria(
+                      PayPaymentModel::Cols::_payment_no,
+                      CompareOperator::EQ,
+                      payment.getValueOfPaymentNo()
+                    ) &&
+                      Criteria(
+                        PayPaymentModel::Cols::_status,
+                        CompareOperator::In,
+                        std::vector<std::string>{"INIT", "PROCESSING"}
+                      ),
+                    "PROCESSING",
+                    responseText
                   );
               }
               catch (const std::exception &e)
               {
                   answer(e.what());
               }
+              catch (...)
+              {
+                  answer("unknown error");
+              }
           };
 
-          // A channel refusal closes the payment row only. The order keeps its
-          // status because, with `pay_payment` allowing several rows per order, it
-          // may still carry an earlier attempt whose code is live; overwriting it
-          // with FAILED here would hide money that is genuinely payable.
-          auto markQrPaymentFailed = [this](PayPaymentModel payment, const std::string &message) {
+          // A refusal closes the payment row only, and only while the row is still
+          // the attempt this request booked. The order keeps its status because,
+          // with `pay_payment` allowing several rows per order, it may still carry
+          // an earlier attempt whose code is live; overwriting it with FAILED here
+          // would hide money that is genuinely payable.
+          auto markQrPaymentFailed = [this](
+                                       const PayPaymentModel &payment, const std::string &message
+                                     ) {
               Json::Value errJson;
               errJson["error"] = message;
-              payment.setStatus("FAIL");
-              payment.setResponsePayload(pay::utils::toJsonString(errJson));
+              const std::string responseText = pay::utils::toJsonString(errJson);
+              const std::string paymentNo = payment.getValueOfPaymentNo();
+              auto reportFault = [paymentNo](const std::string &detail) {
+                  LOG_WARN << "[PaymentService] Failed to record the QR payment failure for "
+                           << paymentNo << ": " << detail;
+              };
               try
               {
                   Mapper<PayPaymentModel> paymentUpdater(dbClient_);
-                  paymentUpdater.update(
-                    payment,
-                    [](const size_t) {},
-                    [](const DrogonDbException &e) {
-                        LOG_WARN << "[PaymentService] Failed to record the QR payment failure: "
-                                 << e.base().what();
-                    }
+                  paymentUpdater.updateBy(
+                    {PayPaymentModel::Cols::_status, PayPaymentModel::Cols::_response_payload},
+                    [reportFault, paymentNo](const size_t updated) {
+                        if (updated == 0)
+                        {
+                            reportFault("the row had already moved out of INIT/PROCESSING");
+                        }
+                    },
+                    [reportFault](const DrogonDbException &e) { reportFault(e.base().what()); },
+                    Criteria(PayPaymentModel::Cols::_payment_no, CompareOperator::EQ, paymentNo) &&
+                      Criteria(
+                        PayPaymentModel::Cols::_status,
+                        CompareOperator::In,
+                        std::vector<std::string>{"INIT", "PROCESSING"}
+                      ),
+                    "FAIL",
+                    responseText
                   );
               }
               catch (const std::exception &e)
               {
-                  LOG_WARN << "[PaymentService] Failed to record the QR payment failure: "
-                           << e.what();
+                  reportFault(e.what());
+              }
+              catch (...)
+              {
+                  reportFault("unknown error");
               }
           };
 
@@ -1636,7 +1810,21 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                       if (!error.empty())
                       {
                           const std::string message = "QR payment creation failed: " + error;
-                          markQrPaymentFailed(payment, message);
+                          if (qrAttemptCertainlyNotCreated(error))
+                          {
+                              markQrPaymentFailed(payment, message);
+                          }
+                          else
+                          {
+                              // The channel may still have created the transaction.
+                              // Closing the row would hide a code the user can pay
+                              // from every recovery filter, so an attempt with an
+                              // unknown outcome stays in flight for the notification
+                              // or reconciliation to settle.
+                              LOG_WARN << "[PaymentService] QR attempt "
+                                       << payment.getValueOfPaymentNo()
+                                       << " outcome unknown; leaving it in flight: " << error;
+                          }
                           failQr(500, message, Json::Value());
                           return;
                       }
@@ -1656,7 +1844,18 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                           {
                               extra["wechat_code"] = result.get("code", "").asString();
                           }
-                          markQrPaymentFailed(payment, resultError);
+                          if (qrAttemptCertainlyNotCreated(resultError))
+                          {
+                              markQrPaymentFailed(payment, resultError);
+                          }
+                          else
+                          {
+                              LOG_WARN << "[PaymentService] QR attempt "
+                                       << payment.getValueOfPaymentNo()
+                                       << " answered without a payable code; leaving it in "
+                                          "flight: "
+                                       << resultError;
+                          }
                           failQr(500, resultError, extra);
                           return;
                       }
@@ -1670,8 +1869,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                       }
                       else
                       {
-                          // Alipay precreate hands back the QR content plus its own
-                          // trade number.
+                          // Alipay precreate hands back the QR content plus the
+                          // merchant order number echoed as `out_trade_no`. It is
+                          // not Alipay's own number -- that is `trade_no`, which
+                          // only exists once the buyer has paid.
                           if (result.isMember("qr_code"))
                           {
                               data["qr_code"] = result["qr_code"].asString();
@@ -1723,31 +1924,96 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                       500, std::string("Failed to book the QR payment: ") + e.what(), Json::Value()
                     );
                 }
+                catch (...)
+                {
+                    failQr(500, "Failed to book the QR payment: unknown error", Json::Value());
+                }
             };
 
-          auto insertQrOrder =
-            [this, orderNo, amount, channel, subject, request, failQr, bookQrPayment]() {
+          auto insertQrOrder = [this,
+                                orderNo,
+                                amount,
+                                channel,
+                                currency,
+                                subject,
+                                userId,
+                                request,
+                                failQr,
+                                bookQrPayment]() {
+              try
+              {
+                  Mapper<PayOrderModel> orderMapper(dbClient_);
+                  PayOrderModel newOrder;
+                  newOrder.setOrderNo(orderNo);
+                  newOrder.setAmount(amount);
+                  newOrder.setCurrency(currency);
+                  newOrder.setStatus("CREATED");
+                  newOrder.setChannel(channel);
+                  newOrder.setTitle(subject);
+                  newOrder.setUserId(userId);
+
+                  orderMapper.insert(
+                    newOrder,
+                    [bookQrPayment](const PayOrderModel &insertedOrder) {
+                        bookQrPayment(insertedOrder);
+                    },
+                    [failQr](const DrogonDbException &e) {
+                        failQr(
+                          500,
+                          "Failed to book the QR order: " + std::string(e.base().what()),
+                          Json::Value()
+                        );
+                    }
+                  );
+              }
+              catch (const std::exception &e)
+              {
+                  failQr(
+                    500, std::string("Failed to book the QR order: ") + e.what(), Json::Value()
+                  );
+              }
+              catch (...)
+              {
+                  failQr(500, "Failed to book the QR order: unknown error", Json::Value());
+              }
+          };
+
+          // A payment row that already carries money rules out a second code, no
+          // matter what the order row says: the order and payment are written by
+          // different code paths here, and an order left at CREATED by a faulted
+          // status write can sit under a settled attempt.
+          auto refuseIfAlreadySettled =
+            [this, orderNo, failQr, bookQrPayment](const PayOrderModel &existingOrder) {
                 try
                 {
-                    Mapper<PayOrderModel> orderMapper(dbClient_);
-                    PayOrderModel newOrder;
-                    newOrder.setOrderNo(orderNo);
-                    newOrder.setAmount(amount);
-                    newOrder.setCurrency("CNY");
-                    newOrder.setStatus("CREATED");
-                    newOrder.setChannel(channel);
-                    newOrder.setTitle(subject);
-                    newOrder.setUserId(request.get("user_id", "1").asInt64());
-
-                    orderMapper.insert(
-                      newOrder,
-                      [bookQrPayment](const PayOrderModel &insertedOrder) {
-                          bookQrPayment(insertedOrder);
+                    Mapper<PayPaymentModel> settledProbe(dbClient_);
+                    settledProbe.findBy(
+                      Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+                        Criteria(
+                          PayPaymentModel::Cols::_status,
+                          CompareOperator::In,
+                          std::vector<std::string>{"SUCCESS", "REFUNDED"}
+                        ),
+                      [orderNo, existingOrder, failQr, bookQrPayment](
+                        const std::vector<PayPaymentModel> &settledRows
+                      ) {
+                          if (!settledRows.empty())
+                          {
+                              failQr(
+                                400,
+                                "Order " + orderNo + " already has a settled payment (" +
+                                  settledRows.front().getValueOfStatus() + ")",
+                                Json::Value()
+                              );
+                              return;
+                          }
+                          bookQrPayment(existingOrder);
                       },
-                      [failQr](const DrogonDbException &e) {
+                      [orderNo, failQr](const DrogonDbException &e) {
                           failQr(
                             500,
-                            "Failed to book the QR order: " + std::string(e.base().what()),
+                            "Failed to read the QR order's payment attempts: " +
+                              std::string(e.base().what()),
                             Json::Value()
                           );
                       }
@@ -1756,7 +2022,17 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                 catch (const std::exception &e)
                 {
                     failQr(
-                      500, std::string("Failed to book the QR order: ") + e.what(), Json::Value()
+                      500,
+                      std::string("Failed to read the QR order's payment attempts: ") + e.what(),
+                      Json::Value()
+                    );
+                }
+                catch (...)
+                {
+                    failQr(
+                      500,
+                      "Failed to read the QR order's payment attempts: unknown error",
+                      Json::Value()
                     );
                 }
             };
@@ -1764,23 +2040,30 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // `pay_order.order_no` is UNIQUE, so a retry after a failure has to reuse
           // the row the first attempt left behind. Reuse is only safe while the
           // order still describes the same charge: money already taken must not be
-          // offered a second code, and an order whose amount or channel differs from
-          // this request would settle the wrong charge.
+          // offered a second code, and an order whose amount, currency, channel or
+          // owner differs from this request would settle -- or hand a code for --
+          // the wrong charge.
           try
           {
               Mapper<PayOrderModel> orderProbe(dbClient_);
               orderProbe.findBy(
                 Criteria(PayOrderModel::Cols::_order_no, CompareOperator::EQ, orderNo),
-                [orderNo, amount, channel, failQr, bookQrPayment, insertQrOrder](
-                  const std::vector<PayOrderModel> &rows
-                ) {
+                [orderNo,
+                 amount,
+                 channel,
+                 currency,
+                 userId,
+                 request,
+                 failQr,
+                 refuseIfAlreadySettled,
+                 insertQrOrder](const std::vector<PayOrderModel> &rows) {
                     if (rows.empty())
                     {
                         insertQrOrder();
                         return;
                     }
 
-                    const PayOrderModel &existing = rows.front();
+                    const PayOrderModel existing = rows.front();
                     const std::string existingStatus = existing.getValueOfStatus();
                     if (
                       existingStatus == "PAID" || existingStatus == "SUCCESS" ||
@@ -1795,11 +2078,32 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                         );
                         return;
                     }
-                    if (existing.getValueOfAmount() != amount)
+                    // Yuan strings are compared as money, not as text: "1.5" and
+                    // "1.50" are one charge, and refusing that reuse would strand a
+                    // paid order behind a formatting difference.
+                    int64_t bookedFen = 0;
+                    int64_t requestedFen = 0;
+                    const bool bookedAsFen =
+                      pay::utils::parseAmountToFen(existing.getValueOfAmount(), bookedFen);
+                    const bool requestedAsFen = pay::utils::parseAmountToFen(amount, requestedFen);
+                    const bool sameAmount = (bookedAsFen && requestedAsFen)
+                                              ? bookedFen == requestedFen
+                                              : existing.getValueOfAmount() == amount;
+                    if (!sameAmount)
                     {
                         failQr(
                           400,
                           "Order " + orderNo + " exists with amount " + existing.getValueOfAmount(),
+                          Json::Value()
+                        );
+                        return;
+                    }
+                    if (existing.getValueOfCurrency() != currency)
+                    {
+                        failQr(
+                          400,
+                          "Order " + orderNo + " exists with currency " +
+                            existing.getValueOfCurrency(),
                           Json::Value()
                         );
                         return;
@@ -1814,7 +2118,16 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                         );
                         return;
                     }
-                    bookQrPayment(existing);
+                    // The order number is caller-supplied, so without this an entry
+                    // that guesses another user's `order_no` would be offered a code
+                    // for that user's charge -- and its notification would then be
+                    // booked against the wrong owner.
+                    if (existing.getValueOfUserId() != userId)
+                    {
+                        failQr(400, "Order " + orderNo + " belongs to another user", Json::Value());
+                        return;
+                    }
+                    refuseIfAlreadySettled(existing);
                 },
                 [failQr](const DrogonDbException &e) {
                     failQr(
@@ -1828,6 +2141,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           catch (const std::exception &e)
           {
               failQr(500, std::string("Failed to read the QR order: ") + e.what(), Json::Value());
+          }
+          catch (...)
+          {
+              failQr(500, "Failed to read the QR order: unknown error", Json::Value());
           }
       }
     );
@@ -2117,8 +2434,16 @@ void PaymentService::syncOrderStatusFromWechat(
     try
     {
         Mapper<PayPaymentModel> paymentMapper(dbClient_);
+        // "Latest payment" means the latest attempt that can still carry money: a
+        // QR order keeps one row per precreate attempt and the newest may be one a
+        // refusal closed, which the status CAS below could never have moved anyway.
         auto paymentCriteria =
-          Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo);
+          Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+          Criteria(
+            PayPaymentModel::Cols::_status,
+            CompareOperator::In,
+            std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
+          );
 
         paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
           .limit(1)
@@ -2573,8 +2898,16 @@ void PaymentService::syncOrderStatusFromAlipay(
     try
     {
         Mapper<PayPaymentModel> paymentMapper(dbClient_);
+        // "Latest payment" means the latest attempt that can still carry money: a
+        // QR order keeps one row per precreate attempt and the newest may be one a
+        // refusal closed, which the status CAS below could never have moved anyway.
         auto paymentCriteria =
-          Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo);
+          Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+          Criteria(
+            PayPaymentModel::Cols::_status,
+            CompareOperator::In,
+            std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
+          );
 
         paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
           .limit(1)

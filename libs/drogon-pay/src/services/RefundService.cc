@@ -475,8 +475,19 @@ void RefundService::proceedRefund(
         try
         {
             Mapper<PayPaymentModel> paymentMapper(dbClient_);
+            // "The latest payment" has to mean the latest attempt that could carry
+            // money: a QR order keeps one row per precreate attempt, and the newest
+            // one can be a row the channel refused. Refunding that one asks WeChat
+            // to refund a transaction that never existed while the paid attempt
+            // stays unrefunded. The closed statuses (FAIL/CLOSED) are dropped so
+            // this picks the same row the callback settles.
             auto payCriteria =
-              Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo);
+              Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+              Criteria(
+                PayPaymentModel::Cols::_status,
+                CompareOperator::In,
+                std::vector<std::string>{"INIT", "PROCESSING", "SUCCESS", "REFUNDED"}
+              );
             paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
               .limit(1)
               .findBy(
