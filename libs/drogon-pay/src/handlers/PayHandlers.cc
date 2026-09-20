@@ -24,8 +24,6 @@ drogon::HttpStatusCode mapErrorToHttpStatus(int errorCode)
             return drogon::k400BadRequest;
         case 1409:  // Idempotency conflict
             return drogon::k409Conflict;
-        case 501:  // Recognised channel, capability this deployment withholds
-            return drogon::k501NotImplemented;
         case 1501:  // Channel client not ready (our dependency/config fault)
             return drogon::k503ServiceUnavailable;
         case 1502:  // Upstream channel returned a business failure (not our fault)

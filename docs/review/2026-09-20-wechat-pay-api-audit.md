@@ -121,9 +121,10 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 | 项 | 落地 | 证据 |
 |----|------|------|
 | C1 | `sendWechatRequest` 对非 2xx 生成 `HTTP <status>: <code> <message>`（detail 截断 200 字节），body 仍原样上抛 | `WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure`（打真实监听器取 404） |
-| C2 | native/jsapi 分支按契约要求**非空** `code_url` / `prepay_id`，缺失即失败 | 无直达用例（见第七节）：`CreatePaymentIntegrationTest.cc` 的两个微信用例在更早的 `missing appid/mchid/notify_url` 处就返回 |
-| C3 | `createQRPayment` 自建按通道 payload（与 `createPayment` 同形、各自独立，未抽公共函数） | 微信分支现被 501 闸门挡住，见 C5 |
+| C2 | native/jsapi 分支按契约要求**非空** `code_url` / `prepay_id`，缺失即失败 | 部分覆盖：服务层把 `code_url` 交回调用方由 `PayPlugin_QrBooking_WechatQrCreatesAPaymentRow` 证明；`channelResultError` 自身的"缺字段/字段为空"分支仍无直达用例（`CreatePaymentIntegrationTest.cc` 的两个微信用例在更早的 `missing appid/mchid/notify_url` 处就返回，见第七节） |
+| C3 | `createQRPayment` 自建按通道 payload（与 `createPayment` 同形、各自独立，未抽公共函数） | 微信分支已随 C5 放开；`PayPlugin_QrBooking_WechatQrCreatesAPaymentRow` 断言通道收到 `amount.total=999`（分）与 `out_trade_no` |
 | C4 | 退款响应 `status` 白名单（`SUCCESS`/`CLOSED`/`PROCESSING`），否则走 `updateRefundWithError`；复审发现 `CLOSED` 仍漏进成功路径，见第六节 | `RefundQueryTest.cc` |
+| C5 | QR 入口改为**先落库再问通道**：`pay_order`(`CREATED`) + `pay_payment`(`INIT`，带请求 payload) → 通道受理后晋升 `PAYING`/`PROCESSING`（含通道响应），通道拒绝只关闭该条 payment(`FAIL`)；`order_no` 唯一，重试复用订单并追加 payment；已结算/金额或通道不符时以 400 拒绝复用 | `PayPlugin_QrBooking_WechatQrCreatesAPaymentRow`、`PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry`；多尝试订单连带打破的重复通知审计分支见第八节 |
 | H1 | `setPlatformCert` 安装前强制：X509 可解析 + 有效期覆盖当前 + 证书内序列号与登记者一致 + （可选）链路到 `platform_ca_cert_path` | `WechatPayClient_SetPlatformCert_*` 四个用例 |
 | H2 | 没有新增 `platform_cert_serial` 配置：静态兜底证书改用**它自身**的序列号与通知头比对，配置无法与证书漂移；未知序列号触发自节流下载并按失败返回；缓存两侧统一走 `normalizeSerialHex` | `WechatPayClient_VerifyCallback_*`、`SetPlatformCert_BindsCacheKeyToCertificateSerial` |
 | H3 | 路径段百分号编码，抽到 `pay::utils::urlEncodePathSegment`（可单测），签名与请求共用编码后的串 | `PayUtils_UrlEncodePathSegment` |
@@ -138,10 +139,14 @@ CAS 式状态迁移 + 幂等表预留。这条路径未发现可伪造入账的�
 
 评审发现的**本轮修复自身**的问题，已一并修掉：
 
-- **C5（新增，未修）**：`/api/qrpay/create` 只插 `pay_order`，从不写 `pay_payment`（两个通道都如此，属既有缺口）。
+- **C5（新增，本轮已修）**：`/api/qrpay/create` 只插 `pay_order`，从不写 `pay_payment`（两个通道都如此，属既有缺口）。
   C3 把微信扫码的 payload 修对之后，这条路径的净效果从"必然 400"变成"能建真交易但无法入账"——
-  回调找不到 payment 就回 FAIL，钱收了订单悬在 PAYING。因此本轮在 QR 入口对微信加了 501 闸门（资金安全优先），
-  payload 构造保留待 C5 的入账改动落地后放开。补 `pay_payment` 落库是下一轮的工作。
+  回调找不到 payment 就回 FAIL，钱收了订单悬在 PAYING。第一轮的做法是在 QR 入口对微信加 501 闸门（资金安全优先），
+  本轮把入账补齐后闸门已删除：订单与 payment 在问通道之前落库，成功后晋升 `PAYING`/`PROCESSING`，
+  通道拒绝只关闭该条 payment。回调侧无需改动即可结算——`CallbackService` 按 `order_no` 找 payment，
+  只跳过 `SUCCESS`/`REFUNDED`，且 native 建单不带 `channel_trade_no`，`transaction_id` 比对对空值天然放行。
+  顺带修掉两个由此暴露的问题：`pay_order.order_no` 唯一导致"失败后重试"必然撞库（现按订单复用 + 追加 payment），
+  以及该端点在 `dbClient_` 缺失时会在 Mapper 里崩溃（现回 1003）。
 - **M1 修过头**：`payer_total <= 0` 一律拒绝会杀掉全额代金券（`payer_total` 恰为 0）以及一切合法的低于 `total` 的差额，
   方向反了。改为只拒绝 `payer_total > amount.total`（不可能值），差额仍 `LOG_WARN`；并补了一条正向对照用例。
 - **C4 收口不完整**：`CLOSED`/`ABNORMAL` 经 `mapRefundStatus` 得到 `REFUND_FAIL` 后仍走 `updateRefundWithSuccess`
@@ -176,13 +181,46 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   5xx、无信封的 4xx（中间设备替我们回答）、超时、传输失败、2xx 无状态一律保持 `REFUNDING`。
 - **`/api/qrpay/create` 的状态码对不上是系统性的**：`mapErrorToHttpStatus` 读的是 `error.value()`，
   而服务层不少地方传的是 `std::errc::*`（`EINVAL`=22、`EIO`=5），因此 body 里的 1001/400/500/1005
-  全落到 HTTP 500。本轮只把微信 QR 路径上的三处改成 `makePayError(400|501)`，并在映射表补 400/501；
+  全落到 HTTP 500。第一轮把微信 QR 路径上的三处改成 `makePayError(400|501)` 并在映射表补 400/501；
+  C5 落地后 501 不再由任何路径产生，映射表里的 501 分支与 `openapi.yaml` 的 501 响应已一并删除，
+  QR 路径统一走 `failQr(code, message, extra)`：4xx 由业务码决定状态，5xx 仍回 HTTP 500。
   其余通道/查询路径**未改**，`openapi.yaml` 的总述已改成如实描述这一限制。把服务层错误统一成业务码
   是下一轮的独立改动。
 - **第五节的证据列有三处夸大，已就地更正**：C2（`code_url` 契约没有直达用例——两个微信建单用例在更早的
   `missing appid/mchid/notify_url` 检查处就返回，补用例需要先给测试注入可用的微信配置）、C3（payload
-  构造是重复而非复用，且微信分支现处于 501 之后不可达）、M4（`verifyMessageWithCert` 的过期分支无直达
+  构造是重复而非复用，且微信分支当时处于 501 之后不可达——C5 落地后已可达并由 QR 用例覆盖）、M4（`verifyMessageWithCert` 的过期分支无直达
   用例）、H1（四个用例不是三个）。
 - **配置文档的默认值与代码相反**：`reconcile.enabled` 与 `channels.<name>.enabled` 实际默认 `true`
   （`PayPlugin.cc:48,62,139,220`），`configuration_guide.md` 原写 false，已改。
 
+
+## 八、C5 落地补记（本轮）
+
+- **入账先于问通道**：`createQRPayment` 现在按 `pay_order`(`CREATED`) → `pay_payment`(`INIT`) →
+  通道 → 晋升（payment `PROCESSING` + 通道响应、order `PAYING`）→ 响应 的顺序走，响应仍晚于
+  幂等快照写入。入账分支不需要改：`CallbackService` 是按 `order_no` 取 payment，只把
+  `SUCCESS`/`REFUNDED` 视为已终态，`INIT`/`PROCESSING` 都可入账，而 native 建单不回
+  `transaction_id`，第五节 M2 的比对对空值放行。重复通知分支需要，见下一条。
+- **重复通知的审计分支被 C5 打破，已一并修**：两个分支（交易 `CallbackService.cc:487`、退款
+  `CallbackService.cc:2179`）都用 `findOne(order_no)` 找 payment 来写 `pay_callback`，而 Drogon 的
+  `findOne` 在命中 0 行**或多行**时都走异常回调（`UnexpectedRows`，Drogon 的 Mapper 头文件里
+  `r.size() > 1` 那一支）。一个订单只有一条 payment 时它没事；一旦"拒绝后重试"让同一订单带上两条
+  payment，重复通知就会得到 `FAIL`/1400，而 WeChat 收到 FAIL 会一直重发，审计行反而永远写不下。
+  现在两处都改成 `created_at DESC LIMIT 1` 的 `findBy`，与入账分支（`CallbackService.cc:676`）取的
+  是同一条 payment，空结果仍按原行为回 1400（`UnexpectedRows("0 rows found")`）。正向对照：
+  `PayPlugin_WechatCallback_IdempotencyHitRecordsCallback` 与
+  `PayPlugin_WechatCallback_RefundIdempotencyHitRecordsCallback` 现在各多插一条 60 秒前的 `FAIL`
+  尝试——旧代码在断言 `!error` 处就会失败，新代码另外断言审计行落在最新那条尝试上。
+  其余按 `order_no` 取 payment 的位置（`PaymentService.cc:2123,2564`、`RefundService.cc:480`）
+  本来就是有序的 `findBy`，全部对齐。
+- **通道拒绝不回滚订单**：只关闭这一条 payment。同一订单可能已有前一次尝试留下的可用二维码，
+  把订单写成 `FAILED` 会掩盖真实可付的单子。
+- **重试可用**：`pay_order.order_no` 唯一（`sql/001_init_pay_tables.sql`），`pay_payment.order_no`
+  只是索引，因此复用订单 + 每次尝试一条 payment 是让"通道故障后重试"仍然可走的最小改动；
+  复用被限制在同一金额同一通道，且已结算的订单一律以 400 拒绝再次发码。
+- **覆盖与本地限制**：`tests/integration/QrPaymentBookingTest.cc` 用 `PayPlugin::setTestChannels()`
+  注入桩通道，两条用例都需要 PostgreSQL，本机（WSL 的 Postgres 无 `test` 角色）跑不了，
+  由 CI 的 linux/windows 两腿执行——与 AGENTS.md 的说明一致，不是代码问题。
+- **仍未做（不在本轮范围）**：把服务层残余的 `std::errc::*` 统一成业务码（第七节）；
+  `AlipayChannel.cc:428` 把毫秒当秒用；`WechatChannel::downloadCertificates` 回调里裸 `this`
+  的生命周期假设（第六节）。

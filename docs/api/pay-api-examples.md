@@ -88,8 +88,12 @@ curl -X POST http://localhost:5566/api/qrpay/create \
 ```
 
 Unlike `/api/pay/create`, `channel` and `user_id` are mandatory here, and
-channel failures are reported **inside the body with HTTP 200** (`code: 500` or
-`code: 1005 CHANNEL_NOT_AVAILABLE`). Check `code`, not the status, on this one.
+`product_name` becomes the channel `subject`. A `400` (HTTP 400 too) means a
+missing `order_no`/`amount`, an amount WeChat cannot express in fen, or an
+existing order that is already settled or describes another amount or channel.
+Channel and database faults answer HTTP `500` with `code: 500`, an unknown
+channel with `code: 1005`, and an idempotency clash with `code: 1004`. Read
+`code` for the reason either way.
 
 ## Query Order
 

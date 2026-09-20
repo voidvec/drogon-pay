@@ -24,6 +24,7 @@ set(TEST_SRC
     integration/HttpResponseHeadersTest.cc   # P2: CORS preflight + security headers
     integration/IdempotencyIntegrationTest.cc
     integration/PayErrorCategoryTest.cc      # P3-7.2: PayErrorCategory singleton + concurrent
+    integration/QrPaymentBookingTest.cc      # C5: QR booking (payment row, retry after refusal)
     integration/QueryOrderListAndReconcileTest.cc  # P1: queryOrderList + reconcileSummary params
     integration/QueryOrderTest.cc
     integration/ReconcileSummaryTest.cc

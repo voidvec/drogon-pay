@@ -32,8 +32,8 @@ info:
     * Success envelopes carry `code: 0` (or `code: 200` on the order list)
       plus `message` and, where there is a payload, `data`. The handler derives
       the HTTP status from the error code a service hands it, so where a
-      business code travels in the error the two agree (400, 404, 409, 501,
-      502, 503); failures that pass an `errno` instead land on HTTP 500
+      business code travels in the error the two agree (400, 404, 409, 502,
+      503); failures that pass an `errno` instead land on HTTP 500
       whatever the body says. Branch on `code` for business decisions and
       prefer HTTP status for transport ones.
     * Write operations (`/create`, `/api/qrpay/create`, `/refund`) are
@@ -165,8 +165,15 @@ paths:
       description: |
         Historical QR entry point. Unlike `/api/pay/create` it requires
         `channel` and `user_id` in the body and defaults `subject` to
-        "Payment". Its in-body failure codes (500 for a channel or gateway
-        fault, 1005 for an unknown channel) ride an HTTP 500 -- see
+        "Payment". It books the order and one payment row before asking the
+        channel for a code, so a paid QR transaction always has a row the
+        notification can settle; `pay_order.order_no` is unique, so a retry
+        reuses that order and appends a new payment row. Body code 400 covers
+        missing `order_no`/`amount`, an amount WeChat cannot express in fen, and
+        a reused order that is already settled or describes a different amount
+        or channel. The 500 codes (channel fault, database read fault) and 1005
+        (unknown channel) ride an HTTP 500, as do 1003 (no database client) and
+        1004 (idempotency conflict, or the same key is still in flight) -- see
         `docs/development/plugin_integration.md` for the migration note.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -194,23 +201,6 @@ paths:
                       out_trade_no: "ord-2026-0001"
         "400":
           $ref: '#/components/responses/BadRequest'
-        "501":
-          description: |
-            `channel: wechat` only. The channel is configured and the request is
-            well-formed, but this endpoint writes a `pay_order` without a
-            `pay_payment` row, so the V3 notification for a paid WeChat QR order
-            could not be applied and the money would sit on an unsettled order.
-            Use `/api/pay/create` (native prepay) for WeChat until the QR path
-            books payments; Alipay QR is unaffected.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              examples:
-                wechat-qr-disabled:
-                  value:
-                    code: 501
-                    message: "WeChat QR payments are not available: this endpoint books no payment row"
         "401":
           $ref: '#/components/responses/Unauthorized'
         "403":
@@ -1125,7 +1115,13 @@ components:
       properties:
         code:
           type: integer
-          description: 0 on success; 500/1005 are reported in-body with HTTP 200.
+          description: |
+            0 on success. 400 (missing parameter, unrepresentable amount, or a
+            reused order that cannot be offered again) arrives as HTTP 400;
+            every other failure code -- 500 (channel or database fault), 1003
+            (no database client), 1004 (idempotency) and 1005 (unknown
+            channel) -- arrives as HTTP 500, so branch on this for business
+            decisions.
         message:
           type: string
         data:
@@ -1135,8 +1131,13 @@ components:
               type: string
             qr_code:
               type: string
+              description: Alipay only -- the QR content to render.
+            code_url:
+              type: string
+              description: WeChat only -- the `weixin://` URL to render.
             out_trade_no:
               type: string
+              description: Alipay only -- the channel's own trade number.
 
     QueryOrderResponse:
       type: object

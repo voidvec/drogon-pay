@@ -23,6 +23,16 @@ JOIN-in-a-single-query is forbidden — split into multiple queries (or
 `Criteria::In`). Capture `auto sharedCb = shared_from_this()` in the callback to
 avoid use-after-free.
 
+## `findOne` asserts uniqueness
+
+`Mapper::findOne` reports **both** "no row" and "more than one row" through its
+*error* callback, so querying a non-unique column with it silently turns into a
+failure path the moment a second row becomes legal — which is what happened to
+the callback audit lookups before the QR booking made multi-attempt orders
+reachable. Use `findOne` only where a unique index guarantees one row; for "the
+newest of several" chain `orderBy(col, DESC).limit(1).findBy(...)` and handle
+the empty vector.
+
 ## Guarding `Mapper` construction
 
 `Mapper<Model>(dbClient)` can throw `std::exception` on construction itself — a
