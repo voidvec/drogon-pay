@@ -48,10 +48,23 @@ jobs:
             echo "::notice::AWS credentials not configured - skipping staging/production deploy"
           fi
 
+  # Same gate release.yml runs, from the same file. This workflow also triggers
+  # on a `v*` push, and its `deploy-production` leg keys off that ref — so
+  # without this edge, tagging any commit at all (one the pipeline never ran,
+  # one that only ever lived on a branch) rolled production, and the release
+  # being red would not have stopped it: workflow-level rules cannot order jobs
+  # across files. On a `workflow_dispatch` from a branch the gate has no tag to
+  # certify and passes through, which is what keeps this lane usable.
+  tag-gate:
+    uses: ./.github/workflows/_tag-gate.yml
+    permissions:
+      contents: read
+      checks: read
+
   build-and-push:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    needs: preflight
+    needs: [preflight, tag-gate]
     if: needs.preflight.outputs.has-dockerhub == 'true'
 
     steps:

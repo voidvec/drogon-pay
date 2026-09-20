@@ -1,0 +1,212 @@
+name: Tag gate
+
+# The policy a `v*` tag has to satisfy before anything shipped from it goes out:
+# called by `.github/workflows/release.yml` (which publishes the GitHub Release)
+# and by `.github/workflows/deploy.yml` (which pushes the image and rolls ECS).
+# A tag is the one ref no branch rule protects — the ruleset's required contexts
+# gate merges, and `git tag v1.2.3 <commit> && git push --tags` is not a merge —
+# so every consumer of a tag push has to run this check itself, and keeping two
+# copies is how one of them drifts.
+#
+# Called, never triggered: with `on: workflow_call` and no push or tag event, no
+# ref can run this file on its own.
+on:
+  workflow_call:
+
+# Reading a tag object, comparing it against the trunk and listing check runs
+# are all reads; nothing here writes. A reusable workflow cannot ask for more
+# than its caller grants, so both callers set the same two on their gate job.
+permissions:
+  contents: read
+  checks: read
+
+jobs:
+  # Not a name the branch ruleset requires — the ruleset gates pull requests, and
+  # this runs off a tag push. It does show up on the tagged commit as
+  # `<caller job id> / tag-gate`, which is what an operator reads when a release
+  # stops here.
+  tag-gate:
+    runs-on: ubuntu-22.04
+    # Must exceed DEADLINE_MINUTES below. A job that hits the runner's ceiling is
+    # cancelled with no output from the loop, so it reports "a timeout happened"
+    # where the script would have reported *which* context never went green —
+    # the difference between an operator fixing a drifted check name and guessing.
+    timeout-minutes: 135
+
+    env:
+      # FAST is absent on purpose: MAIN and RELEASE both `need` it, so a green
+      # build-test already carries static-analysis and clang-tidy on the same
+      # commit. These are the contexts the pipeline really reports, suffix
+      # included — the bare names went away with the legacy per-platform
+      # workflows, and an `unreported` line below is what a stale name looks
+      # like.
+      REQUIRED_CHECKS: |
+        linux-build-and-test / build-test
+        windows-build-and-test / build-test
+        macos-build / build-test
+        sdk-smoke-linux / sdk-smoke
+        sdk-smoke-windows / sdk-smoke
+      # The merge pipeline is a serial FAST -> MAIN -> RELEASE chain, and one
+      # measured pass of it took 32 minutes from push to the last green context
+      # (clang-tidy alone held FAST for 15), with per-leg job timeouts of 90 and
+      # 120 minutes above that. Two hours covers the observed path and leaves
+      # room for a cold Conan cache without letting a drifted check name stall a
+      # release indefinitely.
+      DEADLINE_MINUTES: 120
+      # A commit with no check runs at all will never grow them: a multi-commit
+      # push runs CI only on its tip, so an interior master commit has no
+      # pipeline to wait for. Bail on that after five minutes instead of two
+      # hours, with a message that says which situation the operator is in.
+      EARLY_BAIL_SECONDS: 300
+      POLL_SECONDS: 30
+
+    steps:
+      - name: Wait for the merge pipeline on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          # deploy.yml is also dispatched from a branch, and a branch run has no tag to
+          # certify: its own `deploy-production` condition already limits a production
+          # rollout to a tag ref. Pass those runs through rather than failing a dispatch
+          # that has nothing to check, so this stays the single definition of "the tag is
+          # certified" instead of a rule every caller has to remember to guard itself.
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "not a tag push (ref_type=$REF_TYPE): nothing to certify"
+            exit 0
+          fi
+
+          # TAG_NAME arrives from the event payload and ends up inside an API
+          # path, so it must look exactly like a version tag here. The shape is
+          # deliberately as strict as `check_version_sync.py --tag`, which
+          # accepts three numeric segments and rejects prerelease or build
+          # suffixes, so nothing path-shaped can reach the URL.
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::refusing unexpected tag name: $TAG_NAME" >&2
+            exit 1
+          fi
+
+          # The commits endpoint dereferences annotated tags, which is what this
+          # needs: a tag object's own SHA carries no check runs.
+          SHA=$(gh api "repos/$REPOSITORY/commits/$TAG_NAME" --jq .sha)
+          echo "tag $TAG_NAME -> commit $SHA"
+
+          # compare/<base>...<sha> answers "behind" or "identical" exactly when
+          # <sha> is already inside the base branch's history, which is the
+          # containment test the API offers. The call is guarded explicitly
+          # because a failure inside a command substitution does not trip
+          # `set -e`, and a 403 or 404 must not be reported as a policy decision.
+          # `master` is hardcoded because the ruleset and the trunk are named
+          # that in this repository; a default branch rename would make this fail
+          # loudly, not release unmerged commits.
+          if ! relation=$(gh api "repos/$REPOSITORY/compare/master...$SHA" --jq .status); then
+            echo "::error::could not compare $SHA against master" >&2
+            exit 1
+          fi
+          case "$relation" in
+            behind|identical) ;;
+            *)
+              echo "::error::commit $SHA is not on master (compare reports $relation): a release must ship a merged commit" >&2
+              exit 1
+              ;;
+          esac
+
+          start=$(date +%s)
+          deadline=$(( start + DEADLINE_MINUTES * 60 ))
+          early_deadline=$(( start + EARLY_BAIL_SECONDS ))
+
+          # Every knob below is used in arithmetic or as a `sleep` argument, and an
+          # empty one silently becomes zero — `DEADLINE_MINUTES=` would give up on
+          # the first pass while looking like a real verdict. Reject anything that
+          # is not a number instead of interpreting it.
+          for knob in DEADLINE_MINUTES EARLY_BAIL_SECONDS POLL_SECONDS; do
+            if ! [[ "${!knob:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error::$knob is not a number ('${!knob:-}')" >&2
+              exit 1
+            fi
+          done
+
+          # This list is the entire policy, so a damaged one has to stop the
+          # release rather than certify it: an empty or truncated
+          # `REQUIRED_CHECKS` would leave `pending` empty on the first pass and
+          # print "green" having inspected nothing. Five is what ci.yml reports
+          # for a master push — three `* / build-test`, two `* / sdk-smoke`.
+          names=()
+          while IFS= read -r line; do
+            # `if` rather than `[ -n "$line" ] && names+=(...)`, because the AND
+            # list returns 1 on a blank entry and `set -e` would end the job with
+            # no message at all.
+            if [ -n "$line" ]; then names+=("$line"); fi
+          done <<< "$REQUIRED_CHECKS"
+          if [ "${#names[@]}" -ne 5 ]; then
+            echo "::error::REQUIRED_CHECKS lists ${#names[@]} context(s), expected 5; refusing to certify a release against a list that is not the pipeline's" >&2
+            exit 1
+          fi
+
+          while :; do
+            if ! runs=$(gh api "repos/$REPOSITORY/commits/$SHA/check-runs" --paginate \
+                          --jq '.check_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion // "-")"'); then
+              echo "::error::could not read check runs for $SHA" >&2
+              exit 1
+            fi
+
+            # Nothing has ever reported against this commit. Waiting cannot help.
+            if [ -z "$runs" ] && [ "$(date +%s)" -ge "$early_deadline" ]; then
+              echo "::error::commit $SHA has no check runs at all; tag a commit the merge pipeline actually ran on (a multi-commit push runs CI only on its tip)" >&2
+              exit 1
+            fi
+
+            pending=''
+            failed=''
+            for name in "${names[@]}"; do
+              # One verdict per name, taken from the highest check-run id. The
+              # endpoint accumulates every run ever reported for the commit —
+              # re-runs, and a second workflow_dispatch over the same SHA — and
+              # the newest id is the one that describes the attempt made last.
+              # Requiring all siblings to be green would let a stale `cancelled`
+              # lock the release forever, and no re-run of the green suite could
+              # clear it.
+              verdict=$(printf '%s\n' "$runs" | awk -F'\t' -v want="$name" '
+                $2 == want && (!seen || $1 + 0 > best) { seen = 1; best = $1 + 0; st = $3; co = $4 }
+                END {
+                  if (!seen)                     print "unreported"
+                  else if (st != "completed")    print "pending"
+                  else if (co != "success")      print "failed " co
+                  else                           print "green"
+                }')
+              case "$verdict" in
+                green) ;;
+                pending)    pending="${pending:+$pending; }${name}: still running" ;;
+                unreported) pending="${pending:+$pending; }${name}: no check run on this commit" ;;
+                failed*)    failed="${failed:+$failed; }${name}: ${verdict#failed }" ;;
+              esac
+            done
+
+            # Annotations stay on one line: a workflow-command data value may not
+            # contain a raw newline, so a multi-line list would be cut off at the
+            # first line in the check UI and survive only in the raw log.
+            if [ -n "$failed" ]; then
+              echo "::error::the merge pipeline is red on $SHA: $failed" >&2
+              echo "Re-run the named leg against this commit and then re-run this" >&2
+              echo "release workflow: the verdict is taken from the newest attempt," >&2
+              echo "so a fresh green run replaces a cancellation or an old failure." >&2
+              exit 1
+            fi
+            if [ -z "$pending" ]; then
+              echo "Merge pipeline is green on $SHA; releasing."
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::gave up after ${DEADLINE_MINUTES}m waiting for: $pending" >&2
+              echo "A 'no check run on this commit' line means either the run is" >&2
+              echo "still queued or the required name has drifted from what the" >&2
+              echo "pipeline reports; see the check-name contract in AGENTS.md." >&2
+              exit 1
+            fi
+            echo "Waiting on: $pending"
+            sleep "$POLL_SECONDS"
+          done

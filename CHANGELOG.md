@@ -166,8 +166,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already carry that section. Six `# Version: 1.0.0` comment lines in
   `examples/pay-server/deploy/` were deleted as the drift they had already
   caused.
-- **Release gate waits for the pipeline that certifies the tag** (`ci-gate` job
-  in `.github/workflows/release.yml`, between `version-check` and `sdk-smoke`).
+- **Release gate waits for the pipeline that certifies the tag**
+  (`.github/workflows/_tag-gate.yml`, called by release.yml's `ci-gate` job
+  between `version-check` and `sdk-smoke`, and by deploy.yml's `tag-gate` before
+  it pushes an image — see the Fixed entry for why one file serves both).
   Branch protection cannot cover a tag: the ruleset's required contexts gate
   merges, and `git tag v1.1.0 <commit> && git push --tags` is not a merge, so any
   commit could be released without ever having gone through the pipeline —
@@ -253,6 +255,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate goes quiet.
 
 ### Fixed
+
+- **A tag no pipeline had ever run could deploy production.** `deploy.yml`
+  triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
+  and `deploy-production` legs depended only on `preflight` — which checks whether
+  secrets exist, not whether the commit is sound — so `git tag v9.9.9 <commit>
+  && git push --tags` pushed a semver image and rolled the ECS service for any
+  commit at all, including one the tests never ran. A red release did not stop it:
+  `jobs.*.needs` cannot cross workflows, so the two tag consumers shared no gate.
+  The check now lives once, in `.github/workflows/_tag-gate.yml`, and both call it
+  — `release.yml` as `ci-gate`, `deploy.yml` as `tag-gate`, which `build-and-push`
+  `needs`. `deploy.yml` is also dispatchable from a branch, and there is no tag to
+  certify there (its production leg already keys off a tag ref), so a non-tag ref
+  passes the gate through instead of failing a manual deploy that has nothing to
+  check.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
