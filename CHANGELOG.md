@@ -290,10 +290,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction back on a mismatch or an unparseable amount; the controller
   rejects a notification whose `app_id` differs from the configured one, and
   only when we know our own id, so an unconfigured sandbox cannot reject every
-  callback. `seller_id` is deliberately *not* compared: the config holds the
-  seller email while the notification carries the PID, so a check there would
-  reject every genuine notification. `CallbackController_Alipay_*_Rejected`
-  asserts a forged notification comes back `FAIL`.
+  callback. `seller_id` is deliberately *not* compared: the configured value
+  may be the seller email (the sandbox quickstart documents either form) while
+  the notification carries the `2088…` PID, so a check there would reject every
+  genuine notification. `CallbackController_Alipay_ForgedSignature_Rejected`
+  and `..._MissingSignature_Rejected` pin both reject reasons and so prove the
+  notification never reached the order-sync path; neither reaches the `app_id`
+  guard, which sits behind a signature the suite cannot mint.
 - **Alipay's own notifications could fail our verifier.** `verifyCallback()`
   built the signed payload from every parameter except `sign`/`sign_type`, but
   the official rule also drops parameters whose value is *empty*. A genuine
@@ -307,7 +310,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `std::localtime()` while composing the common request parameters; Drogon can
   serve from several IO-loop threads, so the timestamp is now formatted through
   `localtime_s`/`localtime_r`.
-
 
 - **A tag no pipeline had ever run could deploy production.** `deploy.yml`
   triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`

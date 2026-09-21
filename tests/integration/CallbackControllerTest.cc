@@ -13,6 +13,7 @@
 #include <chrono>
 #include <future>
 
+#include "drogon_pay/PayPlugin.h"
 #include "handlers/CallbackHandlers.h"
 
 namespace
@@ -24,6 +25,18 @@ struct CtrlResult
     Json::Value body;
     bool called{false};
 };
+
+// The Alipay controller rejects a notification for one of two reasons before
+// it touches an order: no client to verify with, or a signature that does not
+// check out. Which one applies depends on whether the loaded config registered
+// the channel, so a test that wants to pin the reject *branch* has to ask the
+// same question the handler asks.
+std::string expectedAlipayReject()
+{
+    auto plugin = drogon::app().getPlugin<PayPlugin>();
+    return (plugin && plugin->alipayClient()) ? "signature verification failed"
+                                              : "Alipay client not configured";
+}
 
 }  // namespace
 
@@ -171,7 +184,7 @@ DROGON_TEST(CallbackController_Alipay_ForgedSignature_Rejected)
 
     // P0-1: the notification is acknowledged as FAIL, never SUCCESS.
     CHECK(r.body["code"].asString() == "FAIL");
-    CHECK(r.body["message"].asString() != "OK");
+    CHECK(r.body["message"].asString() == expectedAlipayReject());
 }
 
 DROGON_TEST(CallbackController_Alipay_MissingSignature_Rejected)
@@ -205,4 +218,5 @@ DROGON_TEST(CallbackController_Alipay_MissingSignature_Rejected)
     CHECK(r.called);
 
     CHECK(r.body["code"].asString() == "FAIL");
+    CHECK(r.body["message"].asString() == expectedAlipayReject());
 }
