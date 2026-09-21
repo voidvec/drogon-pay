@@ -137,8 +137,8 @@ DROGON_TEST(AlipayVerifyCallback_EmptyParamExcluded)
     params["total_amount"] = "88.88";
     params["app_id"] = "2021000000000000";
     params["sign_type"] = "RSA2";
-    params["refund_amount"] = "";   // empty: must be skipped by the verifier
-    params["gmt_refund"] = "";      // empty: must be skipped by the verifier
+    params["refund_amount"] = "";  // empty: must be skipped by the verifier
+    params["gmt_refund"] = "";     // empty: must be skipped by the verifier
 
     const std::string signature = rsaSignBase64(kf.pkey, alipaySignString(params));
     params["sign"] = signature;
