@@ -194,6 +194,22 @@ DROGON_TEST(PayHandlers_CreatePayment_UserIdString_Answers400InsteadOfThrowing)
     CHECK(refusedWith(answer, 400));
 }
 
+// `time_expire` joins the guarded field set: a numeric or object value has to
+// be refused as mistyped, not read into the request struct downstream.
+DROGON_TEST(PayHandlers_CreatePayment_TimeExpireNumber_Answers400InsteadOfThrowing)
+{
+    PayController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.createPayment(req, std::move(cb)); };
+    Json::Value body = payBody(Json::Value("1.00"), Json::Value(7));
+    body["time_expire"] = Json::Value(2027);
+    const auto answer = offer(handler, body);
+    CHECK(answer.fault.empty());
+    CHECK(refusedWith(answer, 400));
+}
+
 // A body with no `user_id` at all is the documented 401, and it doubles as the
 // positive control for the guards above: the answer comes from after the shape
 // validation, so a well-shaped body is shown to pass it. The branch used to be
@@ -252,6 +268,23 @@ DROGON_TEST(PayHandlers_CreateQRPayment_UserIdObject_Answers400InsteadOfThrowing
                      std::function<void(const drogon::HttpResponsePtr &)> &&cb
                    ) { controller.createQRPayment(req, std::move(cb)); };
     const auto answer = offer(handler, qrBody(Json::Value("9.99"), Json::Value(Json::objectValue)));
+    CHECK(answer.fault.empty());
+    CHECK(refusedWith(answer, 400));
+}
+
+// The QR route carries the same guard: `time_expire` is passed through to the
+// service from this release on, so a mistyped value must die at the shape check
+// instead of reaching the booking.
+DROGON_TEST(PayHandlers_CreateQRPayment_TimeExpireNumber_Answers400InsteadOfThrowing)
+{
+    PayController controller;
+    auto handler = [&controller](
+                     const drogon::HttpRequestPtr &req,
+                     std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                   ) { controller.createQRPayment(req, std::move(cb)); };
+    Json::Value body = qrBody(Json::Value("9.99"), Json::Value(7));
+    body["time_expire"] = Json::Value(2027);
+    const auto answer = offer(handler, body);
     CHECK(answer.fault.empty());
     CHECK(refusedWith(answer, 400));
 }

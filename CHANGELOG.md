@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sql/006_ledger_payment_income_unique.sql`**: a partial unique index
+  `uq_pay_ledger_payment_income` on `pay_ledger(payment_no)` where
+  `entry_type = 'PAYMENT' AND payment_no IS NOT NULL` — the DB-layer backstop
+  for income double-booking (audit round 17). A payment collects money once,
+  so it owns at most one income ledger row, but today the only thing enforcing
+  that is the application CAS: all five income writers —
+  `CallbackService.cc:1465` and the four settle branches in
+  `PaymentService.cc` (`:2627/:2811/:3123/:3293`) — insert only on the
+  branch where the payment-status `UPDATE` actually hit. If that gate ever regresses,
+  the append-only ledger would book the duplicate silently; now the insert
+  fails loudly inside the settling transaction. `REFUND` entries are
+  deliberately outside the index (partial refunds are legitimate repeats per
+  payment, and the ledger has no `refund_no` column to key them by), matching
+  the defense-in-depth pattern of `003_refund_unique_constraint.sql`.
+  Enforcement itself is DB-backed, so it is verified by the CI legs only.
 - **`platform_ca_cert_path` on the WeChat channel** (optional): a PEM bundle of
   trust anchors. When set, every downloaded platform certificate must chain to
   one of them before it is cached or used to verify a notification; when unset
@@ -424,6 +439,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **`time_expire` had no HTTP entry point, which made the whole order-expiry
+  chain dead code (audit round 18)**: no handler ever assigned
+  `CreatePaymentRequest::timeExpire`, so the round-10 pre-validation
+  (`PaymentService.cc:497`), the channel forwarding (`:712`) and the single
+  `setExpireAt` writer (`:650`) never ran — `pay_order.expire_at` was always
+  NULL, and the round-14 close sweep, whose gate is `NOTPAID ∧ expire_at
+  passed`, could therefore never fire in production. Both create routes now
+  accept the field: shape-guarded (`PayHandlers.cc:177/:338`), wired on the
+  struct path (`:210`) and passed through plus hashed on the QR path
+  (`:410`; service read `:1404`, replay-hash `:1461`, 400-before-booking
+  validation `:1545`, WeChat forwarding `:1612`, QR `expire_at` booking
+  `:2017`), documented in the OpenAPI request schemas of both routes, and
+  pinned locally by two handler mistype cases
+  (`RequestBodyShapeTest.cc:199/:278`); the QR end-to-end booking is DB-family
+  and adjudicated by CI.
+
+- **Outbound APIv3 answers are now verified before the caller may read them.**
+  The official signing doctrine is that the merchant must verify WeChat's
+  answer on every request that carries one -- the channel had enforced that
+  for callbacks only, so a man-in-the-middle or a hostile `api_base` could
+  answer a query, create, close or refund with a well-formed `200` JSON
+  claiming any state and the service layer would book it. `sendWechatRequest`
+  now runs a per-client answer verifier over every 2xx answer that carries a
+  body (`WechatChannel.cc:520`): the `Wechatpay-Timestamp/Nonce/Signature`
+  set is checked first (an unsigned answer is refused before it can spend the
+  shared certificate-refresh window), the signature is validated over
+  `timestamp\nnonce\nbody\n` against the trusted platform certificate named
+  by `Wechatpay-Serial`, and a failed answer is dropped without echoing the
+  forged body. Documented carve-outs, each with its reason in the code: the
+  headerless `204 No Content` success, non-2xx failure envelopes, and
+  `/v3/certificates` itself (bootstrapping the trust anchors cannot verify
+  against what it is fetching; that answer is self-authenticating under the
+  AES-GCM `api_v3_key` and every cert still passes the serial/validity/CA
+  binding in `setPlatformCert`). Pinned by four cases in
+  `WechatPayClientTest.cc`: a signed `200` end-to-end accepted
+  (`:1084`), an unsigned `200`-SUCCESS forgery dropped (`:1157`), the
+  header/body/serial binding with its rejections (`:1224`), and the
+  empty-verifier certificate-download path answering through the shared
+  request path without dereferencing an empty `std::function` (`:1295`,
+  a pre-release review catch -- as was holding the weak pin across the
+  verification call rather than null-checking a temporary)
+  (`docs/review/2026-09-20-wechat-pay-api-audit.md` §二十二).
 - **An amount that overflows the money type is now refused instead of
   silently wrapped.** The controller's amount regex caps the shape but not the
   digit count, and `parseAmountToFen` fed 17-19-digit yuan values through
@@ -488,8 +545,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the runner's offset on top of the string's own), `validateTimeExpire` refuses a
   deadline that has already passed or that exceeds the channel's own seven-day
   window, and `PaymentService::createPayment` refuses with 1001 before the order
-  row is written (`PaymentService.cc:477`) and books `expire_at` from the same
-  reading (`:625`).
+  row is written (`PaymentService.cc:497`) and books `expire_at` from the same
+  reading (`:650`).
 - **An idempotency reservation is now finalized only by the delivery that took
   it (owner token).** The WeChat callback chains reserve a `pay_idempotency`
   row with a NULL snapshot and finalize it after the settlement commits, but

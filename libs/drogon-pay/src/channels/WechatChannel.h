@@ -2,6 +2,7 @@
 
 #include "drogon_pay/PaymentChannel.h"
 
+#include <drogon/HttpResponse.h>
 #include <json/json.h>
 #include <functional>
 #include <memory>
@@ -16,6 +17,8 @@ class WechatPayClient : public drogon_pay::PaymentChannel,
 {
   public:
     using JsonCallback = std::function<void(const Json::Value &result, const std::string &error)>;
+    using AnswerVerifier =
+      std::function<bool(const drogon::HttpResponsePtr &resp, std::string &error)>;
 
     explicit WechatPayClient(const Json::Value &config);
 
@@ -83,6 +86,21 @@ class WechatPayClient : public drogon_pay::PaymentChannel,
       std::string &error
     ) const;
 
+    /// Verify the signature WeChat puts on an API *answer* (the documented
+    /// `应答验签` scheme: Wechatpay-Timestamp/Nonce/Signature/Serial headers over
+    /// "timestamp\nnonce\nbody\n"). An answer that does not verify must be
+    /// discarded rather than acted on, so it shares the notification's
+    /// certificate resolution: cache, statically configured certificate bound
+    /// to the serial it carries, throttled refresh for an unknown serial.
+    bool verifyResponse(const drogon::HttpResponsePtr &resp, std::string &error);
+
+    /// `verifyResponse` bound for the shared request path. Producers own the
+    /// client through shared_ptr, so the weak pin drops an answer that arrives
+    /// after destruction instead of dereferencing a dead client; a
+    /// deliberately non-shared instance (a stack-built unit test) keeps the raw
+    /// binding because there is nothing to pin.
+    AnswerVerifier answerVerifier();
+
     /// Hex serial number of an X.509 certificate in the shape WeChat reports
     /// them (uppercase, no leading zeros). Empty when the content does not
     /// parse. Used to bind a cached certificate to the serial it is filed under.
@@ -99,6 +117,13 @@ class WechatPayClient : public drogon_pay::PaymentChannel,
     }
 
   private:
+    /// Resolve the platform certificate named by `serialNo`: the cache first,
+    /// then the statically deployed certificate when it really carries that
+    /// serial, then a throttled download for an unseen serial (the answer that
+    /// asked is still rejected -- by the next attempt the cache has converged).
+    /// Returns empty and fills `error` when nothing trusted is available.
+    std::string resolveTrustedPlatformCert(const std::string &serialNo, std::string &error);
+
     Json::Value config_;
     std::string appId_;
     std::string mchId_;
