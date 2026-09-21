@@ -189,9 +189,16 @@ void ReconciliationService::syncPendingWeChatOrders(const std::shared_ptr<int> &
                 for (const auto &row : rows)
                 {
                     const std::string orderNo = row.getValueOfOrderNo();
+                    // The row's own deadline, read as a nullable pointer: an
+                    // order created without `time_expire` carries no expiry the
+                    // sweep may judge against.
+                    const auto expireAt = row.getExpireAt();
                     wechatChannel->queryPayment(
                       orderNo,
-                      [this, orderNo](const Json::Value &result, const std::string &error) {
+                      [this,
+                       wechatChannel,
+                       orderNo,
+                       expireAt](const Json::Value &result, const std::string &error) {
                           if (!error.empty())
                           {
                               LOG_WARN << "WeChat query failed for order " << orderNo << ": "
@@ -201,6 +208,37 @@ void ReconciliationService::syncPendingWeChatOrders(const std::shared_ptr<int> &
                           paymentService_->syncOrderStatusFromWechat(
                             orderNo, result, [](const std::string &) {}
                           );
+                          // An unpaid trade whose deadline has passed is still
+                          // pay-able on the channel until WeChat's own lazy
+                          // expiry runs, so the sweep closes it: `trade_state`
+                          // asks the question, `expire_at` answers it, and only
+                          // both together start the close. `NOTPAY` is the one
+                          // state that is unpaid on the channel and unsettled
+                          // locally -- `CLOSED`/`REVOKED` answers are already
+                          // booked terminal by the sync above, and a paid trade
+                          // is settled there too, so a close that follows is
+                          // answered by the refusal and changes nothing.
+                          const std::string tradeState = result.get("trade_state", "").asString();
+                          const bool expired = expireAt && (*expireAt < trantor::Date::now());
+                          if (tradeState == "NOTPAY" && expired)
+                          {
+                              wechatChannel->closeOrder(
+                                orderNo,
+                                [orderNo](const Json::Value &, const std::string &closeError) {
+                                    if (!closeError.empty())
+                                    {
+                                        LOG_INFO << "WeChat close for expired unpaid order "
+                                                 << orderNo << " was refused: " << closeError;
+                                    }
+                                    else
+                                    {
+                                        LOG_DEBUG << "Closed expired unpaid order " << orderNo
+                                                  << " on the channel; the next sweep books it "
+                                                     "CLOSED";
+                                    }
+                                }
+                              );
+                          }
                       }
                     );
                 }

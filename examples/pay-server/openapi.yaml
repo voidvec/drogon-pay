@@ -118,7 +118,7 @@ paths:
                     code: 0
                     message: Payment created successfully
                     data:
-                      order_no: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+                      order_no: "c2d7c8ad6a4b4f3f9a3132db0a3fcd82"
                       payment_no: "PAY2026091810345612345678"
                       status: PAYING
                       code_url: "weixin://wxpay/bizpayurl?pr=xxxx"
@@ -176,7 +176,11 @@ paths:
         three-letter ISO-4217 code, case-normalized, and recorded on the order so
         the notification's currency can match it), `notify_url` (subject to the
         same private-address ban as `/api/pay/create`), `buyer_id`, and
-        `idempotency_key`.
+        `idempotency_key`. For `channel: wechat`, `order_no` is pre-checked
+        against the official out_trade_no window (6-32 characters of digits,
+        letters and `_ - | *`) and the subject against the non-empty /
+        127-character description rule, so an order the channel could never
+        name answers 400 here instead of lingering in the reconciliation sweep.
         The replay key is `idempotency_key`, else the `X-Idempotency-Key` or
         `Idempotency-Key` header, else `QR_<order_no>_<channel>`; the stored
         request hash covers `user_id`, `currency`, `notify_url` and `buyer_id`
@@ -551,7 +555,11 @@ paths:
         `event_type` must be `TRANSACTION.SUCCESS` or contain `REFUND`;
         anything else is rejected with 400/40004. Accepted notifications answer
         `code: SUCCESS`; verification and persistence failures answer
-        `code: FAIL` with HTTP 500 so WeChat retries.
+        `code: FAIL` with HTTP 500 so WeChat retries. A duplicate that arrives
+        while another delivery still holds an unfinalized idempotency reservation
+        also answers `code: FAIL` (retry) rather than `SUCCESS`: a reservation is
+        not proof the settlement committed, so acknowledging it could stop the
+        retries and strand the payment if the winning delivery then died.
       security: []
       parameters:
         - name: Wechatpay-Timestamp
@@ -953,8 +961,11 @@ components:
       description: |
         `pay_order.status`. `CREATED` is the DDL default; `/create` reserves the
         order as `PAYING`; a verified channel success moves it to `PAID`, a
-        completed refund to `REFUNDED`, and a closed/revoked/expired trade to
-        `CLOSED` or `FAILED`.
+        fully returned order to `REFUNDED`, and a closed/revoked/expired trade
+        to `CLOSED` or `FAILED`. `REFUNDED` requires the refunds that have
+        *settled* on the order to cover its total: WeChat honours up to fifty
+        partial refunds per order, so one settled refund leaves the order
+        `PAID`.
 
     PaymentStatus:
       type: string
@@ -969,8 +980,10 @@ components:
       type: string
       enum: [REFUND_INIT, REFUNDING, REFUND_SUCCESS, REFUND_FAIL]
       description: |
-        `pay_refund.status`. The parent order only moves to `REFUNDED` once the
-        refund reaches `REFUND_SUCCESS`.
+        `pay_refund.status`. The parent order only moves to `REFUNDED` once
+        this refund reaches `REFUND_SUCCESS` *and* the order's settled refunds
+        together cover its total; a partial refund settles here while the
+        order stays `PAID`.
 
     ErrorResponse:
       type: object
@@ -1074,7 +1087,12 @@ components:
         order_no:
           type: string
           maxLength: 64
-          description: Merchant order number; must be unique.
+          description: >-
+            Merchant order number; must be unique. For `channel: wechat` the
+            service enforces the official out_trade_no window before booking:
+            6-32 characters of digits, letters and `_ - | *`; anything else is
+            answered with HTTP 400 (code 1001) instead of being booked into an
+            order the channel could never name.
         amount:
           $ref: '#/components/schemas/Amount'
         currency:

@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <trantor/utils/Date.h>
 
 namespace
 {
@@ -12,11 +13,19 @@ namespace
 // POST their async callback to. An attacker-controlled value must not point at
 // a private/loopback/link-local address (e.g. 127.0.0.1, 169.254.169.254 cloud
 // metadata, RFC1918 ranges), since the provider would then probe or callback
-// into internal services. This is a best-effort, literal-only check: it does
-// NOT resolve DNS (the channel, not this service, performs the request), so a
-// domain that resolves to a private IP is not caught here — that is an accepted
-// limitation. The audit's core requirement (block private/loopback IP literals)
-// is satisfied.
+// into internal services.
+//
+// The check has to agree with the reader about where the host is. A host is
+// therefore taken from the authority only (userinfo = text up to the LAST '@'
+// before the path, and the authority stops at '/', '?', ':' or '#'), and an
+// IPv4 literal is refused in every form a resolver accepts rather than only
+// the dotted quad. IPv6 is refused by whitelist (only 2000::/3 global unicast
+// passes) because its textual forms are too many to enumerate; IPv4 is refused
+// by the private/reserved range blocklist below plus the numeric-shape rule.
+//
+// This is a literal-only check: it does NOT resolve DNS (the channel, not this
+// service, performs the request), so a domain that resolves to a private IP is
+// not caught here -- that is an accepted limitation.
 
 // Extract the host portion of an http(s) URL. Handles bracketed IPv6 literals
 // (http://[::1]/...). Returns empty if the authority cannot be parsed.
@@ -33,11 +42,23 @@ std::string extractUrlHost(const std::string &url)
     {
         return {};
     }
-    // Strip userinfo (user:pass@host) if present.
-    size_t at = url.find('@', hostStart);
-    if (at != std::string::npos)
+    // Strip userinfo (user:pass@host) if present. The authority ends at the
+    // first '/', '?' or '#', so an '@' beyond that is part of the path and not
+    // userinfo; and where the authority holds several '@', a spec-following
+    // client reads the host after the LAST one -- taking the first would check a
+    // different host than the one the provider will connect to.
+    size_t authorityEnd = url.find_first_of("/?#", hostStart);
+    if (authorityEnd == std::string::npos)
     {
-        hostStart = at + 1;
+        authorityEnd = url.size();
+    }
+    if (authorityEnd > hostStart)
+    {
+        const size_t at = url.rfind('@', authorityEnd - 1);
+        if (at != std::string::npos && at >= hostStart)
+        {
+            hostStart = at + 1;
+        }
     }
     // IPv6 literal in brackets: [::1] — take everything up to the closing ']'.
     if (hostStart < url.size() && url[hostStart] == '[')
@@ -49,8 +70,12 @@ std::string extractUrlHost(const std::string &url)
         }
         return url.substr(hostStart + 1, close - hostStart - 1);
     }
-    // Otherwise the host runs until the first '/', ':', or '?'.
-    size_t end = url.find_first_of("/:?", hostStart);
+    // Otherwise the host runs until the first '/', ':', '?' or '#'. The fragment
+    // marker has to terminate the host: without it, "http://127.0.0.1#x.com"
+    // reads as the host "127.0.0.1#x.com", which is neither a parseable IPv4
+    // literal nor a numeric address shape, so it passed the check while the
+    // provider connected to 127.0.0.1.
+    size_t end = url.find_first_of("/:?#", hostStart);
     if (end == std::string::npos)
     {
         return url.substr(hostStart);
@@ -130,27 +155,97 @@ bool isPrivateIpv4(uint8_t a, uint8_t b, uint8_t /*c*/, uint8_t /*d*/)
     return false;
 }
 
-// True if an IPv6 literal is loopback (::1), link-local (fe80::/10), or
-// unique-local (fc00::/7). Only the minimal canonical forms are checked; the
-// provider-facing risk is dominated by ::1 and link-local.
-bool isPrivateIpv6(const std::string &host)
+// True if an IPv6 literal denotes a global unicast address (2000::/3), which is
+// what a provider-facing callback has to be. The previous blocklist matched the
+// textual forms "::1", "fc..", "fd.." and "fe8.."/"fe9.."/"fea.."/"feb.." and
+// was therefore satisfied by every other spelling of the same addresses -- the
+// expanded loopback, an IPv4-mapped "::ffff:127.0.0.1", or a 6to4-style
+// rendering of a link-local. Naming the allowed class instead closes all of
+// those at once and subsumes the old prefix test.
+bool isGlobalUnicastIpv6(const std::string &host)
 {
-    std::string h = host;
-    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
-    if (h == "::1")
-        return true;  // loopback
-    if (h.rfind("fc", 0) == 0)
-        return true;  // fc00::/7 unique-local
-    if (h.rfind("fd", 0) == 0)
-        return true;
-    if (
-      h.rfind("fe8", 0) == 0 || h.rfind("fe9", 0) == 0 || h.rfind("fea", 0) == 0 ||
-      h.rfind("feb", 0) == 0
-    )
+    size_t i = 0;
+    while (i < host.size() && host[i] == ':')
     {
-        return true;  // fe80::/10 link-local
+        // A leading ':' is the compressed zero group, so the first 16 bits are
+        // zero and the address is not in 2000::/3.
+        return false;
     }
-    return false;
+    int value = 0;
+    int digits = 0;
+    while (i < host.size() && digits < 4)
+    {
+        const char c = host[i];
+        int nibble = -1;
+        if (c >= '0' && c <= '9')
+        {
+            nibble = c - '0';
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            nibble = c - 'a' + 10;
+        }
+        else if (c >= 'A' && c <= 'F')
+        {
+            nibble = c - 'A' + 10;
+        }
+        else
+        {
+            break;
+        }
+        value = value * 16 + nibble;
+        ++i;
+        ++digits;
+    }
+    return (value & 0xE000) == 0x2000;
+}
+
+// True if the host is an address literal in some spelling other than the
+// canonical dotted quad: "127.1", "2130706433", "0x7f.1", "010.1.1.1". Every
+// resolver feeds those to `inet_aton`, which expands them to a full address, so
+// they are IP literals and not domains -- reading them as the latter is what
+// let the loopback forms through. A label of that shape is all decimal digits,
+// or a "0x" hex group; a real hostname such as "host42.example.com" or
+// "deadbeef.example" has a label that is neither.
+bool isNumericAddressShape(const std::string &host)
+{
+    size_t i = 0;
+    while (true)
+    {
+        const size_t dot = host.find('.', i);
+        const size_t end = (dot == std::string::npos) ? host.size() : dot;
+        const size_t labelEnd = end;
+        if (labelEnd == i)
+        {
+            return false;  // an empty label is a malformed name, not an address
+        }
+        size_t k = i;
+        bool hexPrefixed = false;
+        if (labelEnd - k > 2 && host[k] == '0' && (host[k + 1] == 'x' || host[k + 1] == 'X'))
+        {
+            hexPrefixed = true;
+            k += 2;
+        }
+        if (k == labelEnd)
+        {
+            return false;  // "0x" with no digits
+        }
+        for (; k < labelEnd; ++k)
+        {
+            const char c = host[k];
+            const bool isHexDigit =
+              (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (hexPrefixed ? !isHexDigit : (c < '0' || c > '9'))
+            {
+                return false;  // an ordinary domain label
+            }
+        }
+        if (dot == std::string::npos)
+        {
+            return true;  // every label was a numeric address group
+        }
+        i = dot + 1;
+    }
 }
 
 bool isBlockedHost(const std::string &host)
@@ -169,13 +264,19 @@ bool isBlockedHost(const std::string &host)
     // IPv6 literal (contains ':').
     if (host.find(':') != std::string::npos)
     {
-        return isPrivateIpv6(host);
+        return !isGlobalUnicastIpv6(host);
     }
     // IPv4 literal.
     uint8_t ip[4];
     if (parseIpv4(host, ip))
     {
         return isPrivateIpv4(ip[0], ip[1], ip[2], ip[3]);
+    }
+    // Not the canonical dotted quad: refuse the other address spellings rather
+    // than letting them through as "some domain".
+    if (isNumericAddressShape(lower))
+    {
+        return true;
     }
     // Plain domain (not an IP literal): not blocked here. DNS rebinding is an
     // accepted limitation (see file comment).
@@ -262,9 +363,10 @@ bool parseAmountToFen(const std::string &amount, int64_t &fen)
     {
         const int64_t yuan = std::stoll(yuanPart);
         const int64_t cents = std::stoll(centPart);
-        // stoll accepts anything that fits int64_t, but the caller's scale is
-        // fen: yuan * 100 overflows (UB) past ~9.2e16 yuan, and a wrapped value
-        // could collide with a small legitimate amount.
+        // stoll only rejects literals above its own range; a 17-19 digit yuan
+        // parses fine and yuan*100 then wraps (signed overflow is UB, in
+        // practice mod 2^64), so "184467440737095517.99" could quietly become
+        // fen 183. Reject anything that cannot scale to fen without overflow.
         if (yuan > (std::numeric_limits<int64_t>::max() - 99) / 100)
         {
             return false;
@@ -284,6 +386,26 @@ bool amountEqualsFen(const std::string &amount, int64_t expectedFen)
     // A negative expectation (an amount the caller could not resolve) never
     // matches: parsed fen is always >= 0, so the guard fails closed.
     return parseAmountToFen(amount, fen) && fen == expectedFen;
+}
+
+bool refundsCoverOrderAmount(int64_t settledRefundFen, int64_t orderTotalFen)
+{
+    return orderTotalFen > 0 && settledRefundFen >= orderTotalFen;
+}
+
+std::string resolveRefundedOrderStatus(
+  const std::string &mappedOrderStatus,
+  int64_t settledRefundFen,
+  int64_t orderTotalFen
+)
+{
+    if (
+      mappedOrderStatus == "REFUNDED" && !refundsCoverOrderAmount(settledRefundFen, orderTotalFen)
+    )
+    {
+        return "PAID";
+    }
+    return mappedOrderStatus;
 }
 
 std::string toJsonString(const Json::Value &value)
@@ -311,7 +433,19 @@ void mapTradeState(
         orderStatus = "PAYING";
         paymentStatus = "PROCESSING";
     }
-    else if (tradeState == "CLOSED" || tradeState == "REVOKED" || tradeState == "REFUND")
+    // `REFUND` is the state a trade reaches *after* the money arrived: it says
+    // the order was turned into a refund, so answering "the payment failed" here
+    // recorded a collected payment as one that never happened -- the payment row
+    // fell to FAIL, no PAYMENT ledger entry was written, and the order read
+    // CLOSED as if it had expired unpaid. The refund itself is still evidenced
+    // by `pay_refund`, which this endpoint says nothing about, so the payment
+    // settles to SUCCESS and only the order carries the refunded state.
+    else if (tradeState == "REFUND")
+    {
+        orderStatus = "REFUNDED";
+        paymentStatus = "SUCCESS";
+    }
+    else if (tradeState == "CLOSED" || tradeState == "REVOKED")
     {
         orderStatus = "CLOSED";
         paymentStatus = "FAIL";
@@ -388,6 +522,261 @@ bool validateNotifyUrl(const std::string &url, std::string &errorMessage)
     if (isBlockedHost(host))
     {
         errorMessage = "notify_url host must not be a private, loopback, or link-local address";
+        return false;
+    }
+    return true;
+}
+
+namespace
+{
+// UTF-8 code points = bytes that are not continuation bytes (10xxxxxx).
+size_t utf8CodePointLength(const std::string &s)
+{
+    size_t n = 0;
+    for (const unsigned char c : s)
+    {
+        if ((c & 0xC0) != 0x80)
+        {
+            ++n;
+        }
+    }
+    return n;
+}
+}  // namespace
+
+bool validateWechatOrderFields(
+  const std::string &outTradeNo,
+  const std::string &description,
+  const std::string &attach,
+  std::string &errorMessage
+)
+{
+    // Official Native precreate: "商户系统内部订单号，要求6-32个字符内，
+    // 只能是数字、大小写字母_-|* 且在同一个商户号下唯一".
+    if (outTradeNo.size() < 6 || outTradeNo.size() > 32)
+    {
+        errorMessage = "order_no must be 6-32 characters for WeChat Pay";
+        return false;
+    }
+    for (const char c : outTradeNo)
+    {
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') || c == '_' || c == '-' || c == '|' || c == '*';
+        if (!ok)
+        {
+            errorMessage = "order_no may only contain digits, letters, and _ - | * for WeChat Pay";
+            return false;
+        }
+    }
+
+    // description is required by the channel, at most 127 characters.
+    if (description.empty())
+    {
+        errorMessage = "description is required for WeChat Pay";
+        return false;
+    }
+    if (utf8CodePointLength(description) > 127)
+    {
+        errorMessage = "description exceeds 127 characters";
+        return false;
+    }
+
+    // attach is optional, at most 128 characters when present.
+    if (!attach.empty() && utf8CodePointLength(attach) > 128)
+    {
+        errorMessage = "attach exceeds 128 characters";
+        return false;
+    }
+
+    return true;
+}
+
+namespace
+{
+bool isAsciiDigit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+bool readFixedDigits(const std::string &s, size_t at, size_t count, int &value)
+{
+    if (at + count > s.size())
+    {
+        return false;
+    }
+    int accumulated = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (!isAsciiDigit(s[at + i]))
+        {
+            return false;
+        }
+        accumulated = accumulated * 10 + (s[at + i] - '0');
+    }
+    value = accumulated;
+    return true;
+}
+
+bool isLeapYear(int year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+int daysInMonth(int year, int month)
+{
+    static constexpr int kDaysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month == 2 && isLeapYear(year))
+    {
+        return 29;
+    }
+    return kDaysInMonth[month - 1];
+}
+
+// Days between 1970-01-01 and the given proleptic-Gregorian date (Howard
+// Hinnant's `days_from_civil`), so a deadline can be compared against the clock
+// without pulling a calendar library into the utility layer.
+int64_t daysFromCivil(int year, int month, int day)
+{
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
+    const unsigned shiftedMonth = static_cast<unsigned>(month + (month > 2 ? -3 : 9));
+    const unsigned dayOfYear = (153u * shiftedMonth + 2u) / 5u + static_cast<unsigned>(day) - 1u;
+    const unsigned dayOfEra = yearOfEra * 365u + yearOfEra / 4u - yearOfEra / 100u + dayOfYear;
+    return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(dayOfEra) - 719468;
+}
+}  // namespace
+
+bool parseRfc3339(const std::string &value, int64_t &secondsSinceEpoch, std::string &errorMessage)
+{
+    static const char *kFormatError =
+      "expected RFC 3339 (yyyy-MM-DDTHH:mm:ss with a Z or ±HH:MM timezone)";
+
+    const size_t n = value.size();
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (
+      n < 20 || !readFixedDigits(value, 0, 4, year) || value[4] != '-' ||
+      !readFixedDigits(value, 5, 2, month) || value[7] != '-' ||
+      !readFixedDigits(value, 8, 2, day) || value[10] != 'T' ||
+      !readFixedDigits(value, 11, 2, hour) || value[13] != ':' ||
+      !readFixedDigits(value, 14, 2, minute) || value[16] != ':' ||
+      !readFixedDigits(value, 17, 2, second)
+    )
+    {
+        errorMessage = kFormatError;
+        return false;
+    }
+    if (
+      month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) || hour > 23 ||
+      minute > 59 || second > 59
+    )
+    {
+        errorMessage = "the timestamp names a moment that does not exist";
+        return false;
+    }
+
+    size_t at = 19;
+    if (at < n && value[at] == '.')
+    {
+        // Fractional seconds are legal RFC 3339 and carry nothing for a deadline;
+        // the digits are consumed and dropped.
+        const size_t firstFractionDigit = at + 1;
+        at = firstFractionDigit;
+        while (at < n && isAsciiDigit(value[at]))
+        {
+            ++at;
+        }
+        if (at == firstFractionDigit)
+        {
+            errorMessage = kFormatError;
+            return false;
+        }
+    }
+
+    int offsetSeconds = 0;
+    if (at == n)
+    {
+        errorMessage = "the timestamp must carry a timezone (Z or ±HH:MM)";
+        return false;
+    }
+    if (value[at] == 'Z')
+    {
+        ++at;
+    }
+    else if (value[at] == '+' || value[at] == '-')
+    {
+        const int sign = value[at] == '+' ? 1 : -1;
+        ++at;
+        int offsetHour = 0;
+        int offsetMinute = 0;
+        if (
+          !readFixedDigits(value, at, 2, offsetHour) || at + 2 >= n || value[at + 2] != ':' ||
+          !readFixedDigits(value, at + 3, 2, offsetMinute)
+        )
+        {
+            errorMessage = kFormatError;
+            return false;
+        }
+        at += 5;
+        if (offsetHour > 23 || offsetMinute > 59)
+        {
+            errorMessage = "the timezone offset is out of range";
+            return false;
+        }
+        offsetSeconds = sign * (offsetHour * 3600 + offsetMinute * 60);
+    }
+    else
+    {
+        errorMessage = kFormatError;
+        return false;
+    }
+    if (at != n)
+    {
+        // Trailing text means the caller would be shown a different instant than
+        // the one the channel is given.
+        errorMessage = kFormatError;
+        return false;
+    }
+
+    secondsSinceEpoch =
+      daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offsetSeconds;
+    return true;
+}
+
+bool validateTimeExpire(
+  const std::string &timeExpire,
+  const std::string &channel,
+  std::string &errorMessage
+)
+{
+    // The value is forwarded to the channel unchanged, so only this strict
+    // reading is safe: trantor's own readers accept a space separator, and
+    // `fromISOString` adds the machine's zone on top of the string's offset.
+    int64_t expirySeconds = 0;
+    std::string parseError;
+    if (!parseRfc3339(timeExpire, expirySeconds, parseError))
+    {
+        errorMessage = "time_expire " + parseError;
+        return false;
+    }
+
+    const int64_t nowSeconds = trantor::Date::now().secondsSinceEpoch();
+    if (expirySeconds <= nowSeconds)
+    {
+        errorMessage = "time_expire is already in the past";
+        return false;
+    }
+    // Official Native precreate: 支付结束时间需在下单时间的 7 天以内，超过则由系统
+    // 自动调整 -- an adjustment the caller cannot observe, so it is refused here
+    // instead of accepted and quietly moved.
+    if (channel == "wechat" && expirySeconds > nowSeconds + 7 * 86400)
+    {
+        errorMessage = "time_expire must be within 7 days for WeChat Pay";
         return false;
     }
     return true;

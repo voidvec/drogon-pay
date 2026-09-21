@@ -13,6 +13,20 @@
 #include <thread>
 #include <chrono>
 
+// The close-order case stands up a one-shot HTTP listener, so the socket
+// surface is pulled in here rather than inside the anonymous namespace below.
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
+
 namespace
 {
 std::string encryptAesGcm(
@@ -301,6 +315,267 @@ void removeTempPem(const std::filesystem::path &path)
     std::error_code ec;
     std::filesystem::remove(path, ec);
 }
+
+#ifdef _WIN32
+struct WinsockGuard
+{
+    WinsockGuard()
+    {
+        WSADATA data;
+        WSAStartup(MAKEWORD(2, 2), &data);
+    }
+};
+
+SOCKET testHandleToSocket(unsigned long long handle)
+{
+    return static_cast<SOCKET>(static_cast<uintptr_t>(handle));
+}
+
+unsigned long long socketToTestHandle(SOCKET fd)
+{
+    return static_cast<unsigned long long>(static_cast<uintptr_t>(fd));
+}
+#else
+struct WinsockGuard
+{
+};
+
+int testHandleToSocket(unsigned long long handle)
+{
+    return static_cast<int>(handle);
+}
+
+unsigned long long socketToTestHandle(int fd)
+{
+    return static_cast<unsigned long long>(fd);
+}
+#endif
+
+// Thin per-platform wrappers so the listener body below stays type-neutral.
+class TestSockets
+{
+  public:
+    static unsigned long long invalid()
+    {
+        return socketToTestHandle(INVALID_SOCKET_VALUE);
+    }
+
+    static int openSocket(unsigned long long &handle)
+    {
+        auto fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        handle = socketToTestHandle(fd);
+        return socketIsValid(fd) ? 0 : -1;
+    }
+
+    static int bindAnyLoopback(unsigned long long handle)
+    {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        return ::bind(toNative(handle), reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+    }
+
+    static int boundPort(unsigned long long handle, int &port)
+    {
+        sockaddr_in bound{};
+        int boundLen = sizeof(bound);
+        if (::getsockname(toNative(handle), reinterpret_cast<sockaddr *>(&bound), &boundLen) != 0)
+        {
+            return -1;
+        }
+        port = ntohs(bound.sin_port);
+        return 0;
+    }
+
+    static void listenOne(unsigned long long handle)
+    {
+        ::listen(toNative(handle), 1);
+    }
+
+    static unsigned long long acceptBlocking(unsigned long long handle)
+    {
+        return socketToTestHandle(::accept(toNative(handle), nullptr, nullptr));
+    }
+
+    static int receive(unsigned long long handle, char *buf, int len)
+    {
+        return ::recv(toNative(handle), buf, len, 0);
+    }
+
+    static int sendAll(unsigned long long handle, const char *data, int len)
+    {
+        return ::send(toNative(handle), data, len, 0);
+    }
+
+    static void closeSocket(unsigned long long handle)
+    {
+        CLOSE_NATIVE(toNative(handle));
+    }
+
+    // Bounded readiness wait: >0 readable, 0 timeout, -1 error.
+    static int waitReadable(unsigned long long handle, int timeoutMs)
+    {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(toNative(handle), &fds);
+        timeval tv{};
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeoutMs % 1000) * 1000);
+#ifdef _WIN32
+        return ::select(0, &fds, nullptr, nullptr, &tv);
+#else
+        return ::select(toNative(handle) + 1, &fds, nullptr, nullptr, &tv);
+#endif
+    }
+
+    static void setRecvTimeout(unsigned long long handle, int timeoutMs)
+    {
+#ifdef _WIN32
+        DWORD ms = static_cast<DWORD>(timeoutMs);
+        ::setsockopt(
+          toNative(handle), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&ms), sizeof(ms)
+        );
+#else
+        timeval tv{};
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeoutMs % 1000) * 1000);
+        ::setsockopt(toNative(handle), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    }
+
+  private:
+#ifdef _WIN32
+    static constexpr unsigned long long INVALID_SOCKET_VALUE = INVALID_SOCKET;
+
+    static SOCKET toNative(unsigned long long handle)
+    {
+        return testHandleToSocket(handle);
+    }
+
+    static bool socketIsValid(SOCKET fd)
+    {
+        return fd != INVALID_SOCKET;
+    }
+
+    static void CLOSE_NATIVE(SOCKET fd)
+    {
+        closesocket(fd);
+    }
+#else
+    static constexpr int INVALID_SOCKET_VALUE = -1;
+
+    static int toNative(unsigned long long handle)
+    {
+        return testHandleToSocket(handle);
+    }
+
+    static bool socketIsValid(int fd)
+    {
+        return fd >= 0;
+    }
+
+    static void CLOSE_NATIVE(int fd)
+    {
+        ::close(fd);
+    }
+#endif
+};
+
+// One-shot plain-HTTP listener: the close API's documented success answer is
+// `204 No Content`, which the suite's Drogon listener cannot produce for an
+// unknown path, so the case mints its own port, answers exactly one request
+// with 204, and hands the captured request text back for assertions.
+std::string toLowerAscii(std::string text)
+{
+    for (char &c : text)
+    {
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
+class OneShotListener
+{
+  public:
+    // Reports the bound port (0 on failure) through `portPromise` as soon as
+    // it is listening -- the caller needs it to *make* the request this
+    // listener waits to serve. Then it answers exactly one request and
+    // finishes. Every wait is bounded (15s overall), so the joining thread can
+    // never block on a client that failed to arrive.
+    static void runOnce(std::string &capturedRequest, std::promise<unsigned> portPromise)
+    {
+        static WinsockGuard winsock;
+        unsigned long long raw = 0;
+        if (TestSockets::openSocket(raw) != 0)
+        {
+            portPromise.set_value(0);
+            return;
+        }
+        int port = 0;
+        if (TestSockets::bindAnyLoopback(raw) != 0 || TestSockets::boundPort(raw, port) != 0)
+        {
+            TestSockets::closeSocket(raw);
+            portPromise.set_value(0);
+            return;
+        }
+        TestSockets::listenOne(raw);
+        portPromise.set_value(static_cast<unsigned>(port));
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        unsigned long long client = TestSockets::invalid();
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (TestSockets::waitReadable(raw, 200) > 0)
+            {
+                client = TestSockets::acceptBlocking(raw);
+                break;
+            }
+        }
+        if (client == TestSockets::invalid())
+        {
+            TestSockets::closeSocket(raw);
+            return;
+        }
+        TestSockets::setRecvTimeout(client, 5000);
+        std::string text;
+        char buf[1024];
+        while (true)
+        {
+            const int got = TestSockets::receive(client, buf, static_cast<int>(sizeof(buf)));
+            if (got <= 0)
+            {
+                break;
+            }
+            text.append(buf, static_cast<size_t>(got));
+            const size_t headerEnd = text.find("\r\n\r\n");
+            if (headerEnd != std::string::npos)
+            {
+                size_t contentLength = 0;
+                const std::string lowered = toLowerAscii(text.substr(0, headerEnd));
+                const size_t clPos = lowered.find("content-length:");
+                if (clPos != std::string::npos)
+                {
+                    contentLength = static_cast<size_t>(std::stoul(
+                      text.substr(clPos + 15, text.find('\r', clPos + 15) - (clPos + 15))
+                    ));
+                }
+                if (text.size() >= headerEnd + 4 + contentLength)
+                {
+                    break;
+                }
+            }
+        }
+        capturedRequest = text;
+        const std::string response = "HTTP/1.1 204 No Content\r\n\r\n";
+        TestSockets::sendAll(client, response.data(), static_cast<int>(response.size()));
+        TestSockets::closeSocket(client);
+        TestSockets::closeSocket(raw);
+    }
+};
 }  // namespace
 
 DROGON_TEST(WechatPayClient_DecryptResource)
@@ -668,4 +943,127 @@ DROGON_TEST(WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure)
 
     EVP_PKEY_free(pkey);
     removeTempPem(keyPath);
+}
+
+// Audit round 14: the close API answers success with `204 No Content` and no
+// body at all. The shared request path treated every 2xx as "must parse as
+// JSON", so a close that WeChat had accepted came back to the caller as
+// `invalid json response` -- the one answer that proves the trade shut would
+// have been indistinguishable from a failure. This case pins both halves: the
+// request shape (method, path, mchid-only body, signed) and the 204 success.
+DROGON_TEST(WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape)
+{
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+    const std::string keyPem = privateKeyPem(pkey);
+    CHECK(!keyPem.empty());
+    const auto keyPath = writeTempPem(keyPem);
+
+    std::string capturedRequest;
+    std::promise<unsigned> portPromise;
+    auto portFuture = portPromise.get_future();
+    std::thread listener([&capturedRequest, promise = std::move(portPromise)]() mutable {
+        OneShotListener::runOnce(capturedRequest, std::move(promise));
+    });
+    const unsigned port = portFuture.get();
+
+    Json::Value config;
+    config["mch_id"] = "1900000000";
+    config["serial_no"] = kTestSerial;
+    config["private_key_path"] = keyPath.string();
+    config["api_base"] = "http://127.0.0.1:" + std::to_string(port);
+    WechatPayClient client(config);
+
+    std::promise<std::pair<std::string, Json::Value>> outcome;
+    client.closeTransaction(
+      "TEST-CLOSE-ORDER-1", [&outcome](const Json::Value &result, const std::string &err) {
+          outcome.set_value({err, result});
+      }
+    );
+
+    auto future = outcome.get_future();
+    const bool answered = pay::test_util::waitForFutureReady(future, std::chrono::seconds(10));
+    // Join before any REQUIRE can throw: the listener is bounded by its own
+    // deadline, so this cannot outlive a broken request, and joining is what
+    // makes `capturedRequest` visible to this thread.
+    listener.join();
+    REQUIRE(port != 0);
+    REQUIRE(answered);
+    const auto [err, result] = future.get();
+    CHECK(err.empty());
+    CHECK(result.isObject());
+
+    CHECK(
+      capturedRequest
+        .rfind("POST /v3/pay/transactions/out-trade-no/TEST-CLOSE-ORDER-1/close ", 0) == 0
+    );
+    // Case-insensitive: the assertion pins "a WECHATPAY2-SHA256-RSA2048
+    // authorization line is on the wire", and header casing is the HTTP
+    // client's own business.
+    const std::string loweredRequest = toLowerAscii(capturedRequest);
+    CHECK(loweredRequest.find("authorization: wechatpay2-sha256-rsa2048 ") != std::string::npos);
+    // The official parameter table puts exactly one member in the body.
+    CHECK(capturedRequest.find("\"mchid\":\"1900000000\"") != std::string::npos);
+    CHECK(capturedRequest.find("\"appid\"") == std::string::npos);
+
+    EVP_PKEY_free(pkey);
+    removeTempPem(keyPath);
+}
+
+// The close guards run before the network: an order the caller cannot name, or
+// a client with no merchant number to put in the body, must answer locally
+// rather than sign and send a request the channel would only refuse.
+DROGON_TEST(WechatPayClient_CloseTransaction_GuardsBeforeNetwork)
+{
+    Json::Value config;
+    config["mch_id"] = "";
+    config["serial_no"] = kTestSerial;
+    config["api_base"] = "http://127.0.0.1:9";
+    WechatPayClient client(config);
+
+    bool called = false;
+    std::string err;
+    client.closeTransaction("", [&called, &err](const Json::Value &, const std::string &e) {
+        called = true;
+        err = e;
+    });
+    CHECK(called);
+    CHECK(err == "missing orderNo");
+
+    client.closeTransaction(
+      "TEST-CLOSE-ORDER-2", [&called, &err](const Json::Value &, const std::string &e) {
+          called = true;
+          err = e;
+      }
+    );
+    CHECK(err == "missing mch_id");
+}
+
+// The SPI entry must forward to the concrete close, not to the default
+// "unsupported" answer -- otherwise the reconciliation sweep would call a
+// method that exists only on the concrete class and every close would be a
+// silent no-op error string.
+DROGON_TEST(WechatPayClient_CloseOrder_SpiEntryIsSupported)
+{
+    Json::Value config;
+    config["mch_id"] = "1900000000";
+    config["serial_no"] = kTestSerial;
+    config["private_key_path"] = "no-such-key.pem";
+    config["api_base"] = "http://127.0.0.1:9";
+    std::shared_ptr<drogon_pay::PaymentChannel> channel = std::make_shared<WechatPayClient>(config);
+
+    bool called = false;
+    std::string err;
+    channel->closeOrder(
+      "TEST-CLOSE-ORDER-3", [&called, &err](const Json::Value &, const std::string &e) {
+          called = true;
+          err = e;
+      }
+    );
+    CHECK(called);
+    // Signing fails on the missing key before the network: proof the SPI entry
+    // reached the real close implementation rather than the default no-op.
+    CHECK(err.find("does not support closing") == std::string::npos);
+    CHECK(!err.empty());
 }

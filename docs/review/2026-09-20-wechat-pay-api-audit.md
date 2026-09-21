@@ -460,3 +460,570 @@ preset 下生成）由 CI 判定；本地已跑通 MSVC 构建、`clang_format.p
   新分支的用例；服务层残余 `std::errc::*` → 业务码（§七）；`AlipayChannel.cc:428` 毫秒当秒、
   `downloadCertificates` 裸 `this`（§六）；`CallbackService` 两条回调的嵌套压平（本轮实测它是格式化陷阱）。
 
+## 十二、第六轮复审补记（e9999e6 之后，本轮）
+
+三个评审子代理并行对 `e9999e6` 起：加解密/证书、退款生命周期、并发/幂等。逐条落回代码核对守卫方向，
+refuted 也留证据。本轮落地八处（含 §九~§十一 遗留的 SSRF 校验器补全），证伪两条安全断言，判定一处方向相反。
+
+- **退款错误码 1409/409（本轮修）**：退款在途冲突原回笼统码，`openapi.yaml:833` 承诺的 409 一直是空头。
+  `RefundService.cc:331-333`、`1075-1077` 改回业务码 `1409`（HTTP 409），`RefundQueryTest.cc:425,2617,3531`
+  同步断言 1409 —— 契约第一次与代码相符。
+- **退款生命周期两处竞态：过早 `REFUNDED` + 无守卫状态写（Critical，本轮修）**：
+  `updateRefundWithError`/`updateRefundWithSuccess` 原以 `findOne` 再 `update(model)` 落库，会把脏列里的
+  `status` 一并写回，且一笔退款成功就把父订单无条件推到 `REFUNDED`。改成 `Mapper::updateBy(...)` 的
+  CAS：`updateRefundWithError` 只在 `status IN ('REFUND_INIT','REFUNDING')` 时写 `REFUND_FAIL`；
+  `updateRefundWithSuccess` 同守卫写 `REFUND_SUCCESS`，且**只有** `settleOrder()` 命中 `REFUND_SUCCESS`
+  时、再以 `WHERE status='PAID'` 守卫把订单改 `REFUNDED`（`RefundService.cc:1544-1848`）。通知侧
+  （`CallbackService.cc:2712-2802`）补一笔事务内、`PAID` 守卫的等价订单写，保证两条入账路径都不越过先到的
+  快速通知。
+- **对账入账的金额校验（本轮修）**：`queryOrder` 走渠道实时同步时，把渠道答案金额与本地 `pay_payment.amount`
+  对撞后才允许落 `PAID`。新增命名空间函数 `reconcileAmountProblem(answerTotalFen, paymentAmount)`
+  （`PaymentService.cc`）：微信读 `amount.total`（分）、支付宝读 `total_amount`（元，经 `parseAmountToFen`），
+  仅在 `orderStatus=='PAID'` 分支前校验，不一致或渠道无金额则 `LOG_ERROR` + `callback("")`，
+  让 `queryOrder` 报回未变的库状态。注意 `pay_payment` 无 `currency` 列（在 `pay_order` 上），故对账门只比金额，
+  币种校验仍留在通知路径。
+- **SSRF 校验器补全（本轮修，含 `#` 那个洞）**：`validateNotifyUrl` 补四类 —— userinfo 用**最后一个** `@`
+  剥离、非规范 IPv4 拼法（`127.1`/`2130706433`/`0x7f.1`/`010.1.1.1` 等一律经 `isNumericAddressShape` 拒）、
+  IPv6 白名单（`isGlobalUnicastIpv6` 只放 `2000::/3`）、host 终止符扩到 `/:?#`。最后一条是我自己新测试
+  `PayUtilsTest.cc:176` 抓出来的：`#` 不截断 host 时 `http://127.0.0.1#x.com` 读成非法 host 而放行、客户端却连
+  127.0.0.1 —— 这个洞 HEAD 也有。补了正向对照（`host42.example.com`、`127.0.0.1@pub.example`、路径里的 `@`、
+  `https://pub.example.com/#cb`）防守卫过宽。
+- **证书下载节流：安全断言证伪、真实小缺陷修（本轮）**：评审称未知序列号的伪造回调能"饿死"证书轮换。
+  核对 `downloadCertificates` 与 `/v3/certificates`：**该端点返回整套平台证书、循环里把所有通过校验的都装进
+  缓存，与触发它的序列号无关**。所以攻击者顶多把签名 GET 限到每周期一次，拦不住真轮换证书被装上 —— 节流
+  本身就是防"每通知一次外呼"的限速器，让不可信流量去 stamp 它是**设计如此**。故"饿死=安全问题"证伪。
+  但确有一处真缺陷：原 `lastCertDownloadAt_ = now` 在 `buildAuthorizationHeader` 之前，签名/配置失败（根本没
+  发请求）也烧掉整个窗口、饿死下次真刷新。已把建头移到前面、只有真要发请求时才在锁内 stamp
+  （`WechatChannel.cc:616`），check+stamp 仍原子。
+- **证书回调裸 `this` 的生命周期缺陷（§六 遗留，本轮修）**：`downloadCertificates` 的异步 HTTP 完成回调捕获裸
+  `this` 去调 `decryptResource`/`setPlatformCert`，但没有任何东西保证客户端活到响应回来。生产侧所有持有者都经
+  `shared_ptr`（注册表 `make_shared`、服务 `dynamic_pointer_cast`），故进程关停时若一次刷新仍在途，迟到响应会解引用
+  悬垂指针 —— 就是 §六 起一直挂"仍未做"的那条。现让类继承 `enable_shared_from_this`、回调解 `weak_ptr` 并在碰任何成员
+  前 `lock()`，客户端已亡则丢弃响应。栈构造的测试路径（`WechatPayClient_DownloadCertificates`）在建签名头时即同步失败、
+  在异步边界之前，故不受影响（本机实测仍 3 断言绿）。真正的竞态要"活响应 + 关停"同时发生，本机只有编译证据。
+- **SPI 三参 `verifyCallback` 对无 `resource` 的体应拒绝（本轮修，接口加固）**：`:1114` 那版过去对缺
+  `resource` 对象的已验签体仍 `return true`、给出空 `order_no` 与 null payload。微信 V3 每条通知必带加密
+  `resource`，缺它即畸形 —— 现改为 `else { error=...; return false; }`（`WechatChannel.cc` 资源解密段）。
+  **该三参版在生产回调链无调用者**（实链走六参纯验签版 `CallbackService.cc:3294`），故本条只有编译证据。
+- **并发评审 F2：预留竞态的幂等 ACK 补守卫（本轮修，两处）**：`CallbackService.cc:710-721`（支付）与其退款孪生
+  `:2405-2416`，在 `ON CONFLICT DO NOTHING RETURNING` 抢注失败（0 行）时**无条件回 SUCCESS**，却没读抢占者的
+  `response_snapshot`。而读路径（`:540`、`:2242`）恰恰规定"快照为 NULL = 在途，不能当已处理，要 drop+回 FAIL 重试"。
+  两条路径对同一语义给出相反答案，就是 F2：抢占者若在其业务事务提交前崩溃，预留行永久停在 NULL，而输家已把
+  2xx 回给了微信 → 微信停投、结算搁浅。**修法与读路径对齐**：抢注失败改回 `FAIL`（`makePayError(1400,...)`），
+  把"完成 vs 在途"的裁决让给下一次走读路径的投递（它能正确区分）。输家不碰业务逻辑，无重复扣款风险。
+  `openapi.yaml` wechat notify 描述补了这一句并发语义。
+- **判定方向相反、不改**：F2 里"`dropUnfinalizedReservation` 只按 key 匹配会删别人在途预留"的根因仍需要 owner
+  token 才能治本，与 §十一 同条一致，记入"仍未做"，本轮不动。
+- **本轮本机证据**：MSVC Release 重建（`WechatChannel.cc`+`CallbackService.cc` 重编、`clang-format --fix` 后四文件
+  再编，日志 0 warning）+ 七门禁全过（clang-format check + 六个 `check_*`）+ `PayUtils_ValidateNotifyUrl` 42 断言全绿。
+  **证据边界（诚实标注）**：F2 两处改动、SPI 三参严格化、证书节流重排都只有编译证据 —— 预留竞态要两条并发投递
+  打同一 key 且连 PostgreSQL，是 CI-only。SSRF 的"红"证据不是真跑出来的：分类器拦了那次临时回退（会撤销 SSRF 修复），
+  所以红是靠读 `git show HEAD:` blob 逐输入推演、绿才是真跑；证书重排的旁证是构建日志里那条"配置缺失 warm-up 在
+  节流之前返回错误"，恰好演示了新顺序。jsapi/alipay 对账接线、部分退款仍把订单在第一笔成功退款时标 `REFUNDED`
+  （既有产品语义，本轮未改，记为已知缺口而非静默重设计）。
+- **仍未做（承接 §十一）**：幂等预留 owner token；jsapi/alipay 新分支与 F2/SPI
+  的用例；`CallbackService` 两条回调嵌套压平。（`downloadCertificates` 裸 `this` 本轮已修，见上。）
+
+## 十三、第七轮复核（无新增缺陷，三条候选假设均以证据证伪）
+
+本轮按"refuted 也要留证据"的纪律，对三个新的可疑方向逐一撞代码，结论全部为**已防护、不改**：
+
+- **候选一：V3 回调缺时间戳重放窗口 → 证伪**。支付与退款两条回调链都在验签之后、进业务事务之前调用
+  `isTimestampFresh`（`CallbackService.cc:191`，`kMaxSkewSeconds=300`），支付链 `:315`、退款链 `:2035`
+  各一处；随后 `checkNonce`（`CallbackService.cc:218`）以 Redis `SET NX EX 360`（`:262`）做一次性 nonce。
+  重放要同时越过
+  5 分钟时戳窗与 360 秒 nonce 缓存，两道门都在，且都在贵操作（DB 事务）之前。无需新增。
+- **候选二：累计超额退款缺总量对撞 → 证伪**。退款发起前对同一 `order_no` 做行锁 `SELECT SUM`
+  （`RefundService.cc:1032`），`status IN ('REFUND_INIT','REFUNDING','REFUND_SUCCESS')` 显式**排除**
+  `REFUND_FAIL`（失败的不占额度），再 `:1069` `if (refundedFen + refundFen > totalFen)` 回 `1409`。
+  单笔 `refundFen<=0 || >totalFen` 另有 `:683` 前置门。累计口径与状态集合都对，无需新增。
+- **候选三：对账同步绕过金额门 → 证伪**。金额对撞放在共享函数
+  `syncOrderStatusFromWechat`/`syncOrderStatusFromAlipay` 内部（`PaymentService.cc:2403`/`:2884`，
+  `orderStatus=='PAID'` 分支前），而非只放在 `queryOrder`。`ReconciliationService` 定时扫
+  PAYING/CREATED 后调的正是这两个共享函数（`ReconciliationService.cc:201`/`:270`），故对账入账**继承**同一道
+  金额门，无旁路。无需新增。
+
+结论：微信 V3 全流程（建单、回调、查询、退款、对账、证书）在本轮可查证据下已系统加固；本轮未发现同类可实现缺陷。
+CI-only 分支（F2 预留竞态、SPI 三参严格化、证书下载并发生命周期、对账接线）仍待 `_build-test.yml` 三平台绿。
+
+## 十四、第八轮：出站请求构造对撞官方参数表（一缺陷修复 + 一断言证伪）
+
+本轮换了视角：前七轮都审**入站回调与状态机**，这轮逐字段审**出站请求**与官方 V3 参数表的符合性。
+
+- **建单字段前置校验缺失（P2 功能缺陷，本轮修）**：官方 Native 下单参数表（原句）——`out_trade_no`
+  "要求6-32个字符内，只能是数字、大小写字母_-|\* 且在同一个商户号下唯一"，`description` 必填、≤127 字符。
+  代码里建单入口对 `order_no` **零校验**（`PaymentService.cc` createPayment 与 QR 分支只查空；handler 的
+  `FieldType::String` 只查 JSON 类型），`attach`/`description` 也无上限。后果链：越窗单号 → 本地订单已落库 →
+  微信侧建单/查询永远 400/ORDERNOTEXIST → 订单永滞留对账扫表；>64 字符的单号连退款入口都进不去
+  （`RefundService.cc:407`）。修法：`PayUtils` 新增纯函数 `validateWechatOrderFields`
+  （out_trade_no 6-32 + 字符集；description 非空 ≤127 **码点**、attach ≤128 码点——官方原句按"字符"，
+  UTF-8 码点计数不误伤中文单），两处 wechat 分支在建单前调用并回 400/1001、释放幂等预留
+  （`PaymentService.cc:476` create、`:1495` QR；函数在 `PayUtils.cc:539`）。
+  新单测 `PayUtils_ValidateWechatOrderFields` 17 断言（含中文码点正向对照）。
+  **测试夹具随守卫收口**：`QrPaymentBookingTest` 的 `ord_qr_<uuid>`（43 字符，本就在窗外）与
+  `CreatePaymentIntegrationTest` 依赖**空 order_no 落库**的两个 service 级用例，改为合规唯一单号生成器；
+  `RequestBodyShapeTest` 的 46 字符单号同改。openapi：`CreatePaymentRequest.order_no` 描述写明窗口，
+  wechat 响应示例换成 32 字符无连字符单号，QR 端点描述补前置校验语义。
+- **"退款缺必填 `req_from`" 证伪**：直连商户「申请退款」现行参数表**没有** `req_from`、
+  `user_define_refund` 字段（服务商版同）；`funds_account` 枚举 = `AVAILABLE`/`UNSETTLED`，与
+  `RefundService.cc:432-436` 的校验逐字一致；`reason` ≤80 与官方 80 一致（按字节，代码
+  `:394` 用 `size()` 即字节数，方向与官方一致）。`payload`（`RefundService.cc:1408-1425`）无需补字段。
+- **本轮本机证据与边界（诚实标注）**：MSVC Release 重建 0 warning；`PayUtils_ValidateWechatOrderFields`
+  17 断言 + 相邻 `PayUtils_*`/`WechatPayClient_SetPlatformCert_*`/`DownloadCertificates` 全绿。
+  `WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure` 与对照组 `HealthProbe_LivenessEndpoint`
+  在 `-r` 单跑时同红（"Bad server address"）：该族依赖测试套件自带 listener，单跑不满足前置 —— 环境约束、
+  非本轮回归，CI 全量跑为裁决。守卫对建单入口的行为改变（400 提前）要 QR/shape 集成族连 PostgreSQL 验证，
+  属 CI-only。
+- **仍未做（承接 §十二/§十三，新增两条）**：`time_expire` 的 RFC3339 格式与"≤15 天"前置校验（现状：
+  非法格式照发给渠道，建单必败、订单滞留 —— 与本轮修的同一后果类）；`goods_detail` 透传字段未实现
+  （官方可选，缺它不畸形，不算缺陷）。
+
+## 十五、第九轮：幂等预留 owner token（F2 根因治本，一缺陷修复）
+
+§十一 记下的"要治本得给预留加 owner token"、§十二 判定"方向相反、本轮不动"的那条，本轮落地。
+
+- **缺陷链复盘**：回调链两阶段预留（INSERT 空快照 → 业务事务提交后定稿）从不记录**持有者是谁**。
+  读路径的 `dropUnfinalizedReservation` 只能按 `key + snapshot IS NULL` 匹配 —— 恢复"崩溃持有者留的死预留"
+  必须允许第三方清行，所以删除处加不了 owner 校验；但它因此能删掉**活着但慢**的投递 A 的在途预留。
+  A 不知情继续跑：定稿是纯 key 匹配的 UPDATE，结局二皆坏 —— 行已被重抢（C 预留了新行）则 A 把快照
+  盖到**不属于自己的行**上；行被删净则 A 提交入账、回给微信 SUCCESS，却**没有任何幂等证据写回**，
+  后续重复投递只能靠 CAS 分支重新裁决。
+- **治本落点（本轮修）**：`sql/005_pay_idempotency_owner_token.sql` 给 `pay_idempotency` 加可空
+  `owner_token VARCHAR(64)`；两条回调链的
+  预留 INSERT 写入每次投递新造的随机 token（`CallbackService.cc:764`、`:2637`，去连字符 UUID=32 字符）；
+  三处定稿收敛到文件级 helper `finalizeReservation`（`:131`），守卫形态为
+  `UPDATE ... SET response_snapshot=$1 WHERE idempotency_key=$2 AND owner_token=$3 RETURNING ...`，
+  按返回行数裁决：
+  - 事务内两处（支付 PAID 分支 `:1402`、退款链 `:3184`）：0 行 = 主权已失 → **回滚整个投递 + FAIL/1400**
+    —— 不提交自己已不持有的证据，入账随事务一起撤销，渠道重试后由下一位投递读到真实状态；
+  - 支付 else 分支是**提交后**在 `dbClient_` 上定稿（`:1723`）：事务已 COMMIT，入账即事实，此时 0 行只
+    说明快照没盖上 → `LOG_WARN` + 照常 SUCCESS（证据缺失至多换一轮重试，重复投递走读路径 + CAS 兜底）。
+- **定稿为何允许裸 SQL**：`UPDATE ... RETURNING` 本就是 `.claude/rules/db-operations.md` 豁免清单里的
+  形态（与预留 INSERT 同款确定性行数判定）；且 ORM 模型由 `drogon_ctl` 生成、本轮禁改 —— 新列对模型
+  不可见，读路径 `findOne` 与 create 路径均不受影响（`CallbackService.cc:59` 的删注释同步说明"删除处
+  不加 owner、接管由定稿守卫中和"的方向）。
+- **测试与证据边界（诚实标注）**：39 处夹具的 `CREATE TABLE pay_idempotency` 统一加列（迁移与夹具双路
+  径建出的表都有该列）；支付回调"陈旧预留 drop+重试"用例补正向断言 —— 胜者的行必须**同时**带已定稿
+  快照与非空 owner_token（`WechatCallbackIntegrationTest.cc` 的
+  `PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry` 用例尾部），快照有、token 空 = 走了无守卫
+  的旧路径，两者皆空 = 提交了却没写证据。真正的"删活预留 → 定稿 0 行 → 回滚 FAIL"竞态需要两条并发
+  投递打同一个 PostgreSQL，本机不可判定：**本轮为编译证据**（MSVC Release 重建 0 warning，token 透传
+  靠编译器逐层捕获校验）+ 七门禁全绿；接管裁决分支连 CI 数据库族验证，仍属 CI-only。
+- **边界（不在本轮范围，注明理由）**：下单/退款创建链在 `IdempotencyService` 自己的预留（不同 key 域）
+  不覆盖 —— 那里没有"读路径第三方清行"的对手机制，`clearReservation` 同样限定 `snapshot IS NULL`，且
+  失败面由渠道按 `out_trade_no`/`out_refund_no` 去重 + 微信重试自愈；留作后续统一改造。
+- **仍未做（承接）**：`goods_detail` 透传（§十四 那条不变）；`time_expire` 前置校验已在 §十六 落地；
+  上文创建路径预留的统一 owner 化；`CallbackService` 两条回调嵌套压平（§十二 起挂着）。
+
+
+
+## 十六、第十轮：`time_expire` 前置校验与落库解析（两侧读数相反）
+
+- **缺陷链（同一个字段，两处方向相反的错读）**：
+  1. 出站侧：建单把 `request.timeExpire` 原样放进 V3 payload，格式从不校验 —— 空格形
+     `2026-05-20 13:29:35` 本地解析成功、渠道判 400，而 `pay_order` 行此时已提交，于是
+     留下一条渠道侧根本不存在的交易等着对账清扫（与第八轮同一后果类）。
+  2. 落库侧：`trantor::Date::fromDbStringLocal` 以**空格**切分（trantor `Date.cc:293`），
+     RFC3339 串于是只剩日期段被切出，日字段变成 `20T13:29:35+08:00`，而 `std::stol` 在
+     部分转换成功时不抛（标准语义）—— `expire_at` 落成本地零点、时分秒整段静默丢失，连
+     原本的 `LOG_WARN` 都不会触发。**即：合法值被截断，非法值被接受。**
+- **官方口径修正（本轮核验，纠正 §十五 记录）**：§十五 写的"≤15 天"出自 H5 下单页；本仓
+  两条微信入口都打 `/v3/pay/transactions/native`（`WechatChannel.cc:1121`、`:1127` 收敛到
+  同一个 `createTransactionNative`），适用 Native 页原文"支付结束时间需遵循 rfc3339 标准
+  格式……需在下单时间的 7 天以内，如超过 7 天，系统将自动调整"。故守卫按 **7 天**，并把
+  "系统自动调整"这个调用方观测不到的静默改期改为本地拒绝；字段长度 string(64) 同源。
+- **落点**：`pay::utils::parseRfc3339`（`PayUtils.cc:642`）严格 RFC3339 → UTC 秒；
+  `validateTimeExpire`（`:702`）在其上叠加"必须晚于当前"与微信 7 天窗（按 channel 分向，
+  非微信渠道不受该窗约束）；建单在**写库之前** fail-fast（`PaymentService.cc:477`，1001 +
+  `clearReservation`，与第八轮字段守卫同位同处置），`expire_at` 用同一读数落库（`:625`）。
+- **为何不复用 trantor 解析器（实测，不是推断）**：`fromISOString` 把机器时区叠在串自己声明的
+  偏移之上，首版单测里"格式化为 UTC 再比对"直接读出整 8 小时的偏差与 1 秒漂移。故日历与偏移
+  自算（`daysFromCivil`，`:589`），测试侧的 RFC3339 生成器同样自写 —— 被测与辅助不同源，
+  否则helper 的错会替守卫的错背书。
+- **本轮自查出的自身缺陷（留证据）**：首版 `daysFromCivil` 的月份三目写反
+  （`month + (month>2 ? 9 : 0) - 3`，1/2 月还会 unsigned 回绕），epoch 断言当场红
+  （`1970-01-01T00:00:00Z` 读出 `74217003148800`）；改为 `month + (month > 2 ? -3 : 9)` 后
+  `1970-01-01 → 0`、`2000-01-01 → 946684800`、`+08:00` 为减偏移、闰日
+  `2024-02-29T23:59:59Z → 1709251199` 全绿。守卫自己也被测试推翻过一次，正是"先跑红再改"的价值。
+- **测试与证据边界（诚实标注）**：`PayUtilsTest.cc:305` 39 断言本机全绿，含正向对照（合法值
+  必须放行、7 天窗只作用于微信）与旧解析钉证（`fromDbStringLocal("…T…")` 等于
+  `fromDbStringLocal("2099-05-20")`，与时区无关，只暴露截断）；
+  `CreatePaymentIntegrationTest.cc:419` 的"拒绝前不落库 / 合法值过守卫"连 PostgreSQL，本机无
+  库（连接按 1 秒重试不止，非代码缺陷）→ **CI-only**。七门禁全绿，69 文件格式干净，MSVC
+  Release 重建 0 warning。
+- **顺带核实（不改，注明理由）**：HTTP 面 `PayHandlers.cc:202` 起从未给 `request.timeExpire`
+  与 `request.attach` 赋值，`openapi.yaml` 也未声明 `time_expire` —— 该字段目前只对直接使用
+  Service API 的调用方可达。本轮按"修已存在的字段"处理；是否把 `time_expire` 提升为 HTTP
+  契约字段属产品决定，列入下轮候选。
+- **仍未做（承接）**：`goods_detail` 透传；创建路径预留的统一 owner 化；`CallbackService` 回调
+  嵌套压平；`time_expire` 是否进 HTTP 契约待拍板。
+
+## 十七、第十一轮：`trade_state=REFUND` 的映射方向（把已收的钱记成没收到）
+
+- **缺陷链（一处映射，三条下游后果）**：`pay::utils::mapTradeState` 把 `REFUND` 与
+  `CLOSED`/`REVOKED` 写在同一分支，回答"这笔支付失败了"。该函数有两个调用点，都在钱已经
+  动过的路径上：通知落库（`CallbackService.cc:1065`）与查单对账
+  （`PaymentService.cc:2418`）。于是回调丢失后由查单兜底时：payment 行 CAS 成 `FAIL`、
+  `PAYMENT` 流水一分不写（两处补流水的判据都只认 `PAID`：`PaymentService.cc:2553`、
+  `:2724`，通知侧 `CallbackService.cc:1363`）、order 落成 `CLOSED` 像是过期未付。渠道账单
+  上却同时存在这笔支付和它的退款，本地账面与渠道侧永久对不上——正是第七轮"收款事实不能被
+  推断覆盖"那类问题的反面版本。
+- **官方口径（本轮逐字取证）**：`https://pay.weixin.qq.com/wiki/doc/apiv3/apis/chapter3_4_2.shtml`
+  （微信支付订单号查询订单，`GET /v3/pay/transactions/id/{transaction_id}`）原文枚举：
+  "SUCCESS：支付成功 REFUND：转入退款 NOTPAY：未支付 CLOSED：已关闭 REVOKED：已撤销（仅付款码
+  支付会返回）USERPAYING：用户支付中（仅付款码支付会返回）PAYERROR：支付失败（仅付款码支付会返
+  回）"。两点据此成立：`REFUND` 与"支付失败"（`PAYERROR`）是不同状态，它说的是**已经收款**的
+  交易被转入退款；本仓 `FAILED`/`FAIL` 默认分支覆盖 `PAYERROR` 与未知值，方向不变。同页还只把
+  业务流转细节指向"开发指引-订单状态流转图"，未给处理步骤，故本仓契约以
+  `examples/pay-server/openapi.yaml:958-981`（`OrderStatus` 含 `REFUNDED`，`CLOSED`/`FAILED`
+  来自"closed/revoked/expired trade"，`REFUNDED` 来自"completed refund"）为准。取证的另一半
+  限制也记录：`pay.weixin.qq.com/docs/...` 域下的页面本轮仍被网关以
+  `FORBIDDEN / code 10605` 拒绝，只有 `wiki/doc/apiv3` 老路径可达（与既有踩坑记录一致）。
+- **落点**：`PayUtils.cc:435` 拆成 `REFUND → order=REFUNDED / payment=SUCCESS`，
+  `CLOSED`/`REVOKED → CLOSED / FAIL` 保持原样；`PayUtils.h` 的声明处补上"两个答案是独立的：
+  一笔交易可以同时收了钱、又不再是已支付"。查单侧"这条答案是不是在说本笔支付"的金额证明
+  扩到 `REFUNDED`（`PaymentService.cc:2481`），两处补 `PAYMENT` 流水的判据同步
+  （`:2553`、`:2724`），通知侧同一判据（`CallbackService.cc:1363`）。支付宝孪生分支
+  （`PaymentService.cc:2966`/`:3037`/`:3207`）本轮**故意不动**：它的状态词表与语义不同源，
+  不在无证据的情况下跟着改。
+- **红验证（先跑红，再改）**：修复前 `PayUtils_MapTradeState` 报
+  `16 | 14 passed | 2 failed`，两处展开正是 `"CLOSED" == "REFUNDED"` 与
+  `"FAIL" == "SUCCESS"`；修复后 `All tests passed (16 assertions in 1 tests cases)`，
+  16 条断言覆盖官方 7 个枚举 + 未知值 + 方向对照。
+- **为什么既有测试没抓到（答案比"没覆盖"更难看：它把错方向钉死了）**：
+  `tests/integration/WechatCallbackIntegrationTest.cc:2000`
+  的 `PayPlugin_WechatCallback_TransactionRefundState` 用 `trade_state=REFUND`、
+  金额与订单一致（`9.99` ↔ `total=999`），却断言 payment `FAIL` + order `CLOSED` +
+  `pay_ledger` 0 行——把一个应当留痕的收款写成无痕。本轮把它改成正向断言
+  （`SUCCESS` / `REFUNDED` / ledger 1 行）并写明理由；同族 `..._TransactionClosed`（`:1542`）、
+  `..._TransactionRevoked`（`:1771`）仍断言 `FAIL`/`CLOSED`，方向对照因此不是只靠新用例撑着的。
+  另一处原因：`QueryOrder_*` 家族用 `setTestClients(realWechatClient, ...)`，真实 client 卡在配置
+  校验，永远走 `wechat_query_error` 分支，名字里的"Success"从未进入映射，所以查单侧的方向错
+  向多年无人触碰（本轮新增用例改用 `setTestChannels` 的 SPI 注入，才第一次真正跑通这条链）。
+- **新增证据（`tests/integration/QueryOrderTest.cc:901` 起）**：`QueryStubChannel` 注入渠道答案，
+  `settleFromChannelAnswer` 记账→查单→回读 `pay_order`/`pay_payment`/`pay_ledger` 计数。两个用例：
+  `PayPlugin_QueryOrder_WechatRefundKeepsTheCollectedPayment`（REFUND 收口 + CLOSED 对照）与
+  `PayPlugin_QueryOrder_WechatRefundWithForeignAmountSettlesNothing`（同一状态但 `total=5000` ≠
+  本笔 `49.90`：不得凭状态落账，订单留 `PAYING`、响应里的 status 保持库值 `PAYING`、流水 0 行）。
+  判据从"状态"扩到"状态 + 金额证明"，避免修复把另一个方向的口子打开。
+- **证据边界（诚实标注）**：本机无 PostgreSQL，`makeQueryTestClient()` 直接返回 null，
+  两个新用例在本地以 `REQUIRE(client != nullptr)` 立即红（这是比既有家族"连不上库挂死"
+  更好的失败形态，但不算验证）→ **CI-only**。本轮能给出的本机证据只有：MSVC Release 全量重建
+  0 warning、`PayUtils_MapTradeState` 16 断言绿、七门禁全绿、69 文件格式干净。
+  因此本轮不宣称完成，判据仍是 `_build-test.yml` 三平台绿。
+- **顺带核实、判定为不改（附理由）**：payment 已是 `SUCCESS` 时后到的交易通知会走
+  `CallbackService.cc:891` 的"already final"短路（回滚 + 回 `SUCCESS`），order 因而停在
+  `PAID`。这不是本轮引入的洞：退款结论另有专责路径 —— 退款通知按 `REFUND.` 前缀路由
+  （`CallbackService.cc:2307`），并只把 `status='PAID'` 的订单 CAS 成 `REFUNDED`
+  （`:3064-3081`），交易通知不承担退款结论。本轮改动之后两条路径的关系也已核对：先到
+  `trade_state=REFUND` 的交易通知自己就把 order 落到 `REFUNDED`，随后那条退款通知的 CAS
+  因 WHERE 条件不再命中而空转，两次都不会重复记账：入账 `PAYMENT` 流水由交易侧写
+  （`CallbackService.cc:1370`），出账 `REFUND` 流水由退款侧写（`:3464`），两条 `entry_type`
+  不同、各自一条。若反过来允许"最终态也向后修正 order"，等于把 CAS 的幂等
+  保护换成一条可被重放通知改写的路径，风险大于收益。
+- **发现但仍未做（下一批候选，按风险排序）**：
+  1. **主动关单缺位**：`libs/drogon-pay/src` 全文无 `.../close` 端点调用（`WechatChannel.cc`
+     里唯一含 "close" 的行是解密注释 `:1174`），过期只能等微信侧自动关单；对"用户放弃但订单
+     还开着"的回收路径不完整。
+  2. 部分退款是否应过早把 order 记成 `REFUNDED`（`RefundService.cc:1675`）需按官方"未全额退款
+     时交易仍为 SUCCESS"再对一次口径。
+  3. 创建路径预留的统一 owner 化、`goods_detail` 透传、`CallbackService` 回调嵌套压平、
+     `time_expire` 是否进 HTTP 契约（第十轮遗留，待拍板）。
+
+## 十八、第十二轮：单笔部分退款不得把整单记成 `REFUNDED`（关闭 §十七 候选 2）
+
+- **官方依据（本轮实测原文）**：
+  - 申请退款参数页（`https://pay.weixin.qq.com/doc/v3/merchant/4012587971`，本轮 WebFetch 核验）：
+    `amount.total` 为"【原订单金额】原支付交易的订单总金额，单位为分，只能为整数"；退款能力描述为
+    "商户可以通过申请退款接口将支付款**全额或部分**还给用户"。两句合起来即：一笔通知里的
+    `total` 永远只是订单原总额，它相对单笔 `refund` 的大小关系**证明不了"已退完"**——是否退完
+    是"该订单全部已退成功退款之和"对总额的问题，只能由库里的账回答。
+  - `trade_state=REFUND` 对部分退款也返回的口径沿引 §十七（查询页枚举 + 第十一轮取证）；本轮
+    据此把"REFUND 即整单退完"的推断继续留在未门控路径（见下"仍未门控"），不越权收口。
+  - 老路径 `wiki/doc/apiv3/apis/chapter3_4_5.shtml` 本轮实测仍返回"支付成功回调通知"页而非
+    退款参数页，与取证地图的踩坑记录一致，未采用。
+- **缺陷（两处写点）**：`RefundService.cc` 的 `updateRefundWithSuccess`（现 `:1594`）与
+  `CallbackService.cc` 的退款通知落库（CAS 现 `:3227`）此前只看"这一笔退款是否 `REFUND_SUCCESS`"，
+  命中即写 `order.status='REFUNDED'`。10.00 的订单退成功 3.00 后，所有以 `REFUNDED` 为键的下游
+  （会员回收、对账、客服口径）都在按"整款已退"行动，而 7.00 还在商户手里。这与第十一轮修的
+  是同一枚硬币的反面：那次是"把收过的钱记成没收"，这次是"把没收齐的退款记成收齐"。
+- **修复（判据下沉为纯函数 + 两处门控）**：
+  - `pay::utils::refundsCoverOrderAmount`（`PayUtils.cc:383`）：`orderTotalFen > 0 &&
+    settledRefundFen >= orderTotalFen`；总额或和被测为 0/解析失败时一律 false，订单保持原状
+    ——没人量过的钱不能当证据。
+  - 服务路径：`settleOrder`（`RefundService.cc:1684`）在写 `REFUNDED` 前用聚合 SUM（raw-SQL
+    豁免第 3 条，Mapper 表达不了 SUM）读该订单 `REFUND_SUCCESS` 行之和，覆盖总额才走
+    `writeRefundedOrder` 的 `PAID→REFUNDED` CAS（`:1671`），否则订单不动、退款记录照常成功返回。
+    渠道调用回调补传 `orderTotalFen`（支付宝/微信两条 lambda 同改），判据与渠道无关。
+  - 通知路径：SUM 读数放在退款通知自己的事务里、payload 更新回调之后（`CallbackService.cc:3120`
+    判、`:3227` 写），因此能看到本事务刚落的这一行；语句排在 `insertCallbackAndFinish` 的显式
+    `COMMIT` 之前，不改变"先落库再回渠道 ACK"的既有顺序。重复计数不可能：退款行 CAS 以
+    `status IN ('REFUND_INIT','REFUNDING')` 为条件，已被并发写终态时 0 行早退。
+- **测试**：
+  - `PayUtils_RefundsCoverOrderAmount`（9 断言：恰覆盖/超额为真；999/1000、1/1000、0/1000
+    为假；0/0、1000/0、负数两侧均假）。本机绿（`All tests passed (9 assertions in 1 tests
+    cases)`）。
+  - 服务路径 CI-only 用例（`tests/integration/RefundQueryTest.cc`）：`RefundStubChannel` 经
+    `setTestChannels` SPI 注入，种"10.00 已 PAID + 4.00 已退成功"，两例
+    `PayPlugin_Refund_PartialRefundKeepsOrderPaid`（再退 3.00：订单仍 `PAID`、已退成功 2 行）与
+    `PayPlugin_Refund_CumulativeRefundsSettleOrder`（再退 6.00：订单 `REFUNDED`）。成对互为对照，
+    防止"门永远不放行"混过只测拒绝方向的断言。
+  - 通知路径同族两例（`tests/integration/WechatCallbackIntegrationTest.cc`：
+    `PayPlugin_WechatCallback_PartialRefundKeepsOrderPaid` /
+    `PayPlugin_WechatCallback_CumulativeRefundsSettleOrder`），并给既有
+    `PayPlugin_WechatCallback_RefundSuccess` 补了它此前缺失的 order 断言（全额通知后必须
+    `REFUNDED`）——没有这条正向对照，门可以永远拒写而全绿。
+  - 证据边界同 §十七：本机无 PostgreSQL，四个新用例本地以 `REQUIRE(client != nullptr)` 快速红，
+    不算验证；本机可给出的证据为 MSVC Release 全量重建 0 error、纯函数单测绿、七门禁全绿、
+    69 文件格式干净。判据仍是 `_build-test.yml` 三平台绿。
+- **已知并刻意接受的保守失败模式**：两笔部分退款并发落账时，各自事务里的 SUM 可能都读不到对方
+  未提交的行 → 双双少算 → 订单停在 `PAID`。方向偏保守（宁可少记退完），但恢复路径目前偏弱：
+  `syncRefundStatusFromWechat`（`RefundService.cc:1889`）只补 `REFUND` 流水、从不推进 order，
+  下一笔退款或交易通知不来就无人纠正。列第十三轮首位。
+- **仍未门控的 `REFUNDED` 落点（第十三轮，与本轮同判据）**：交易通知按 `trade_state=REFUND`
+  经 `mapTradeState`（`PayUtils.cc:410`）直接写 order（`CallbackService.cc:1367`），以及查单
+  同步路径把映射结果透传落库（`PaymentService.cc:2481/2553/2724`）。REFUND 只说"转入退款"，
+  同样证明不了整单退完；本轮刻意不动，避免一次改三处再引入新面。
+- **文档同步**：`examples/pay-server/openapi.yaml` 的 OrderStatus/RefundStatus 措辞、
+  `TECH_SPECS.md` 状态机三处（`REFUNDED` 行、"只有退款达到 `REFUND_SUCCESS`"导语、
+  `REFUND_SUCCESS` 行）已按"已退成功合计覆盖总额才 `REFUNDED`"改口径；CHANGELOG 记 Fixed 一条。
+
+---
+
+## 十九、第十三轮：`REFUND` 答案的三处未门控落点收口 + 退款查单恢复 order
+
+### 官方口径（沿用 §十八 取证）
+`trade_state=REFUND` 只表示"转入退款"——单笔订单允许至多 50 次部分退款，
+一笔退掉一分钱的交易也会以 REFUND 应答下单/查单/通知三条链。因此
+REFUND→order 写 `REFUNDED` 在任何入口都只是"主张"，必须与 §十八 同一判据
+（该订单上 `REFUND_SUCCESS` 合计覆盖订单总额）对齐后才能落库。
+
+### 缺陷（§十八 刻意留下的三处）
+1. **交易通知**：`mapTradeState`（`PayUtils.cc:410`，REFUND 分支 `:435-437`）把
+   REFUND 映射为 `REFUNDED` 后，`CallbackService` 交易通知事务内直写 order
+   （`CallbackService.cc:1063-1074` 映射，`:1415` 落库）。
+2. **查单同步**：`PaymentService::settleFromChannelAnswer` 微信路径把映射结果
+   透传到两处 order 写点（payment 已 SUCCESS 分支与 CAS 成功分支，
+   `PaymentService.cc:2595-2604`、`2773-2782`）。
+3. **恢复路径缺口**：`syncRefundStatusFromWechat`（`RefundService.cc:1889`）
+   退款查单同步只补 `REFUND` 流水，从不推进 order——并发双双少算后订单停在
+   `PAID` 时，这条最该纠错的通道自己也不会纠。
+
+### 修复
+- 新纯函数 `pay::utils::resolveRefundedOrderStatus`（`PayUtils.cc:388`）：
+  仅当映射值为 `REFUNDED` 且 `refundsCoverOrderAmount` 不成立时降档为 `PAID`
+  （REFUND 交易毕竟证明了"钱收到过"）；其余状态原样透传。合计不可解析/总额
+  不可解析一律按"证明不了"处理，方向保守。
+- **通知门**（`CallbackService.cc:1076-1161`）：映射出 REFUNDED 时，在既有
+  交易事务上先排队 SUM（豁免 #3 聚合），insert-callback 捕获
+  `resolvedOrderStatus` 共享指针并在首行物化为局部 `orderStatus`，下游全部
+  写点/流水判据/CAS 透传自动取降档后的值——不重排既有 300 行嵌套。SUM 读失败
+  使 Postgres 事务中止，后续语句落入既有错误路径整单回滚重试。非 REFUNDED
+  流程零新增 SQL。
+- **查单门**（`PaymentService.cc:2542-2577` 事务头 SUM +
+  `orderStatusAfterRefundCoverage`（`:82`）两写点应用）：与通知门同一手法；
+  "payment 已终态"的纯报告分支（`:2716-2728`）不动。
+- **恢复路径**（`RefundService.cc:2063-2235`）：`syncRefundStatusFromWechat`
+  在退款行已按 REFUND_SUCCESS 落库的同一事务内读 SUM（本行可见），覆盖总额时
+  以 `PAID`→`REFUNDED` CAS 推进 order（guard 防重开已关闭订单），未覆盖/
+  不可解析保持现状仅报告退款状态。第十一轮 §十七 与第十二轮 §十八 记录的
+  "双双少算停在 PAID"的病，此后只要有一次退款查单同步即可纠正。
+- 支付宝查单路径映射不产生 REFUNDED（只产 PAID/PAYING/FAILED），本轮按目标
+  范围刻意不动。
+
+### 测试
+- 纯函数：`PayUtils_ResolveRefundedOrderStatus`（`tests/unit/PayUtilsTest.cc:72`，
+  10 断言，本机绿）：覆盖/超额透传，欠覆盖/零总额/不可解析降档，
+  其余状态原样。
+- 查单门：`PayPlugin_QueryOrder_WechatRefundKeepsTheCollectedPayment`
+  （`tests/integration/QueryOrderTest.cc:1057`）按新语义反转——无退款台账的
+  REFUND 答案落 `PAID`（payment 仍 SUCCESS、PAYMENT 流水仍在），并保留
+  CLOSED→FAIL/CLOSED 的反向对照；新增
+  `PayPlugin_QueryOrder_WechatRefundSettlesOrderOnlyWhenCovered`（`:1085`）
+  30.00/49.90 保持 `PAID`、49.90/49.90 落 `REFUNDED`，正向对照防"永不写
+  REFUNDED 也能过"。夹具补 `pay_refund` DDL 与种销行、清理。
+- 通知门：`PayPlugin_WechatCallback_TransactionRefundState`
+  （`tests/integration/WechatCallbackIntegrationTest.cc:2000`）order 断言
+  `REFUNDED`→`PAID`（守卫方向复核）；新增
+  `PayPlugin_WechatCallback_TransactionRefundStateCoveredSettlesOrder`
+  （`:2260`）先种一笔全额已退成功退款再发同一 REFUND 通知，order 必须落
+  `REFUNDED`。两案夹具均含 `pay_refund` DDL。
+- 本机验证：全量编译绿；七门禁绿（format-clean 69 文件、架构 4、测试布局 4、
+  文档漂移 7、迁移 6、版本同步、OpenAPI 15 paths/28 ops）；新增 DB 族用例
+  本机 `REQUIRE(client != nullptr)` 快红不挂死，判定属 CI-only。
+
+### 诚实边界与遗留
+- 通知门只收"REFUNDED 主张"的降档；`syncRefundStatusFromWechat` 的推进要求
+  order 行此刻是 `PAID`，若交易通知先把它写成 `PAID`（降档）再退款同步覆盖，
+  方向正确；但若 order 曾被更早路径写成非 PAID 终态（如 CLOSED），恢复不重开，
+  与 §十八 同一保守取向。
+- 查单"看到已覆盖但行仍 PAID→升档"在 `settleFromChannelAnswer` 刻意未做
+  （只降不升，升档留给退款同步与退款通知两条有台账证据的路径），避免把无
+  台账写入权的路径变成第二把推进锁。
+- 单笔渠道答案仍证明不了"它提到的退款存在"——维持金额对账守卫，未新增。
+- 仍未做（后轮候选，按风险排序）：主动关单缺位、`goods_detail` 透传、创建路径
+  owner 化统一、`CallbackService` 回调嵌套压平、`time_expire` 是否进 HTTP 契约、
+  部分退款是否应过早把 order 记成 `REFUNDED`（§十七 提出的"覆盖判据"本轮已把
+  该疑虑消解为"覆盖即终态"，若产品要"部分退款可继续支付/退款"另议）。
+- 文档同步：CHANGELOG Fixed 一条；`TECH_SPECS.md` §十八 措辞已覆盖"已退成功
+  合计覆盖才 REFUNDED"，本轮三落点同判据无需再改；openapi OrderStatus/
+  RefundStatus 描述继续成立。
+
+## 二十、第十四轮：主动关单缺位——超时未支付订单从未在渠道侧关闭
+
+### 官方口径（取证页 4012526915，2026-09-21）
+- `POST /v3/pay/transactions/out-trade-no/{out_trade_no}/close`，body 仅
+  `mchid`；**成功应答为 HTTP 204 No Content，无应答包体**。
+- 使用须知：只有"未支付状态"的订单可关闭；"订单超时未支付……商户需进行关单
+  处理"——关单是商户义务，不是渠道兜底。
+- 错误码：400 INVALID_REQUEST/MCH_NOT_EXISTS；401 SIGN_ERROR；403
+  RULE_LIMIT/TRADE_ERROR（业务原因交易失败——已支付即在此被拒）；429
+  FREQUENCY_LIMITED；500 SYSTEM_ERROR（官方注明"请用相同参数重新调用"，天然
+  可重试）。
+- 取证纪律案例：首轮误抓 `f2f/closeorderinfo`（4012268573，付款码关单，另一个
+  接口），页面身份自检发现同名不同物后改页重取，未据错页设计。
+
+### 缺陷
+1. **全库没有任何 close 调用点**：所有本地 `CLOSED` 都来自渠道答案的被动读数；
+   一笔超时且从未被查到的订单在微信侧保持可支付，直到渠道自己的惰性过期——
+   窗口期内用户仍可能付款成功，形成"本地认为未支付、渠道收了钱"的错配。
+2. **对账清扫每轮看着这些订单却不结束它们**：`syncPendingWeChatOrders` 扫的
+   正是 `PAYING` + wechat 的行，查回 `NOTPAY` 后同步把状态写回 `PAYING`，
+   下一轮重复报告，永不收敛。
+3. **204 会被当成失败**：共享请求通道把一切 2xx 都按"必须解析出 JSON"处理，
+   空 body 的 204 报 `invalid json response`——即便补上调用点，唯一证明
+   "已关闭"的应答也会被记成失败。
+
+### 修复
+- SPI 新增 `PaymentChannel::closeOrder`（`PaymentChannel.h:78`），带默认实现
+  （应答 "channel does not support closing orders"）：调用方 `ReconciliationService`
+  只持有 `PaymentChannelPtr`，默认虚函数让无关单能力的渠道不改代码也能编译，
+  且错误是显式的而不是沉默。
+- `WechatPayClient::closeTransaction`（`WechatChannel.cc:941`）：网络前守卫
+  （`missing orderNo` / `missing mch_id`），路径段过 `urlEncodePathSegment`，
+  body 仅 `mchid`，POST 签名走既有 `buildAuthorizationHeader`；SPI 入口
+  `closeOrder`（`:979`）转发。
+- **204 即成功**（`WechatChannel.cc:500-505`）：显式分支返回空对象 + 空错误，
+  置于 JSON 解析之前。
+- **清扫门**（`ReconciliationService.cc:195` 读 `row.getExpireAt()` 可空指针，
+  `:223-241` 判据）：仅当渠道自己仍答 `NOTPAY` **且**该 order 行的
+  `expire_at` 已过，才 `closeOrder`。`NOTPAY` 是唯一"渠道未支付且本地未定"的
+  状态——`CLOSED`/`REVOKED` 已被同轮同步落终态，已支付的交易 close 会被渠道
+  拒绝且不改本地。拒绝 `LOG_INFO`，成功 `LOG_DEBUG`；本轮刻意不代写本地状态，
+  关单成功后微信查单即答 `CLOSED`，下一轮清扫自然落账。
+- 支付宝 `closeTrade` 依旧未接（目标范围是微信；SPI 默认实现已就位）。
+
+### 测试
+- 通道级（本机绿，无 DB）：
+  `WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape`
+  （`WechatPayClientTest.cc:954`）在测试内起一次性裸 socket 监听，捕获真实
+  出网请求并回 204——请求线（POST + 编码路径 + `/close`）、签名头
+  （大小写无关匹配 `authorization: wechatpay2-...`）、body 恰含 `mchid` 且无
+  `appid`、调用方拿到"空错误 + object"四半同时钉死。
+  `WechatPayClient_CloseTransaction_GuardsBeforeNetwork`（`:1017`）：两个网络前
+  守卫 + 零出网。`WechatPayClient_CloseOrder_SpiEntryIsSupported`（`:1047`）：
+  经 `PaymentChannelPtr` 调用，错误串不得是 "does not support closing"——证明
+  SPI 入口转到了真实现而非默认空转。
+- 清扫级（DB 族，CI-only）：
+  `PayPlugin_Reconcile_ExpiredUnpaidWechatOrderIsClosedOnChannel`
+  （`WechatCloseOrderReconcileTest.cc:339`）直接构造
+  `PaymentService`/`RefundService`/`ReconciliationService` + 记录型 SPI stub，
+  一个正向（过期 3600s + `NOTPAY` → 恰一次 close，本地行保持 `PAYING`）配三个
+  反向对照（未来过期不关；`expire_at` NULL 不关；`SUCCESS` 不关且照常落
+  `PAID`/`SUCCESS`）。`reconcile` 回调只代表派发完成，等待一律以下游事件
+  （stub 的"看过并决定"、行状态轮询）判定。本机 `REQUIRE(client != nullptr)`
+  快红不挂死。
+- 编写期缺陷留证：监听器初稿在测试线程内同步 `accept`，而客户端请求只有在
+  `runOnce` 返回端口后才会发出——自死锁挂死整个用例。修复为后台线程运行 +
+  promise 在 listen 成立时立刻交付端口 + 全链路 15s/5s 封顶，断言前必 `join`。
+- `tests/CMakeLists.txt:33` 注册新文件；七门禁全绿（format-clean 70 文件、
+  架构 4、测试布局 4、文档漂移 7、迁移 6、版本同步、OpenAPI 15 paths/28 ops
+  不变——本轮无新 HTTP 面）。
+
+### 诚实边界与遗留
+- 关单成功不等于本地立刻 `CLOSED`：本地落账仍由下一轮清扫读渠道答案完成
+  （最多延迟一个清扫周期）。若要求"close 应答 204 即本地终态"，需要清扫内
+  二次查单，本轮未做——保守且少一处状态写权。
+- 429/500 之类的可重试失败不做单请求重试，依赖下一轮清扫天然重放；窗口期内
+  用户若已付款，close 会被 403 拒绝，通知/查单链照常接管。
+- 清扫门依赖 order 行自身 `expire_at`：第十轮已保证创建路径写入的
+  `time_expire`/`expire_at` 两侧读数一致；未带超时的历史行保持"永不主动关"。
+- 后轮候选（按风险排序）：`goods_detail` 透传、创建路径 owner 化统一、
+  `CallbackService` 嵌套压平、`time_expire` 进 HTTP 契约、Alipay `closeTrade`
+  接入（SPI 已就位）、查单门"已覆盖但行 PAID→升档"。
+- 文档同步：CHANGELOG Fixed 一条（并把第十一轮条目被后续批次挪动的四处行号
+  重新锚定到当前代码）；`TECH_SPECS.md` 无与本轮冲突的清扫表述，不改。
+
+## 二十一、第十五轮：时间戳窗口候选证伪 + 金额解析溢出回绕收口
+
+### 候选取证（通知验签缺时间戳窗口 / 重放防护）
+第十一轮 §十七 曾把"回调验签无时间戳容忍窗口"列为候选。本轮对撞官方文档后
+**证伪并撤销该候选**，取证五页（均为 2026-09-21 实测可达、内容自证身份）：
+
+- APIv3 签名验证总述（`wiki/doc/apiv3/wechatpay/wechatpay4_0.shtml`）：
+  对通知仅要求"商户接收到回调通知报文后，需在 **5 秒内完成对报文的验签**"
+  ——这是**处理时限**（超时微信会重发），不是"时间戳与本地钟差超窗即拒"的
+  时钟窗口判据。
+- 支付成功回调通知（`wiki/doc/apiv3/apis/chapter3_4_5.shtml`）与商品券
+  回调通知（`doc/v3/partner/4016435717`）：明确"商户系统**必须能够正确处理
+  重复的通知**"——官方把重放/重复的防线交给商户状态机幂等，而非时间戳窗口。
+- 微信支付公钥验签指引（`doc/brand/4015407582`）：给出应答验签的组成
+  （应答时间戳\n应答随机串\n应答报文主体\n）与"验证失败应舍弃该应答"，
+  同样**未定义**通知时间戳窗口。
+
+**拒绝实现的理由（守卫方向）**：若强行加 5 分钟硬窗口，会把微信对非 2xx
+应答的合法长间隔重试（可达数小时）误拒成永久丢单——这正是本审计一路反对的
+"守卫方向反了"。而"正确处理重复通知"一侧，第一至十三轮的
+CAS 状态机 + 流水台账 + 幂等 owner token 已构成闭环：同一通知重放最多产生
+一次状态迁移。硬验签（平台证书 + AEAD 解密 + serial 绑定，第十轮后含静态
+证书序列号核对）已挡住改包重放；无窗口即维持现状。`verifyCallback`
+（`WechatChannel.cc:1073`）不做 delta 判定是**有意决定**，非遗漏。
+
+### 同轮发现的真缺陷：`parseAmountToFen` 溢出静默回绕（资金语义）
+- **机理**：controller 的 `validateAmount`（`PayHandlers.cc:44`）正则
+  `^\d+(\.\d{1,2})?$` 对**数字位数无上限**，`pay_order.amount` 是
+  VARCHAR(32)；`parseAmountToFen`（`PayUtils.cc:308`）里 `std::stoll`
+  只对超出自身范围的字面量抛 `out_of_range`（被 `catch(...)` 吞掉返回
+  false），但 17–19 位元值能正常解析，随后 `yuan * 100 + cents` 有符号
+  溢出（UB，实测 MSVC/GCC 均为二进制补码回绕）。
+- **可利用性**：下单金额 "184467440737095517.99" 回绕成 fen = 183——
+  账面 1.83 元的"已支付"订单去平 1.8 亿元的订单语义；且回绕值仍为合法
+  正数，下游全部金额对账守卫（第十一轮金额证明、第十二/十三轮覆盖判据）
+  对回绕后的自洽数字全部放行。QR/退款两侧调用点
+  （`PaymentService.cc:447`、`:1540`，`RefundService.cc:670`）同样受影响。
+- **修复**（单点根因，`PayUtils.cc:370`）：在 `stoll` 成功后、乘法前加
+  精确前置判据 `yuan > (INT64_MAX - 99) / 100 → return false`——上界即
+  "能无回绕换算成 fen 的最大元值"（92233720368547757.99 → fen
+  9223372036854775799），不是拍脑袋的位数帽。函数返回 false 后由各
+  service 调用点既有的拒绝路径回 400，handler 正则刻意不加位数上限：
+  溢出判据必须在**做乘法的地方**，否则只是第二顶帽子。
+- **支付宝侧同步受益**：`parseAmountToFen` 是两侧共用的解析器，通道层
+  `total_amount` 回读（`PaymentService.cc:2992`）同样被守卫。
+
+### 测试
+- `PayUtils_ParseAmountToFen`（`tests/unit/PayUtilsTest.cc:25`，本机绿，
+  14→19 断言）：新增三个负例（回绕攻击值、17 个 9、上界加一分）与一个
+  **精确上界正例**（"92233720368547757.99" 必须通过且 fen 逐位断言）——
+  防"顺手写成更小的帽把合法极值也拒了"的守卫方向复核。纯函数级，无 DB。
+- 本机验证：增量编译绿；七门禁全绿（format-clean 70 文件、架构 4、测试
+  布局 4、文档漂移 7、迁移 6、版本同步 1.0.0×3、OpenAPI 15 paths/28 ops
+  ——本轮零 HTTP 面变更）。
+- **声明核对纪律另抓到 8 处历史行号漂移**（第十一~十四轮代码增删所致，
+  最大 41 行）：CHANGELOG 与 §八/§十/§十一/§十二/§十三 中引用的
+  `mapTradeState`/`refundsCoverOrderAmount`/`resolveRefundedOrderStatus`/
+  `validateWechatOrderFields`/`parseRfc3339` 全部重新实测锚定。
+
+### 诚实边界与遗留
+- 回绕依赖 UB 的实际表现（补码回绕）；修复不依赖它——判据在溢出**之前**，
+  任何标准实现下都成立。
+- handler 仍无金额位数上限：超大但**不溢出**的合法字面量（如 15 位）照常
+  进业务层。业务上无此等大额订单，属纵深防御候选而非缺陷，未加。
+- 下一轮候选首位（风险排序）：**出站应答验签整体缺位**——官方口径
+  "如果应答的签名验证失败，品牌商户系统应舍弃该应答"（§二十一取证品牌页），
+  验签三元组口径已在手；当前 `Wechatpay-Signature` 头只在入站通知路径被读
+  （`WechatChannel.cc:1198`），出站应答（下单/查单/退款）信任完全押在 TLS
+  上。改造点在 `sendWechatRequest` 收口，需先厘清平台证书轮换窗口，风险
+  大于本轮所有改动，单独成轮。余下：`goods_detail` 透传、创建路径 owner 化
+  统一、`CallbackService` 嵌套压平、`time_expire` 进 HTTP 契约、Alipay
+  `closeTrade` 接入、查单门"已覆盖但行 PAID→升档"。
+- 文档同步：CHANGELOG Fixed 一条；`TECH_SPECS.md` 无涉；openapi 无变更。

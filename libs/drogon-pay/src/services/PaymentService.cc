@@ -45,6 +45,56 @@ std::string generatePaymentNoValue()
     return oss.str();
 }
 
+// Both reconcile doors (the WeChat transaction query and the Alipay trade query)
+// settle an order from a channel answer that names an amount. Compare that
+// amount with the one this payment row asked for before booking: an answer with
+// no amount, or with a different one, is not evidence about this trade. The
+// notification path already refuses to book on such an answer; this keeps the
+// query path from being the door that lets it through. Returns an empty string
+// when the answer may book, and the reason it may not otherwise.
+std::string reconcileAmountProblem(int64_t answerTotalFen, const std::string &paymentAmount)
+{
+    int64_t paymentTotalFen = 0;
+    if (!pay::utils::parseAmountToFen(paymentAmount, paymentTotalFen))
+    {
+        return "payment amount '" + paymentAmount + "' is not a usable amount";
+    }
+    if (answerTotalFen <= 0)
+    {
+        return "channel answer carried no amount while the payment asks for " +
+               std::to_string(paymentTotalFen) + " fen";
+    }
+    if (answerTotalFen != paymentTotalFen)
+    {
+        return "amount mismatch: channel answer " + std::to_string(answerTotalFen) +
+               " fen, payment row " + std::to_string(paymentTotalFen) + " fen";
+    }
+    return {};
+}
+
+// A `trade_state=REFUND` answer says the trade entered refunding, which one
+// partial refund of an order is enough to produce -- so the mapped `REFUNDED`
+// reaching the WeChat query door is only a claim, and the caller's settled-
+// refund sum (read in the same transaction) is the evidence that decides it.
+// An unparsable order total proves nothing, which downgrades too: `PAID` is
+// what a REFUND trade has nonetheless evidenced -- the money arrived, and some
+// of it is on its way back.
+std::string orderStatusAfterRefundCoverage(
+  const std::string &mappedOrderStatus,
+  const std::string &orderAmount,
+  int64_t settledRefundFen
+)
+{
+    int64_t orderTotalFen = 0;
+    if (!pay::utils::parseAmountToFen(orderAmount, orderTotalFen))
+    {
+        orderTotalFen = 0;
+    }
+    return pay::utils::resolveRefundedOrderStatus(
+      mappedOrderStatus, settledRefundFen, orderTotalFen
+    );
+}
+
 // TODO(dedup): insertLedgerEntry is duplicated across PaymentService.cc,
 // RefundService.cc, and CallbackService.cc. Extract to PayUtils.h/cc in a
 // future refactoring iteration.
@@ -439,6 +489,65 @@ void PaymentService::createPayment(
               }
           }
 
+          // `time_expire` is forwarded to the channel verbatim and also decides
+          // the local `expire_at`, so a shape the two sides read differently has
+          // to be refused before the order row exists: the channel answers a 400
+          // of its own to a non-RFC-3339 value, and a deadline beyond its window
+          // is silently moved by the channel, leaving the two expiries disagreeing.
+          if (!request.timeExpire.empty())
+          {
+              std::string timeExpireError;
+              if (!pay::utils::validateTimeExpire(
+                    request.timeExpire, request.channel, timeExpireError
+                  ))
+              {
+                  Json::Value error;
+                  error["code"] = 1001;
+                  error["message"] = timeExpireError;
+                  auto ec = pay::makePayError(1001, timeExpireError);
+                  if (!idempotencyKey.empty())
+                  {
+                      idempotencyService->clearReservation(
+                        idempotencyKey, requestHash, [sharedCb, error, ec](bool) {
+                            sharedCb->call(error, ec);
+                        }
+                      );
+                      return;
+                  }
+                  sharedCb->call(error, ec);
+                  return;
+              }
+          }
+
+          // WeChat names its resources by the merchant order number itself, and
+          // the official parameter table caps out_trade_no at 6-32 characters
+          // from [0-9a-zA-Z_|*-]. Booking an order the channel can never name
+          // left a CREATED/PAYING row in the reconciliation sweep forever.
+          if (request.channel == "wechat")
+          {
+              std::string fieldError;
+              if (!pay::utils::validateWechatOrderFields(
+                    request.orderNo, request.description, request.attach, fieldError
+                  ))
+              {
+                  Json::Value error;
+                  error["code"] = 1001;
+                  error["message"] = fieldError;
+                  auto ec = pay::makePayError(1001, fieldError);
+                  if (!idempotencyKey.empty())
+                  {
+                      idempotencyService->clearReservation(
+                        idempotencyKey, requestHash, [sharedCb, error, ec](bool) {
+                            sharedCb->call(error, ec);
+                        }
+                      );
+                      return;
+                  }
+                  sharedCb->call(error, ec);
+                  return;
+              }
+          }
+
           auto wrappedCb = [idempotencyService,
                             idempotencyKey,
                             requestHash,
@@ -527,17 +636,23 @@ void PaymentService::proceedCreatePayment(
         // Parse and set expire_at if timeExpire is provided
         if (!request.timeExpire.empty())
         {
-            try
+            // The same reading the guard before the booking applies, so the row
+            // records the exact instant the channel is offered. Trantor's own
+            // readers cannot be used for this: `fromDbStringLocal` splits on a
+            // SPACE and lets `std::stol` stop at the 'T' without throwing, so a
+            // correct RFC 3339 value came back as local midnight with the whole
+            // time-of-day silently dropped; `fromISOString` adds the machine's
+            // zone on top of the string's own offset.
+            int64_t expireSeconds = 0;
+            std::string expireError;
+            if (pay::utils::parseRfc3339(request.timeExpire, expireSeconds, expireError))
             {
-                // Parse RFC 3339 format (e.g., "2026-05-07T12:34:56+08:00")
-                // trantor::Date can parse ISO 8601 format
-                trantor::Date expireDate = trantor::Date::fromDbStringLocal(request.timeExpire);
-                order.setExpireAt(expireDate);
+                order.setExpireAt(trantor::Date(expireSeconds * 1000000));
             }
-            catch (const std::exception &e)
+            else
             {
                 LOG_WARN << "Failed to parse timeExpire '" << request.timeExpire
-                         << "': " << e.what();
+                         << "': " << expireError;
                 // Continue without setting expire_at
             }
         }
@@ -988,341 +1103,164 @@ void PaymentService::proceedCreatePayment(
                                               return;
                                           }
 
-                                          // Success - update payment and order status
+                                          // Success - promote the rows this attempt booked:
+                                          // payment INIT -> PROCESSING with the channel payload,
+                                          // then order CREATED -> PAYING.
                                           const std::string responsePayload =
                                             pay::utils::toJsonString(result);
 
+                                          // Both writes name the columns they change and require
+                                          // the row to still be where this attempt left it. A
+                                          // full-row write from the copy taken before the channel
+                                          // answered rolls back whatever a fast notification
+                                          // already settled -- the payment back from SUCCESS to
+                                          // PROCESSING, the order back from PAID to PAYING -- and
+                                          // the money stays captured with nothing to show for it.
+                                          // This is the guarded shape the QR path adopted; the
+                                          // jsapi path had been left behind.
+                                          auto answer = [request, paymentNo, result, sharedCb](
+                                                          const std::string &failureDetail
+                                                        ) {
+                                              if (!failureDetail.empty())
+                                              {
+                                                  LOG_WARN << "[PaymentService] Status row for "
+                                                           << paymentNo
+                                                           << " not updated: " << failureDetail
+                                                           << "; answering with the channel result "
+                                                              "anyway";
+                                              }
+                                              if (!*sharedCb)
+                                              {
+                                                  return;
+                                              }
+
+                                              Json::Value response;
+                                              response["code"] = 0;
+                                              response["message"] = "Payment created successfully";
+                                              Json::Value data;
+                                              data["order_no"] = request.orderNo;
+                                              data["payment_no"] = paymentNo;
+                                              data["status"] = "PAYING";
+
+                                              // Add payment channel response details
+                                              if (request.channel == "alipay")
+                                              {
+                                                  // Alipay response
+                                                  data["alipay_response"] = result;
+                                                  const auto qrCode =
+                                                    result.get("qr_code", "").asString();
+                                                  if (!qrCode.empty())
+                                                  {
+                                                      data["qr_code"] = qrCode;
+                                                  }
+                                              }
+                                              else
+                                              {
+                                                  // WeChat Pay response
+                                                  data["wechat_response"] = result;
+                                                  const auto codeUrl =
+                                                    result.get("code_url", "").asString();
+                                                  if (!codeUrl.empty())
+                                                  {
+                                                      data["code_url"] = codeUrl;
+                                                  }
+                                                  const auto prepayId =
+                                                    result.get("prepay_id", "").asString();
+                                                  if (!prepayId.empty())
+                                                  {
+                                                      data["prepay_id"] = prepayId;
+                                                  }
+                                              }
+
+                                              response["data"] = data;
+                                              (*sharedCb)(response, std::error_code());
+                                          };
+
+                                          auto failDb = [sharedCb](const DrogonDbException &e) {
+                                              if (*sharedCb)
+                                              {
+                                                  Json::Value response;
+                                                  response["code"] = 1003;
+                                                  response["message"] =
+                                                    "Database error: " +
+                                                    std::string(e.base().what());
+                                                  (*sharedCb)(
+                                                    response,
+                                                    pay::makePayError(
+                                                      1003,
+                                                      "Database error: " +
+                                                        std::string(e.base().what())
+                                                    )
+                                                  );
+                                              }
+                                          };
+
                                           try
                                           {
-                                              Mapper<PayPaymentModel> paymentMapper(dbClient_);
-                                              auto payCriteria = Criteria(
-                                                PayPaymentModel::Cols::_payment_no,
-                                                CompareOperator::EQ,
-                                                paymentNo
-                                              );
-                                              paymentMapper.findOne(
-                                                payCriteria,
-                                                [this,
-                                                 request,
-                                                 paymentNo,
-                                                 result,
-                                                 responsePayload,
-                                                 sharedCb](PayPaymentModel payment) {
-                                                    payment.setStatus("PROCESSING");
-                                                    payment.setResponsePayload(responsePayload);
+                                              Mapper<PayPaymentModel> paymentUpdater(dbClient_);
+                                              paymentUpdater.updateBy(
+                                                {PayPaymentModel::Cols::_status,
+                                                 PayPaymentModel::Cols::_response_payload},
+                                                [this, request, answer, paymentNo, failDb](
+                                                  const size_t updated
+                                                ) {
+                                                    if (updated == 0)
+                                                    {
+                                                        answer(
+                                                          "payment " + paymentNo +
+                                                          " had already moved out of "
+                                                          "INIT/PROCESSING"
+                                                        );
+                                                        return;
+                                                    }
                                                     try
                                                     {
-                                                        Mapper<PayPaymentModel> paymentUpdater(
+                                                        Mapper<PayOrderModel> orderUpdater(
                                                           dbClient_
                                                         );
-                                                        paymentUpdater.update(
-                                                          payment,
-                                                          [this,
-                                                           request,
-                                                           paymentNo,
-                                                           result,
-                                                           sharedCb](const size_t) {
-                                                              // Update order status to PAYING
-                                                              try
-                                                              {
-                                                                  Mapper<PayOrderModel> orderMapper(
-                                                                    dbClient_
-                                                                  );
-                                                                  auto orderCriteria = Criteria(
-                                                                    PayOrderModel::Cols::_order_no,
-                                                                    CompareOperator::EQ,
-                                                                    request.orderNo
-                                                                  );
-                                                                  orderMapper.findOne(
-                                                                    orderCriteria,
-                                                                    [this,
-                                                                     request,
-                                                                     paymentNo,
-                                                                     result,
-                                                                     sharedCb](
-                                                                      PayOrderModel order
-                                                                    ) {
-                                                                        order.setStatus("PAYING");
-                                                                        try
-                                                                        {
-                                                                            Mapper<PayOrderModel>
-                                                                              orderUpdater(
-                                                                                dbClient_
-                                                                              );
-                                                                            orderUpdater.update(
-                                                                              order,
-                                                                              [request,
-                                                                               paymentNo,
-                                                                               result,
-                                                                               sharedCb](
-                                                                                const size_t
-                                                                              ) {
-                                                                                  // Build success
-                                                                                  // response
-                                                                                  Json::Value
-                                                                                    response;
-                                                                                  response["code"] =
-                                                                                    0;
-                                                                                  response
-                                                                                    ["message"] =
-                                                                                      "Payment "
-                                                                                      "created "
-                                                                                      "successfull"
-                                                                                      "y";
-                                                                                  Json::Value data;
-                                                                                  data["order_no"] =
-                                                                                    request.orderNo;
-                                                                                  data
-                                                                                    ["payment_no"] =
-                                                                                      paymentNo;
-                                                                                  data["status"] =
-                                                                                    "PAYING";
-
-                                                                                  // Add payment
-                                                                                  // channel
-                                                                                  // response
-                                                                                  // details
-                                                                                  if (
-                                                                                    request
-                                                                                      .channel ==
-                                                                                    "alipay"
-                                                                                  )
-                                                                                  {
-                                                                                      // Alipay
-                                                                                      // response
-                                                                                      data
-                                                                                        ["alipay_"
-                                                                                         "respons"
-                                                                                         "e"] =
-                                                                                          result;
-                                                                                      const auto
-                                                                                        qrCode =
-                                                                                          result
-                                                                                            .get(
-                                                                                              "qr_"
-                                                                                              "cod"
-                                                                                              "e",
-                                                                                              ""
-                                                                                            )
-                                                                                            .asString();
-                                                                                      if (
-                                                                                        !qrCode
-                                                                                           .empty()
-                                                                                      )
-                                                                                      {
-                                                                                          data
-                                                                                            ["qr_"
-                                                                                             "cod"
-                                                                                             "e"] =
-                                                                                              qrCode;
-                                                                                      }
-                                                                                  }
-                                                                                  else
-                                                                                  {
-                                                                                      // WeChat Pay
-                                                                                      // response
-                                                                                      data
-                                                                                        ["wechat_"
-                                                                                         "respons"
-                                                                                         "e"] =
-                                                                                          result;
-                                                                                      const auto
-                                                                                        codeUrl =
-                                                                                          result
-                                                                                            .get(
-                                                                                              "code"
-                                                                                              "_ur"
-                                                                                              "l",
-                                                                                              ""
-                                                                                            )
-                                                                                            .asString();
-                                                                                      if (
-                                                                                        !codeUrl
-                                                                                           .empty()
-                                                                                      )
-                                                                                      {
-                                                                                          data
-                                                                                            ["code_"
-                                                                                             "ur"
-                                                                                             "l"] =
-                                                                                              codeUrl;
-                                                                                      }
-                                                                                      const auto
-                                                                                        prepayId =
-                                                                                          result
-                                                                                            .get(
-                                                                                              "prep"
-                                                                                              "ay_"
-                                                                                              "id",
-                                                                                              ""
-                                                                                            )
-                                                                                            .asString();
-                                                                                      if (
-                                                                                        !prepayId
-                                                                                           .empty()
-                                                                                      )
-                                                                                      {
-                                                                                          data
-                                                                                            ["prepa"
-                                                                                             "y_"
-                                                                                             "id"] =
-                                                                                              prepayId;
-                                                                                      }
-                                                                                  }
-
-                                                                                  response["data"] =
-                                                                                    data;
-                                                                                  if (*sharedCb)
-                                                                                  {
-                                                                                      (*sharedCb)(
-                                                                                        response,
-                                                                                        std::
-                                                                                          error_code()
-                                                                                      );
-                                                                                  }
-                                                                              },
-                                                                              [sharedCb](
-                                                                                const DrogonDbException
-                                                                                  &e
-                                                                              ) {
-                                                                                  if (*sharedCb)
-                                                                                  {
-                                                                                      Json::Value
-                                                                                        response;
-                                                                                      response
-                                                                                        ["code"] =
-                                                                                          1003;
-                                                                                      response
-                                                                                        ["messag"
-                                                                                         "e"] =
-                                                                                          "Database"
-                                                                                          " error:"
-                                                                                          " " +
-                                                                                          std::string(
-                                                                                            e.base()
-                                                                                              .what()
-                                                                                          );
-                                                                                      (*sharedCb)(
-                                                                                        response,
-                                                                                        pay::makePayError(
-                                                                                          1003,
-                                                                                          "Database"
-                                                                                          " error:"
-                                                                                          " " +
-                                                                                            std::string(
-                                                                                              e.base()
-                                                                                                .what()
-                                                                                            )
-                                                                                        )
-                                                                                      );
-                                                                                  }
-                                                                              }
-                                                                            );
-                                                                        }
-                                                                        catch (
-                                                                          const std::exception &e
-                                                                        )
-                                                                        {
-                                                                            reportMapperFailure(
-                                                                              sharedCb, e.what()
-                                                                            );
-                                                                        }
-                                                                        catch (...)
-                                                                        {
-                                                                            reportMapperFailure(
-                                                                              sharedCb,
-                                                                              "unknown exception"
-                                                                            );
-                                                                        }
-                                                                    },
-                                                                    [sharedCb](
-                                                                      const DrogonDbException &e
-                                                                    ) {
-                                                                        if (*sharedCb)
-                                                                        {
-                                                                            Json::Value response;
-                                                                            response["code"] = 1003;
-                                                                            response["message"] =
-                                                                              "Database error: " +
-                                                                              std::string(
-                                                                                e.base().what()
-                                                                              );
-                                                                            (*sharedCb)(
-                                                                              response,
-                                                                              pay::makePayError(
-                                                                                1003,
-                                                                                "Database error: " +
-                                                                                  std::string(
-                                                                                    e.base().what()
-                                                                                  )
-                                                                              )
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                  );
-                                                              }
-                                                              catch (const std::exception &e)
-                                                              {
-                                                                  reportMapperFailure(
-                                                                    sharedCb, e.what()
-                                                                  );
-                                                              }
-                                                              catch (...)
-                                                              {
-                                                                  reportMapperFailure(
-                                                                    sharedCb, "unknown exception"
-                                                                  );
-                                                              }
+                                                        orderUpdater.updateBy(
+                                                          {PayOrderModel::Cols::_status},
+                                                          [answer](const size_t) { answer(""); },
+                                                          [answer](const DrogonDbException &e) {
+                                                              answer(e.base().what());
                                                           },
-                                                          [sharedCb](const DrogonDbException &e) {
-                                                              if (*sharedCb)
-                                                              {
-                                                                  Json::Value response;
-                                                                  response["code"] = 1003;
-                                                                  response["message"] =
-                                                                    "Database error: " +
-                                                                    std::string(e.base().what());
-                                                                  (*sharedCb)(
-                                                                    response,
-                                                                    pay::makePayError(
-                                                                      1003,
-                                                                      "Database error: " +
-                                                                        std::string(e.base().what())
-                                                                    )
-                                                                  );
+                                                          Criteria(
+                                                            PayOrderModel::Cols::_order_no,
+                                                            CompareOperator::EQ,
+                                                            request.orderNo
+                                                          ) &&
+                                                            Criteria(
+                                                              PayOrderModel::Cols::_status,
+                                                              CompareOperator::In,
+                                                              std::vector<std::string>{
+                                                                "CREATED", "PAYING"
                                                               }
-                                                          }
+                                                            ),
+                                                          "PAYING"
                                                         );
                                                     }
                                                     catch (const std::exception &e)
                                                     {
-                                                        reportMapperFailure(sharedCb, e.what());
+                                                        answer(e.what());
                                                     }
                                                     catch (...)
                                                     {
-                                                        reportMapperFailure(
-                                                          sharedCb, "unknown exception"
-                                                        );
+                                                        answer("unknown exception");
                                                     }
                                                 },
-                                                [sharedCb](const DrogonDbException &e) {
-                                                    if (*sharedCb)
-                                                    {
-                                                        Json::Value response;
-                                                        response["code"] = 1003;
-                                                        response["message"] =
-                                                          "Database error: " +
-                                                          std::string(e.base().what());
-                                                        (*sharedCb)(
-                                                          response,
-                                                          pay::makePayError(
-                                                            1003,
-                                                            "Database error: " +
-                                                              std::string(e.base().what())
-                                                          )
-                                                        );
-                                                    }
-                                                }
+                                                failDb,
+                                                Criteria(
+                                                  PayPaymentModel::Cols::_payment_no,
+                                                  CompareOperator::EQ,
+                                                  paymentNo
+                                                ) &&
+                                                  Criteria(
+                                                    PayPaymentModel::Cols::_status,
+                                                    CompareOperator::In,
+                                                    std::vector<std::string>{"INIT", "PROCESSING"}
+                                                  ),
+                                                "PROCESSING",
+                                                responsePayload
                                               );
                                           }
                                           catch (const std::exception &e)
@@ -1608,6 +1546,21 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   sharedCb
                     ->call(response, pay::makePayError(400, "invalid amount for native payment"));
                   return;
+              }
+              // Same official window as /api/pay/create: an order number the
+              // channel can never name must not be booked into the sweep set.
+              {
+                  std::string fieldError;
+                  if (!pay::utils::validateWechatOrderFields(orderNo, subject, "", fieldError))
+                  {
+                      idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {
+                      });
+                      Json::Value response;
+                      response["code"] = 400;
+                      response["message"] = fieldError;
+                      sharedCb->call(response, pay::makePayError(400, fieldError));
+                      return;
+                  }
               }
               payload["description"] = subject;
               payload["amount"]["total"] = static_cast<Json::Int64>(totalFen);
@@ -2489,6 +2442,9 @@ void PaymentService::syncOrderStatusFromWechat(
 
     const std::string transactionId = result.get("transaction_id", "").asString();
     const std::string responsePayload = pay::utils::toJsonString(result);
+    // Read the answer's amount here rather than from a database callback: `result`
+    // is a reference the caller owns and only lives for this synchronous frame.
+    const int64_t answerTotalFen = result["amount"].get("total", 0).asInt64();
 
     if (!dbClient_)
     {
@@ -2522,9 +2478,14 @@ void PaymentService::syncOrderStatusFromWechat(
           .limit(1)
           .findBy(
             paymentCriteria,
-            [this, orderNo, orderStatus, paymentStatus, transactionId, responsePayload, callback](
-              const std::vector<PayPaymentModel> &rows
-            ) {
+            [this,
+             orderNo,
+             orderStatus,
+             paymentStatus,
+             transactionId,
+             responsePayload,
+             answerTotalFen,
+             callback](const std::vector<PayPaymentModel> &rows) {
                 if (rows.empty())
                 {
                     if (callback)
@@ -2536,6 +2497,25 @@ void PaymentService::syncOrderStatusFromWechat(
 
                 auto payment = rows.front();
                 const auto paymentNo = payment.getValueOfPaymentNo();
+                // An answer is only evidence about the trade it names, so the total
+                // it reports has to be the total this payment row asked for before it
+                // can settle anything. `REFUNDED` settles too: that state is reached
+                // from a trade whose money did arrive.
+                if (orderStatus == "PAID" || orderStatus == "REFUNDED")
+                {
+                    const std::string amountProblem =
+                      reconcileAmountProblem(answerTotalFen, payment.getValueOfAmount());
+                    if (!amountProblem.empty())
+                    {
+                        LOG_ERROR << "[PaymentService] Not settling " << orderNo
+                                  << " from the channel answer: " << amountProblem;
+                        if (callback)
+                        {
+                            callback("");
+                        }
+                        return;
+                    }
+                }
 
                 // Use transaction for atomic updates
                 dbClient_->newTransactionAsync([orderNo,
@@ -2559,6 +2539,43 @@ void PaymentService::syncOrderStatusFromWechat(
 
                     auto transDb = std::static_pointer_cast<DbClient>(transPtr);
 
+                    // A `trade_state=REFUND` answer is a claim that the whole order
+                    // came back, but one settled partial refund of an order is
+                    // enough to produce it, so the ledger gets the vote. Statements
+                    // issued on one transaction run in submission order: both
+                    // order-write sites below read this sum already resolved. A
+                    // failed read leaves the transaction aborted, and the
+                    // statements queued after it fall into the existing error
+                    // paths, which roll back and report.
+                    // Aggregate SUM (raw-SQL exemption #3): the Mapper cannot express SUM.
+                    auto settledRefundFen = std::make_shared<int64_t>(0);
+                    if (orderStatus == "REFUNDED")
+                    {
+                        transPtr->execSqlAsync(
+                          "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) AS sum_amount "
+                          "FROM pay_refund WHERE order_no = $1 AND status = $2",
+                          [settledRefundFen, orderNo](const Result &r) {
+                              if (!r.empty())
+                              {
+                                  const auto sumText = r.front()["sum_amount"].as<std::string>();
+                                  if (!pay::utils::parseAmountToFen(sumText, *settledRefundFen))
+                                  {
+                                      LOG_ERROR << "[PaymentService] Settled-refund sum for "
+                                                << orderNo
+                                                << " is not a usable amount: " << sumText;
+                                      *settledRefundFen = 0;
+                                  }
+                              }
+                          },
+                          [orderNo](const DrogonDbException &e) {
+                              LOG_ERROR << "[PaymentService] Settled-refund sum for " << orderNo
+                                        << " failed: " << e.base().what();
+                          },
+                          orderNo,
+                          std::string("REFUND_SUCCESS")
+                        );
+                    }
+
                     // If payment is already SUCCESS, only update order
                     if (payment.getValueOfStatus() == "SUCCESS")
                     {
@@ -2570,15 +2587,25 @@ void PaymentService::syncOrderStatusFromWechat(
                             );
                             orderMapper.findOne(
                               orderCriteria,
-                              [orderStatus, paymentNo, callback, transPtr, transDb](
-                                PayOrderModel order
-                              ) {
+                              [orderStatus,
+                               paymentNo,
+                               callback,
+                               transPtr,
+                               transDb,
+                               settledRefundFen](PayOrderModel order) {
+                                  // The sum queued at the top of this transaction has
+                                  // landed by now, so the answer's REFUNDED claim meets
+                                  // the ledger before it reaches the row.
+                                  const std::string finalOrderStatus =
+                                    orderStatusAfterRefundCoverage(
+                                      orderStatus, order.getValueOfAmount(), *settledRefundFen
+                                    );
                                   if (order.getValueOfStatus() != "PAID")
                                   {
                                       const auto userId = order.getValueOfUserId();
                                       const auto orderAmount = order.getValueOfAmount();
                                       const auto orderNo = order.getValueOfOrderNo();
-                                      order.setStatus(orderStatus);
+                                      order.setStatus(finalOrderStatus);
                                       try
                                       {
                                           Mapper<PayOrderModel> orderUpdater(transPtr);
@@ -2589,10 +2616,13 @@ void PaymentService::syncOrderStatusFromWechat(
                                              orderNo,
                                              paymentNo,
                                              orderAmount,
-                                             orderStatus,
+                                             finalOrderStatus,
                                              transPtr,
                                              transDb](const size_t) {
-                                                if (orderStatus == "PAID")
+                                                if (
+                                                  finalOrderStatus == "PAID" ||
+                                                  finalOrderStatus == "REFUNDED"
+                                                )
                                                 {
                                                     insertLedgerEntry(
                                                       transDb,
@@ -2605,7 +2635,7 @@ void PaymentService::syncOrderStatusFromWechat(
                                                 }
                                                 if (callback)
                                                 {
-                                                    callback(orderStatus);
+                                                    callback(finalOrderStatus);
                                                 }
                                             },
                                             [callback, transPtr](const DrogonDbException &e) {
@@ -2643,10 +2673,11 @@ void PaymentService::syncOrderStatusFromWechat(
                                       // and mask its failure.
                                       return;
                                   }
-                                  // Order already PAID, no update needed
+                                  // Order already PAID: report what this round actually
+                                  // established, not the channel's raw claim.
                                   if (callback)
                                   {
-                                      callback(orderStatus);
+                                      callback(finalOrderStatus);
                                   }
                               },
                               [callback, transPtr](const DrogonDbException &e) {
@@ -2708,9 +2739,13 @@ void PaymentService::syncOrderStatusFromWechat(
                       "SET status = $1, channel_trade_no = $2, response_payload = $3 "
                       "WHERE payment_no = $4 "
                       "AND status IN ('INIT', 'PROCESSING') RETURNING 1",
-                      [orderNo, orderStatus, paymentNo, callback, transPtr, transDb](
-                        const Result &casResult
-                      ) {
+                      [orderNo,
+                       orderStatus,
+                       paymentNo,
+                       callback,
+                       transPtr,
+                       transDb,
+                       settledRefundFen](const Result &casResult) {
                           if (casResult.size() == 0)
                           {
                               LOG_DEBUG
@@ -2733,35 +2768,45 @@ void PaymentService::syncOrderStatusFromWechat(
                               );
                               orderMapper.findOne(
                                 orderCriteria,
-                                [orderStatus, paymentNo, callback, transPtr, transDb](
-                                  PayOrderModel order
-                                ) {
+                                [orderStatus,
+                                 paymentNo,
+                                 callback,
+                                 transPtr,
+                                 transDb,
+                                 settledRefundFen](PayOrderModel order) {
+                                    const std::string finalOrderStatus =
+                                      orderStatusAfterRefundCoverage(
+                                        orderStatus, order.getValueOfAmount(), *settledRefundFen
+                                      );
                                     if (order.getValueOfStatus() == "PAID")
                                     {
                                         if (callback)
                                         {
-                                            callback(orderStatus);
+                                            callback(finalOrderStatus);
                                         }
                                         return;
                                     }
                                     const auto userId = order.getValueOfUserId();
                                     const auto orderAmount = order.getValueOfAmount();
                                     const auto orderNo = order.getValueOfOrderNo();
-                                    order.setStatus(orderStatus);
+                                    order.setStatus(finalOrderStatus);
                                     try
                                     {
                                         Mapper<PayOrderModel> orderUpdater(transPtr);
                                         orderUpdater.update(
                                           order,
                                           [callback,
-                                           orderStatus,
+                                           finalOrderStatus,
                                            userId,
                                            orderNo,
                                            paymentNo,
                                            orderAmount,
                                            transPtr,
                                            transDb](const size_t) {
-                                              if (orderStatus == "PAID")
+                                              if (
+                                                finalOrderStatus == "PAID" ||
+                                                finalOrderStatus == "REFUNDED"
+                                              )
                                               {
                                                   insertLedgerEntry(
                                                     transDb,
@@ -2774,7 +2819,7 @@ void PaymentService::syncOrderStatusFromWechat(
                                               }
                                               if (callback)
                                               {
-                                                  callback(orderStatus);
+                                                  callback(finalOrderStatus);
                                               }
                                           },
                                           [callback, transPtr](const DrogonDbException &e) {
@@ -2944,9 +2989,10 @@ void PaymentService::syncOrderStatusFromAlipay(
 
     // Alipay mandates that the notification's total_amount equals the merchant
     // order amount before the order is treated as paid. Resolve the notified
-    // amount to fen once; a PAID transition with an unverifiable amount is
-    // rejected below (defends against a low-value payment confirming a
-    // high-value order).
+    // amount to fen once, in this synchronous frame -- `result` is a reference
+    // the caller owns, so a database callback must not read it; a PAID
+    // transition with an unverifiable amount is rejected below (defends against
+    // a low-value payment confirming a high-value order).
     int64_t notifiedFen = -1;
     if (orderStatus == "PAID")
     {
@@ -3008,6 +3054,28 @@ void PaymentService::syncOrderStatusFromAlipay(
 
                 auto payment = rows.front();
                 const auto paymentNo = payment.getValueOfPaymentNo();
+
+                // A notification is only evidence about the trade it names, so the
+                // total it reports has to be the total this payment row asked for
+                // before anything settles. This is the earlier of the two amount
+                // gates: this one reads the payment row, the ones inside the
+                // transaction read the order row, and a divergence between the two
+                // rows is exactly what the pair is there to catch.
+                if (orderStatus == "PAID")
+                {
+                    const std::string amountProblem =
+                      reconcileAmountProblem(notifiedFen, payment.getValueOfAmount());
+                    if (!amountProblem.empty())
+                    {
+                        LOG_ERROR << "[PaymentService] Not settling " << orderNo
+                                  << " from the channel answer: " << amountProblem;
+                        if (callback)
+                        {
+                            callback("");
+                        }
+                        return;
+                    }
+                }
 
                 // Use transaction for atomic updates
                 dbClient_->newTransactionAsync([orderNo,

@@ -174,6 +174,7 @@ class RefundService
       const std::string &orderNo,
       const std::string &paymentNo,
       const std::string &amount,
+      int64_t orderTotalFen,
       RefundCallback &&callback
     );
 };
