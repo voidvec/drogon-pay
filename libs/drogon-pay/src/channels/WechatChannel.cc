@@ -493,6 +493,17 @@ void sendWechatRequest(
           }
 
           const int status = static_cast<int>(resp->statusCode());
+
+          // `204 No Content` is a documented success answer (the close-order
+          // API answers with it and no body at all), so an empty 2xx body is
+          // success with an empty object rather than "invalid json response".
+          if (status == 204)
+          {
+              Json::Value bodyJson(Json::objectValue);
+              (*cb)(bodyJson, "");
+              return;
+          }
+
           bool parsed = false;
           auto json = resp->getJsonObject();
           if (json)
@@ -615,6 +626,25 @@ void WechatPayClient::createTransactionNative(const Json::Value &payload, JsonCa
 
 void WechatPayClient::downloadCertificates(JsonCallback &&callback)
 {
+    // Build the signed request first: the auth header depends only on local
+    // key material, so a signing/config failure never reaches the network and
+    // must not spend the shared download window. Stamping before this point let
+    // a misconfigured key consume the interval on a request that never existed,
+    // starving the next genuine rotation refresh.
+    const std::string path = "/v3/certificates";
+    const std::string body;
+    const std::string timestamp = std::to_string(std::time(nullptr));
+    const std::string nonce = drogon::utils::getUuid();
+    std::string error;
+    std::string auth = buildAuthorizationHeader("GET", path, body, timestamp, nonce, error);
+    if (!error.empty())
+    {
+        Json::Value result;
+        if (callback)
+            callback(result, error);
+        return;
+    }
+
     if (certDownloadMinIntervalSeconds_ > 0)
     {
         const auto now = std::chrono::steady_clock::now();
@@ -633,24 +663,20 @@ void WechatPayClient::downloadCertificates(JsonCallback &&callback)
                 return;
             }
         }
+        // The window is spent only now that the request is genuinely about to be
+        // issued, so the check-and-stamp stays atomic against concurrent
+        // notifications while a no-op never consumes it.
         lastCertDownloadAt_ = now;
     }
 
-    const std::string path = "/v3/certificates";
-    const std::string body;
-    const std::string timestamp = std::to_string(std::time(nullptr));
-    const std::string nonce = drogon::utils::getUuid();
-    std::string error;
-    std::string auth = buildAuthorizationHeader("GET", path, body, timestamp, nonce, error);
-    if (!error.empty())
-    {
-        Json::Value result;
-        if (callback)
-            callback(result, error);
-        return;
-    }
-
     auto cb = std::make_shared<JsonCallback>(std::move(callback));
+    // Hold the client weakly across the async boundary. Every production entry
+    // point owns this object through a shared_ptr (the registry and the services
+    // both), so a client torn down during shutdown while a refresh is in flight
+    // would otherwise leave the response handler dereferencing a dangling `this`
+    // to reach `decryptResource`/`setPlatformCert`. Locking here turns that race
+    // into a dropped answer.
+    const std::weak_ptr<WechatPayClient> selfWeak = weak_from_this();
     sendWechatRequest(
       apiBase_,
       "GET",
@@ -658,7 +684,14 @@ void WechatPayClient::downloadCertificates(JsonCallback &&callback)
       body,
       auth,
       timeoutMs_,
-      [this, cb](const Json::Value &result, const std::string &err) {
+      [selfWeak, cb](const Json::Value &result, const std::string &err) {
+          auto self = selfWeak.lock();
+          if (!self)
+          {
+              if (*cb)
+                  (*cb)(Json::Value{}, "wechat client destroyed before certificate response");
+              return;
+          }
           if (!err.empty())
           {
               if (*cb)
@@ -683,7 +716,8 @@ void WechatPayClient::downloadCertificates(JsonCallback &&callback)
               std::string associatedData = encNode.get("associated_data", "").asString();
               std::string plaintext;
               std::string decryptErr;
-              if (!decryptResource(ciphertext, nonceStr, associatedData, plaintext, decryptErr))
+              if (!self
+                     ->decryptResource(ciphertext, nonceStr, associatedData, plaintext, decryptErr))
               {
                   LOG_WARN << "[WechatChannel] certificate decrypt failed for serial " << serialNo
                            << ": " << decryptErr;
@@ -691,7 +725,7 @@ void WechatPayClient::downloadCertificates(JsonCallback &&callback)
               }
               // setPlatformCert validates parse, validity window, serial
               // self-consistency and (optionally) the CA chain before caching.
-              if (setPlatformCert(serialNo, plaintext))
+              if (self->setPlatformCert(serialNo, plaintext))
               {
                   ++installed;
               }
@@ -902,6 +936,49 @@ void WechatPayClient::queryTransaction(const std::string &orderNo, JsonCallback 
     }
 
     sendWechatRequest(apiBase_, "GET", path, body, auth, timeoutMs_, std::move(callback));
+}
+
+void WechatPayClient::closeTransaction(const std::string &orderNo, JsonCallback &&callback)
+{
+    if (orderNo.empty())
+    {
+        Json::Value result;
+        callback(result, "missing orderNo");
+        return;
+    }
+    if (mchId_.empty())
+    {
+        Json::Value result;
+        callback(result, "missing mch_id");
+        return;
+    }
+
+    // The close is named by the same encoded path segment the query already
+    // builds; `mchid` goes in the body, where the official parameter table puts
+    // it. A paid trade answers the refusal (TRADE_ERROR under 403), so an
+    // accepted 204 is the only answer that means "closed now".
+    const std::string path =
+      "/v3/pay/transactions/out-trade-no/" + pay::utils::urlEncodePathSegment(orderNo) + "/close";
+    Json::Value request;
+    request["mchid"] = mchId_;
+    const std::string body = toJsonString(request);
+    const std::string timestamp = std::to_string(std::time(nullptr));
+    const std::string nonce = drogon::utils::getUuid();
+    std::string error;
+    std::string auth = buildAuthorizationHeader("POST", path, body, timestamp, nonce, error);
+    if (!error.empty())
+    {
+        Json::Value result;
+        callback(result, error);
+        return;
+    }
+
+    sendWechatRequest(apiBase_, "POST", path, body, auth, timeoutMs_, std::move(callback));
+}
+
+void WechatPayClient::closeOrder(const std::string &orderNo, JsonCallback &&callback)
+{
+    closeTransaction(orderNo, std::move(callback));
 }
 
 void WechatPayClient::refund(const Json::Value &payload, JsonCallback &&callback)
@@ -1149,6 +1226,10 @@ bool WechatPayClient::verifyCallback(
     const std::string eventType = bodyJson.get("event_type", "").asString();
 
     // Decrypt the enclosed resource so callers get the actual transaction.
+    // Every WeChat V3 notification carries an AES-GCM `resource` object; the
+    // transaction fields the caller normalizes live inside it. A signed body
+    // without one is malformed, and accepting it would hand the caller an event
+    // with an empty order_no and a null payload, so it is refused here.
     Json::Value resourceJson;
     std::string plaintext;
     if (bodyJson.isMember("resource") && bodyJson["resource"].isObject())
@@ -1176,6 +1257,11 @@ bool WechatPayClient::verifyCallback(
             error = "decrypted resource is not valid JSON: " + errors;
             return false;
         }
+    }
+    else
+    {
+        error = "notification body has no resource object";
+        return false;
     }
 
     event.channel = name();

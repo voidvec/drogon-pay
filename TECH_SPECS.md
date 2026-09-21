@@ -243,7 +243,7 @@ CREATED ──(channel API call)──> PAYING ──(callback SUCCESS)──> P
 | `CREATED` | 订单与首条支付记录已落库，尚未向渠道取码 | `pay_order` INSERT 时设置 |
 | `PAYING` | 渠道已受理并返回可支付码 | 渠道成功后 `promoteQrRows` 的守卫更新（`CREATED`/`PAYING` → `PAYING`） |
 | `PAID` | 支付成功 | 回调 `TRANSACTION.SUCCESS` / `TRADE_SUCCESS` |
-| `REFUNDED` | 退款成功后的终态 | 退款流程，不属于本路径 |
+| `REFUNDED` | 订单已被退款覆盖到全额的终态 | 退款流程，不属于本路径 |
 
 | Payment 记录 | 含义 | 转换触发 |
 |------|------|----------|
@@ -259,8 +259,9 @@ CREATED ──(channel API call)──> PAYING ──(callback SUCCESS)──> P
 > 支付的一笔交易从所有恢复视角里消失（与 `refundCertainlyDidNotHappen` 同一条规则）。
 > 渠道拒绝时订单状态不动，因为同一订单可能还挂着上一个仍然有效的码。
 
-> 订单终态 `REFUNDED` 不属于支付创建路径：只有在退款达到 `REFUND_SUCCESS` 后，
-> 退款流程才把父订单置为 `REFUNDED`。
+> 订单终态 `REFUNDED` 不属于支付创建路径：只有在某笔退款达到 `REFUND_SUCCESS`、且该订单
+> 上所有已退成功退款之合计覆盖订单总额后，退款流程才把父订单置为 `REFUNDED`。
+> 微信单笔订单最多允许 50 次部分退款，单笔退款成功时订单保持 `PAID`。
 
 #### 退款状态机
 
@@ -274,7 +275,7 @@ REFUND_INIT ──(channel call)──> REFUNDING ──(callback SUCCESS)──
 |------|------|
 | `REFUND_INIT` | 退款记录已写入，待渠道调用（建表默认值） |
 | `REFUNDING` | 渠道受理，等待退款结果 |
-| `REFUND_SUCCESS` | 退款成功，父订单随之变为 `REFUNDED` |
+| `REFUND_SUCCESS` | 退款成功；仅当订单上已退成功之合计覆盖订单总额时，父订单才变为 `REFUNDED` |
 | `REFUND_FAIL` | 退款失败，可重新发起 |
 
 #### Payment 记录状态

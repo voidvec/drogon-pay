@@ -60,6 +60,7 @@ void ensureOrderTables(const std::shared_ptr<drogon::orm::DbClient> &client)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
 }

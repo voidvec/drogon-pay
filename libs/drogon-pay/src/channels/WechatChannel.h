@@ -4,13 +4,15 @@
 
 #include <json/json.h>
 #include <functional>
+#include <memory>
 #include <string>
 #include <map>
 #include <shared_mutex>
 #include <mutex>
 #include <chrono>
 
-class WechatPayClient : public drogon_pay::PaymentChannel
+class WechatPayClient : public drogon_pay::PaymentChannel,
+                        public std::enable_shared_from_this<WechatPayClient>
 {
   public:
     using JsonCallback = std::function<void(const Json::Value &result, const std::string &error)>;
@@ -25,6 +27,7 @@ class WechatPayClient : public drogon_pay::PaymentChannel
     void createPayment(const Json::Value &payload, JsonCallback &&callback) override;
     void createQRPayment(const Json::Value &payload, JsonCallback &&callback) override;
     void queryPayment(const std::string &orderNo, JsonCallback &&callback) override;
+    void closeOrder(const std::string &orderNo, JsonCallback &&callback) override;
     void refund(const Json::Value &payload, JsonCallback &&callback) override;
     void queryRefund(const std::string &refundNo, JsonCallback &&callback) override;
     bool verifyCallback(
@@ -39,6 +42,7 @@ class WechatPayClient : public drogon_pay::PaymentChannel
     // ---- Wechat-specific capabilities (reach via dynamic_pointer_cast) ----
     void createTransactionNative(const Json::Value &payload, JsonCallback &&callback);
     void queryTransaction(const std::string &orderNo, JsonCallback &&callback);
+    void closeTransaction(const std::string &orderNo, JsonCallback &&callback);
 
     void downloadCertificates(JsonCallback &&callback);
     std::string getPlatformCert(const std::string &serialNo) const;

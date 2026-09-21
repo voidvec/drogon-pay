@@ -17,6 +17,22 @@ namespace
 using pay::test_util::buildPgConnInfo;
 using pay::test_util::loadConfig;
 
+// The service now enforces WeChat's official out_trade_no window (6-32 chars
+// of [0-9a-zA-Z_|*-]) before booking, so these service-level callers supply a
+// compliant unique order number instead of relying on the old empty default.
+std::string shortOrderNo()
+{
+    std::string compact;
+    for (const char c : drogon::utils::getUuid())
+    {
+        if (c != '-')
+        {
+            compact += c;
+        }
+    }
+    return "cix" + compact.substr(0, 25);
+}
+
 void ensureCreatePaymentTables(const std::shared_ptr<drogon::orm::DbClient> &client)
 {
     client->execSqlSync(
@@ -24,6 +40,7 @@ void ensureCreatePaymentTables(const std::shared_ptr<drogon::orm::DbClient> &cli
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -119,6 +136,7 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatError)
     const std::string title = "CreatePayError_" + drogon::utils::getUuid();
 
     CreatePaymentRequest request;
+    request.orderNo = shortOrderNo();
     request.userId = 10001;
     request.amount = "9.99";
     request.currency = "CNY";
@@ -183,6 +201,7 @@ DROGON_TEST(PayPlugin_CreatePayment_WechatSuccess)
     const std::string title = "CreatePayOK_" + drogon::utils::getUuid();
 
     CreatePaymentRequest request;
+    request.orderNo = shortOrderNo();
     request.userId = 10003;
     request.amount = "9.99";
     request.currency = "CNY";
@@ -391,4 +410,100 @@ DROGON_TEST(PayPlugin_CreatePayment_IdempotencyConflict)
     CHECK(countRows.front()["cnt"].as<int64_t>() == 0);
 
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", idempotencyKey);
+}
+
+// The payment-end-time guard, end to end: a value the channel cannot be shown
+// has to be refused before anything is booked, and a value it can be shown for
+// has to get through. Every timestamp here is a fixed constant, so the cases do
+// not drift with the clock or the runner's timezone.
+DROGON_TEST(PayPlugin_CreatePayment_TimeExpireGuard)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+    ensureCreatePaymentTables(client);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, nullptr, client);
+    auto paymentService = plugin.paymentService();
+
+    const std::string title = "TimeExpireGuard_" + drogon::utils::getUuid();
+
+    // Answers one call with the body's code and message, and reports whether the
+    // order row exists afterwards -- the point of a pre-booking guard is that a
+    // refused request leaves nothing in the sweep set.
+    auto attempt = [&](const std::string &channel, const std::string &timeExpire) {
+        CreatePaymentRequest request;
+        request.orderNo = shortOrderNo();
+        request.userId = 10009;
+        request.amount = "9.99";
+        request.currency = "CNY";
+        request.description = title;
+        request.channel = channel;
+        request.timeExpire = timeExpire;
+
+        // Shared so a delivery that answers after this helper returns cannot
+        // write into a destroyed promise.
+        auto resultPromise = std::make_shared<std::promise<Json::Value>>();
+        auto resultFuture = resultPromise->get_future();
+        paymentService->createPayment(
+          request, "", [resultPromise](const Json::Value &result, const std::error_code &) {
+              resultPromise->set_value(result);
+          }
+        );
+        const auto ready = resultFuture.wait_for(std::chrono::seconds(10));
+        CHECK(ready == std::future_status::ready);
+        if (ready != std::future_status::ready)
+        {
+            return std::make_pair(std::string("timed out"), false);
+        }
+        const Json::Value result = resultFuture.get();
+        const std::string message = result.get("message", "").asString();
+
+        const auto countRows =
+          client->execSqlSync("SELECT COUNT(*) AS cnt FROM pay_order WHERE title = $1", title);
+        const bool booked = !countRows.empty() && countRows.front()["cnt"].as<int64_t>() > 0;
+        return std::make_pair(message, booked);
+    };
+
+    // The exact mismatch this round found: a space-separated timestamp is what
+    // the old local parse accepted and what WeChat answers with a 400 of its
+    // own, after the order row already exists.
+    const auto spaced = attempt("wechat", "2099-05-20 13:29:35");
+    CHECK(spaced.first.find("time_expire") != std::string::npos);
+    CHECK(!spaced.second);
+
+    // An expiry before the order is created is a QR code that can never be paid.
+    const auto past = attempt("wechat", "2000-01-01T00:00:00Z");
+    CHECK(past.first.find("in the past") != std::string::npos);
+    CHECK(!past.second);
+
+    // The channel's own window: past seven days WeChat moves the deadline
+    // silently, so the disagreement is refused rather than accepted.
+    const auto beyondWindow = attempt("wechat", "2099-05-20T13:29:35Z");
+    CHECK(beyondWindow.first.find("within 7 days") != std::string::npos);
+    CHECK(!beyondWindow.second);
+
+    // Positive control: a well-formed deadline is not this guard's business for
+    // a channel that never receives the field, so the call has to get past it
+    // and fail (if at all) on something else. Without this case a guard that
+    // refused everything would still pass the three checks above.
+    const auto legalOtherChannel = attempt("alipay", "2099-05-20T13:29:35+08:00");
+    CHECK(legalOtherChannel.first.find("time_expire") == std::string::npos);
+
+    client->execSqlSync(
+      "DELETE FROM pay_payment WHERE order_no IN (SELECT order_no FROM pay_order WHERE title = $1)",
+      title
+    );
+    client->execSqlSync("DELETE FROM pay_order WHERE title = $1", title);
 }

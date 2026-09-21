@@ -17,6 +17,22 @@ namespace
 using pay::test_util::buildPgConnInfo;
 using pay::test_util::loadConfig;
 
+// WeChat's out_trade_no window is 6-32 characters of [0-9a-zA-Z_|*-]; the
+// service enforces it before booking. A prefixed full uuid (43 characters)
+// ran past the cap, so the cases share one compliant unique generator.
+std::string qrOrderNo()
+{
+    std::string compact;
+    for (const char c : drogon::utils::getUuid())
+    {
+        if (c != '-')
+        {
+            compact += c;
+        }
+    }
+    return "ord_qr_" + compact.substr(0, 20);
+}
+
 // Stands in for a real WeChat client: it answers whatever the case under test
 // needs and records the payload it was offered, so the booking behaviour can be
 // watched without a network call.
@@ -126,6 +142,7 @@ void ensureQrTables(const std::shared_ptr<drogon::orm::DbClient> &client)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -297,7 +314,7 @@ DROGON_TEST(PayPlugin_QrBooking_WechatQrCreatesAPaymentRow)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     Json::Value accepted;
     accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=testQr";
@@ -333,7 +350,7 @@ DROGON_TEST(PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     // WeChat's own error envelope on a 4xx: the order was certainly not created,
     // so the attempt may be booked dead.
     auto stub = std::make_shared<QrStubChannel>(
@@ -380,7 +397,7 @@ DROGON_TEST(PayPlugin_QrBooking_UncertainOutcomeKeepsTheAttemptInFlight)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(
       Json::Value(Json::objectValue), std::string("HTTP 500: bad gateway from an intermediary")
     );
@@ -409,7 +426,7 @@ DROGON_TEST(PayPlugin_QrBooking_AnswerWithoutCodeUrlKeepsTheAttemptInFlight)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     // An empty object is what a 200 with no `code_url`, no `prepay_id` and no
     // `code` looks like from the channel's side.
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
@@ -438,7 +455,7 @@ DROGON_TEST(PayPlugin_QrBooking_CurrencySpellingIsNotAnIdempotencyConflict)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     Json::Value accepted;
     accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=case";
@@ -480,7 +497,7 @@ DROGON_TEST(PayPlugin_QrBooking_SettledAttemptRefusesAnotherCode)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     seedQrOrder(client, orderNo, "9.99", "CNY", 4242, "CREATED");
     seedQrPayment(client, orderNo, "pay_" + drogon::utils::getUuid(), "9.99", "SUCCESS");
 
@@ -504,7 +521,7 @@ DROGON_TEST(PayPlugin_QrBooking_AnotherUsersOrderIsNotReused)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     seedQrOrder(client, orderNo, "9.99", "CNY", 999999, "CREATED");
 
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
@@ -525,7 +542,7 @@ DROGON_TEST(PayPlugin_QrBooking_SameOwnerAndAmountSpellingIsReusable)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     seedQrOrder(client, orderNo, "1.50", "CNY", 4242, "CREATED");
 
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
@@ -558,7 +575,7 @@ DROGON_TEST(PayPlugin_QrBooking_CallerCurrencyIsNormalisedIntoTheOfferAndTheOrde
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     Json::Value accepted;
     accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=currency";
@@ -590,7 +607,7 @@ DROGON_TEST(PayPlugin_QrBooking_MalformedCurrencyIsRefusedBeforeBooking)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     PayPlugin plugin;
     plugin.setTestChannels({{"wechat", stub}}, client);
@@ -614,7 +631,7 @@ DROGON_TEST(PayPlugin_QrBooking_PrivateNotifyUrlIsRefusedWithoutAskingTheChannel
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     PayPlugin plugin;
     plugin.setTestChannels({{"wechat", stub}}, client);
@@ -633,7 +650,7 @@ DROGON_TEST(PayPlugin_QrBooking_PublicNotifyUrlReachesTheChannelPayload)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     Json::Value accepted;
     accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=notify";
@@ -663,7 +680,7 @@ DROGON_TEST(PayPlugin_QrBooking_CallerOwnerIsBookedOnTheOrder)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     Json::Value accepted;
     accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=owner";
@@ -692,7 +709,7 @@ DROGON_TEST(PayPlugin_QrBooking_MissingOwnerIsRefusedBeforeBooking)
     REQUIRE(client != nullptr);
     ensureQrTables(client);
 
-    const std::string orderNo = "ord_qr_" + drogon::utils::getUuid();
+    const std::string orderNo = qrOrderNo();
     auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
     PayPlugin plugin;
     plugin.setTestChannels({{"wechat", stub}}, client);

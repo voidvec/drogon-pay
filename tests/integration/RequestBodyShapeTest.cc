@@ -114,10 +114,25 @@ bool refusedWith(const Answer &answer, int code)
            answer.body.get("code", -1).asInt() == code;
 }
 
+// Inside WeChat's official 6-32 out_trade_no window (the service enforces it
+// before booking) while still unique per call.
+std::string shapeOrderNo(const std::string &prefix)
+{
+    std::string compact;
+    for (const char c : drogon::utils::getUuid())
+    {
+        if (c != '-')
+        {
+            compact += c;
+        }
+    }
+    return prefix + compact.substr(0, 20);
+}
+
 Json::Value qrBody(const Json::Value &amount, const Json::Value &userId)
 {
     Json::Value body;
-    body["order_no"] = "ord_shape_" + drogon::utils::getUuid();
+    body["order_no"] = shapeOrderNo("os_");
     body["amount"] = amount;
     body["channel"] = "wechat";
     body["user_id"] = userId;
@@ -127,7 +142,7 @@ Json::Value qrBody(const Json::Value &amount, const Json::Value &userId)
 Json::Value payBody(const Json::Value &amount, const Json::Value &userId)
 {
     Json::Value body;
-    body["order_no"] = "ord_shape_" + drogon::utils::getUuid();
+    body["order_no"] = shapeOrderNo("os_");
     body["amount"] = amount;
     if (!userId.isNull())
     {

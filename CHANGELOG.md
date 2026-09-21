@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole WeChat Pay V3 flow against the official API — inbound notification
   path, outbound transaction/refund/certificate path — with each defect cited
   at `file:line`, the fix batch it landed in, and the items deliberately left
-  out (the bare-`this` capture in the certificate-download callback, the Alipay
-  timeout unit mix-up).
+  out (the Alipay timeout unit mix-up). Three of the items an earlier batch
+  listed as left out have since been implemented below: the idempotency-
+  reservation owner token, the bare-`this` capture in the certificate-download
+  callback, and the `time_expire` format and window check.
 - **`tests/integration/QrPaymentBookingTest.cc`**: drives the service behind
   `/api/qrpay/create` (with the channel injected through
   `PayPlugin::setTestChannels()`) so the QR booking contract is pinned by a test
@@ -422,6 +424,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
 
+- **An amount that overflows the money type is now refused instead of
+  silently wrapped.** The controller's amount regex caps the shape but not the
+  digit count, and `parseAmountToFen` fed 17-19-digit yuan values through
+  `stoll` unharmed into `yuan * 100`, which wraps signed (so
+  "184467440737095517.99" booked fen 183 — 1.83, a self-consistent small
+  positive number that every downstream amount-reconciliation gate then
+  accepted). The parse now rejects anything that cannot scale to fen without
+  overflow (`PayUtils.cc:370`, exact `INT64_MAX`-derived ceiling, shared by
+  both channels), and the existing service-level rejections turn it into the
+  400 the request always deserved. Pinned at the exact representable ceiling
+  as well as the wrap values in `PayUtilsTest.cc:25` (19 assertions).
+  The round's other candidate — a timestamp tolerance window on callback
+  verification — was falsified against five official pages and deliberately
+  not implemented: the documented 5-second clause is a processing deadline,
+  duplicates are delegated to merchant-side idempotency the CAS/ledger gates
+  already provide, and a hard window would false-reject WeChat's legitimate
+  multi-hour retries (`docs/review/2026-09-20-wechat-pay-api-audit.md`
+  §二十一).
+- **An expired, still-unpaid WeChat trade is now closed on the channel.**
+  Nothing in the codebase ever called the close API, so an order whose deadline
+  passed without payment stayed pay-able on WeChat's side until the channel's
+  own lazy expiry, and the reconcile sweep — the one component that looks at
+  exactly these orders — reported them unpaid every pass without ending them.
+  The channel SPI gained `closeOrder` (`PaymentChannel.h:78`, defaulting to an
+  explicit "unsupported" answer), `WechatPayClient::closeTransaction` implements
+  the V3 contract (`WechatChannel.cc:941`: POST to
+  `/v3/pay/transactions/out-trade-no/{out_trade_no}/close`, body only `mchid`),
+  and the shared request path now treats the documented `204 No Content` answer
+  as success instead of "invalid json response" (`WechatChannel.cc:500`) — the
+  one proof-of-close answer would otherwise have surfaced as a failure. The
+  sweep fires the close only when the channel itself still says `NOTPAY` *and*
+  the order row's own `expire_at` has passed
+  (`ReconciliationService.cc:223`); refusals are logged, a paid trade is
+  answered by the channel's refusal, and local rows converge to `CLOSED` on the
+  next pass. Pinned by the channel-shape cases in `WechatPayClientTest.cc:954`
+  and the sweep gate — three negative controls included — in
+  `WechatCloseOrderReconcileTest.cc:339`.
+- **A trade in `REFUND` state keeps the payment it collected.** `mapTradeState`
+  answered `REFUND` together with `CLOSED`/`REVOKED`, so a dropped notification
+  plus one status query booked money that *had arrived* as money that never did:
+  the payment row fell to `FAIL`, no `PAYMENT` ledger entry was written, and the
+  order read `CLOSED` as if it had expired unpaid — while the channel bill shows
+  the payment and its refund. `REFUND` is a state a trade reaches only after the
+  money arrives, so it now settles to order `REFUNDED` / payment `SUCCESS`
+  (`PayUtils.cc:410`), and both the "is this answer evidence about *this*
+  payment" amount proof and the ledger gate accept the `REFUNDED` landing
+  (`PaymentService.cc:2474`, `:2552`, `:2717`, `CallbackService.cc:1091`). The
+  collection still needs the amount it asked for: a `REFUND` answer reporting a
+  different total settles nothing. `CLOSED`, `REVOKED`, `PAYERROR` and the
+  unknown default keep their old direction, and the notification-path case that
+  had pinned the wrong answer now pins the right one.
+- **An order's `time_expire` is checked before it is booked, and stored as the
+  instant it names.** The field was forwarded to WeChat verbatim while the local
+  `expire_at` was parsed with `trantor::Date::fromDbStringLocal`, which splits on
+  a *space*: a correct `2026-05-20T13:29:35+08:00` reached the day field as
+  `20T13:29:35+08:00`, where `std::stol` stopped at the `T` without throwing, so
+  the order was booked at local midnight with the whole time-of-day silently
+  dropped — while the space-separated form the same parser *did* accept is the one
+  WeChat answers with a 400, after the row already exists. `pay::utils::parseRfc3339`
+  now reads the strict form itself (offset applied once, calendar-checked, no
+  dependency on the machine's zone — `fromISOString` is not usable either, it adds
+  the runner's offset on top of the string's own), `validateTimeExpire` refuses a
+  deadline that has already passed or that exceeds the channel's own seven-day
+  window, and `PaymentService::createPayment` refuses with 1001 before the order
+  row is written (`PaymentService.cc:477`) and books `expire_at` from the same
+  reading (`:625`).
+- **An idempotency reservation is now finalized only by the delivery that took
+  it (owner token).** The WeChat callback chains reserve a `pay_idempotency`
+  row with a NULL snapshot and finalize it after the settlement commits, but
+  nothing recorded WHO held the reservation: the read path's stale-reservation
+  delete matches by key, so a retry can drop the reservation of a live-but-slow
+  delivery, which then keeps running and finalizes through a key-only UPDATE —
+  stamping a snapshot onto a row it no longer owns, or committing a settlement
+  whose idempotency proof was deleted underneath it and ACKing SUCCESS with no
+  row left. `sql/005` adds `owner_token`; each callback delivery writes a fresh
+  random token at reserve time, and both chains' finalizes go through
+  `finalizeReservation`, an ownership-guarded `UPDATE ... RETURNING` (the
+  generated ORM model predates the column and models are drogon_ctl-only).
+  A zero-row match inside the business transaction rolls the whole delivery
+  back and answers FAIL — the channel retries and the next delivery reads the
+  true state; after the transaction already committed, the settlement is the
+  truth, so the snapshot loss warns and still ACKs. The read-path delete stays
+  key-scoped deliberately (a crashed holder's reservation must be clearable);
+  the takeover is what the guard neutralizes. Test fixtures create the new
+  column, and the payment-callback stale-reservation case now asserts the
+  winner's row carries both snapshot and owner token. The real race needs two
+  concurrent deliveries against one Postgres, so locally the guard is
+  compile-only evidence and CI adjudicates.
+
+- **WeChat bookings are now checked against the official field window before
+  they are booked.** `out_trade_no` is capped by the channel at 6-32 characters
+  of `[0-9a-zA-Z_|*-]` and `description` must be non-empty and at most 127
+  characters, but `/api/pay/create` and `/api/qrpay/create` forwarded whatever
+  they were given. An order number outside the window was written to
+  `pay_order`, failed every channel call with WeChat's own 400, and then sat in
+  the reconciliation sweep forever against a trade that could never exist — and
+  a number over 64 characters could not even be refunded afterwards. Both
+  service entries now share `pay::utils::validateWechatOrderFields` and answer
+  400 (1001 on `/api/pay/create`, releasing the idempotency reservation) before
+  the booking. `openapi.yaml` documents the window and the example WeChat
+  response now shows a compliant order number; the QR booking suite's
+  `ord_qr_<full-uuid>` fixture numbers (43 characters) moved to a unique
+  in-window generator, and the service-level `CreatePaymentIntegrationTest`
+  cases that relied on the old empty-order-number default now pass one.
+
+- **The certificate-download response handler captured the client as a raw
+  `this`.** `downloadCertificates` issued an async HTTP request whose completion
+  lambda reached back into the client to call `decryptResource`/`setPlatformCert`,
+  but nothing kept the client alive across the boundary. Every production owner
+  holds it through a `shared_ptr` (the registry `make_shared`s it; the services
+  `dynamic_pointer_cast` copies), so if the process tore the client down during
+  shutdown while a refresh was still in flight, the late response dereferenced a
+  dangling pointer. The class now derives from `enable_shared_from_this`, the
+  handler captures a `weak_ptr` and locks it before touching any member, dropping
+  the answer if the client is gone. The stack-constructed path used by the unit
+  test still fails synchronously at auth-header build (before the async boundary),
+  so it is unaffected; the actual race needs a live HTTP response plus teardown and
+  is compile-only locally.
+
+  acknowledged as handled even though nothing proved the winner finished.** The
+  payment-callback reserve path (`CallbackService.cc`) and its refund twin used to
+  answer `SUCCESS` whenever `ON CONFLICT DO NOTHING RETURNING` inserted 0 rows —
+  i.e. whenever a concurrent delivery already held the key. But a reservation is
+  written with `response_snapshot = NULL` and only finalized after the business
+  transaction commits, so an empty insert proves *contention*, not *completion*.
+  The read path had already decided the opposite for the same state (a NULL
+  snapshot means "still in flight — drop and answer FAIL so the channel retries");
+  the two paths disagreed on identical input. If the winning delivery then died
+  before finalizing, its row stayed NULL, the loser had already returned 2xx,
+  WeChat stopped retrying, and the settlement was stranded. Both reserve-race
+  branches now answer `FAIL` (retry) and let the next delivery take the read
+  path, which distinguishes a finalized snapshot from a stale reservation; the
+  loser never touches business logic, so there is no double-settle risk. Needs two
+  concurrent deliveries against PostgreSQL, so this is compile-only locally and
+  waits on CI.
+- **The certificate-download throttle spent its window on requests that never
+  reached the network.** `downloadCertificates` stamped `lastCertDownloadAt_`
+  before building the signed request, so a signing/config failure (a missing key)
+  consumed the shared interval without issuing anything, starving the next genuine
+  rotation refresh. The stamp now happens only after the auth header builds and
+  the request is about to dispatch, keeping the check-and-stamp atomic. The
+  round's "unknown-serial flood starves rotation" security claim was checked and
+  refuted: `/v3/certificates` returns the entire current set and the loop installs
+  every cert that validates regardless of which serial triggered the fetch, so an
+  attacker can at most induce one signed GET per interval — the throttle is that
+  rate-limiter by design, not a starvation vector.
+- **The three-argument SPI `verifyCallback` accepted a signed body with no
+  `resource`.** A WeChat V3 notification always carries the AES-GCM `resource`
+  object that holds the transaction fields; a body without one is malformed, yet
+  the method returned `true` with an empty `out_trade_no` and a null payload.
+  It now returns `false`. This overload has no production caller (the live flow
+  uses the six-argument signature-only variant), so the change is interface
+  hardening with compile-only evidence.
+- **Refund success moved the order to `REFUNDED` too early and via unguarded
+  writes.** `updateRefundWithError`/`updateRefundWithSuccess` read the row then
+  wrote the whole model back, so a dirty `status` column could overwrite state a
+  fast notification had already settled, and a single successful refund flipped
+  the parent order to `REFUNDED`. Both now use guarded `Mapper::updateBy` CAS
+  (`WHERE status IN ('REFUND_INIT','REFUNDING')`), and the order moves to
+  `REFUNDED` only on `REFUND_SUCCESS` and only under `WHERE status='PAID'`; the
+  notification path gained the matching in-transaction order write. In-flight
+  refund conflicts now report business code `1409` (HTTP 409), which is what
+  `openapi.yaml` had promised all along.
+- **The reconcile path settled an order without checking the amount.** When
+  `queryOrder` pulled a live channel answer and the local order already read
+  `PAID`, it synced the status without comparing the channel's amount against the
+  booked `pay_payment.amount`. A new `reconcileAmountProblem` helper gates both
+  doors — WeChat's `amount.total` (fen) and Alipay's `total_amount` (yuan, via
+  `parseAmountToFen`) — so a mismatch or an answer carrying no amount logs an
+  error and leaves the reported status unchanged rather than silently settling.
+  `pay_payment` has no `currency` column (it lives on `pay_order`), so this guard
+  compares amounts only; the currency check stays on the notification path.
+- **`validateNotifyUrl` let an SSRF payload through on a `#` fragment, and had
+  three other spelling gaps.** A fragment never terminated the host, so
+  `http://127.0.0.1#x.com` parsed as an unrecognized host, passed the check, and
+  the client connected to `127.0.0.1`. The host now runs to the first of
+  `/:?#`. Also completed: userinfo is stripped at the *last* `@`; non-canonical
+  IPv4 literals (`127.1`, `2130706433`, `0x7f.1`, `010.1.1.1`, ...) are refused
+  via `isNumericAddressShape`; IPv6 uses a `2000::/3` whitelist rather than the
+  old textual blocklist that any alternate spelling evaded. Positive controls
+  (`host42.example.com`, a path `@`, a trailing `/#cb`) guard against the checks
+  over-rejecting. Covered by `PayUtils_ValidateNotifyUrl` (42 assertions, green
+  locally).
 - **An uncertain WeChat answer on `/api/pay/create` closed the attempt that the
   callback needs to find.** Last round's rule — only an answer that *proves* the
   channel refused may close a booked `pay_payment` row — was wired into
@@ -1031,6 +1216,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `libs/drogon-pay/src/services/` actually does (per-construction-site
   `try/catch`, failure reported through the call site's own callback shape,
   `OnceCallback::call` where a service wrapped it).
+- **One settled refund booked the whole order as `REFUNDED`.** WeChat accepts
+  up to fifty partial refunds per order and `trade_state=REFUND` answers for a
+  partly refunded trade too, but both settlement sites — the refund-success
+  path in `libs/drogon-pay/src/services/RefundService.cc` and the refund
+  notification path in `libs/drogon-pay/src/services/CallbackService.cc` —
+  wrote `pay_order.status = 'REFUNDED'` on any refund that reached
+  `REFUND_SUCCESS`. Returning 3.00 of a 10.00 order told every consumer keying
+  on `REFUNDED` that the money was back while 7.00 was still with the
+  merchant. Both sites now gate on `pay::utils::refundsCoverOrderAmount`: the
+  order flips only when the sum of its `REFUND_SUCCESS` refund rows covers
+  `pay_order.amount` (the callback-path read runs inside the notification's own
+  transaction, so it sees the row that settlement just wrote), and an amount
+  nobody measured leaves the order as it is. `PayUtils_RefundsCoverOrderAmount`
+  pins the predicate; the pairs `PayPlugin_Refund_PartialRefundKeepsOrderPaid`
+  / `PayPlugin_Refund_CumulativeRefundsSettleOrder` and the matching pair in
+  `tests/integration/WechatCallbackIntegrationTest.cc` pin both sites through
+  real settlement flows — a partial refund leaves the order `PAID` while its
+  refund row still reads `REFUND_SUCCESS`, and refunds that do cover the total
+  flip it (a positive control, so the gate cannot pass by never writing). The
+  two remaining `REFUNDED`-adjacent landings named in the audit — the
+  `trade_state=REFUND` sync paths — are deliberately left to the next batch.
+- **A `REFUND` answer from the query or the transaction notification booked
+  `REFUNDED` ungated.** The previous batch closed the two refund settlement
+  sites but left the doors the audit had named: the trade notification maps
+  `trade_state=REFUND` straight onto `pay_order.status`, and so does the order
+  query sync in `libs/drogon-pay/src/services/PaymentService.cc` — yet
+  `REFUND` only says the trade entered refunding, which one settled partial
+  refund of an order is enough to produce. A dropped refund notification plus
+  one query therefore still recorded 3.00 back on a 10.00 order as the whole
+  order returned. All three remaining write points now pass the claim through
+  `pay::utils::resolveRefundedOrderStatus` against the same settled-refund sum
+  (read inside each path's own transaction, queued ahead of the write): an
+  uncovered `REFUNDED` lands as `PAID` — which is what a REFUND trade has
+  nonetheless proven — and a covered one stands. `syncRefundStatusFromWechat`
+  in `libs/drogon-pay/src/services/RefundService.cc` also gained the settlement
+  its name promises: when a queried refund has settled and the refunds on the
+  order together cover its total, the order is moved to `REFUNDED` under the
+  same PAID-guarded CAS, recovering the concurrent case where two settlements
+  each counted without the other. `PayUtils_ResolveRefundedOrderStatus` pins
+  the predicate; `PayPlugin_QueryOrder_WechatRefundSettlesOrderOnlyWhenCovered`
+  and `PayPlugin_WechatCallback_TransactionRefundStateCoveredSettlesOrder` pin
+  both new doors with their positive controls, and the round-11/round-12
+  cases flipped to the ledger-backed expectation. What a single channel answer
+  can still never prove — that the refund it mentions exists at all — remains
+  guarded only by the amount check, as before.
 
 ## [1.0.0] - 2026-07-31
 
