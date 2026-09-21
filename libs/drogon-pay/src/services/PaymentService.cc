@@ -2354,8 +2354,8 @@ void PaymentService::syncOrderStatusFromAlipay(
                                           {
                                               LOG_ERROR << "Alipay reconcile REJECTED: amount "
                                                            "mismatch for order "
-                                                        << orderNo << " (notified fen="
-                                                        << notifiedFen
+                                                        << orderNo
+                                                        << " (notified fen=" << notifiedFen
                                                         << ", order fen=" << orderFen << ")";
                                               transPtr->rollback();
                                               if (callback)
@@ -2547,9 +2547,8 @@ void PaymentService::syncOrderStatusFromAlipay(
                                         {
                                             LOG_ERROR << "Alipay reconcile REJECTED: amount "
                                                          "mismatch for order "
-                                                      << orderNo << " (notified fen="
-                                                      << notifiedFen << ", order fen=" << orderFen
-                                                      << ")";
+                                                      << orderNo << " (notified fen=" << notifiedFen
+                                                      << ", order fen=" << orderFen << ")";
                                             transPtr->rollback();
                                             if (callback)
                                             {

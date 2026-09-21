@@ -274,6 +274,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A verified Alipay notification could still confirm the wrong order.** The
+  async notification path ran the signature check and then trusted
+  `trade_status` alone: `syncOrderStatusFromAlipay()` wrote `PAID` without
+  comparing the notification's `total_amount` against the amount stored on the
+  order, and the controller never re-checked the notification's `app_id`
+  against our own configured one. Either gap turns a correctly signed message
+  into credited money that was never charged for that order — a
+  mis-configured sandbox, a replayed notification from another app, or a body
+  whose amount was altered before the notification was composed (Alipay's own
+  integration contract requires re-checking `out_trade_no`, `total_amount`,
+  `app_id`/`seller_id` and `trade_status`, not just the signature). The service
+  now compares the notification amount and the order amount in fen (the stored
+  amount is a string, so `"0.5"` and `"0.50"` compare equal) and rolls the
+  transaction back on a mismatch or an unparseable amount; the controller
+  rejects a notification whose `app_id` differs from the configured one, and
+  only when we know our own id, so an unconfigured sandbox cannot reject every
+  callback. `seller_id` is deliberately *not* compared: the config holds the
+  seller email while the notification carries the PID, so a check there would
+  reject every genuine notification. `CallbackController_Alipay_*_Rejected`
+  asserts a forged notification comes back `FAIL`.
+- **Alipay's own notifications could fail our verifier.** `verifyCallback()`
+  built the signed payload from every parameter except `sign`/`sign_type`, but
+  the official rule also drops parameters whose value is *empty*. A genuine
+  `TRADE_SUCCESS` carrying a blank `refund_amount` or `gmt_refund` therefore
+  hashed a different string than the one Alipay signed, verification failed,
+  and the order stayed unconfirmed while Alipay kept retrying a notification we
+  kept refusing. The verifier now skips empty-valued members, guarded by
+  `AlipayVerifyCallbackTest`, which mints a throwaway keypair, signs a
+  notification containing empty fields and requires both that it verifies and
+  that a wrong signature does not. The same build path called the non-reentrant
+  `std::localtime()` while composing the common request parameters; Drogon can
+  serve from several IO-loop threads, so the timestamp is now formatted through
+  `localtime_s`/`localtime_r`.
+
+
 - **A tag no pipeline had ever run could deploy production.** `deploy.yml`
   triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
   and `deploy-production` legs depended only on `preflight` — which checks whether
