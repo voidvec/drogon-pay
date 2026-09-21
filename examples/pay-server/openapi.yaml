@@ -1106,6 +1106,17 @@ components:
           type: string
           format: url
           description: Channel-facing callback URL; must be https, or http loopback for local testing.
+        time_expire:
+          type: string
+          description: |
+            Order expiry. RFC 3339 is the only accepted shape on this route
+            for either channel (the validator parses RFC 3339 itself; the
+            Alipay-style `yyyy-MM-dd HH:mm:ss` is refused), and the value
+            also becomes the local `expire_at` the close sweep honours.
+            Only WeChat is then offered it as the channel order's expiry;
+            Alipay uses it for the local deadline alone. The channel's
+            window is enforced before the order exists (1001). Absent means
+            the channel default.
         channel:
           type: string
           enum: [alipay, wechat]
@@ -1211,6 +1222,15 @@ components:
         buyer_id:
           type: string
           description: Alipay only -- scopes the precreated order to a buyer.
+        time_expire:
+          type: string
+          description: |
+            WeChat only on this route -- forwarded verbatim as the native
+            order's expiry (RFC 3339, the channel's window enforced), refused
+            400 before anything is booked, and recorded as the local
+            `expire_at` the close sweep honours. The replay hash covers it:
+            the same order re-requested with a different expiry is a conflict,
+            not a replay.
         idempotency_key:
           type: string
           maxLength: 128

@@ -443,6 +443,7 @@ void sendWechatRequest(
   const std::string &body,
   const std::string &authHeader,
   int timeoutMs,
+  std::function<bool(const drogon::HttpResponsePtr &, std::string &)> verifyAnswer,
   WechatPayClient::JsonCallback &&callback
 )
 {
@@ -479,7 +480,9 @@ void sendWechatRequest(
     const double timeoutSeconds = timeoutMs > 0 ? timeoutMs / 1000.0 : 0;
     client->sendRequest(
       req,
-      [cb, timeoutMs](drogon::ReqResult result, const drogon::HttpResponsePtr &resp) {
+      [cb,
+       verifyAnswer = std::move(verifyAnswer),
+       timeoutMs](drogon::ReqResult result, const drogon::HttpResponsePtr &resp) {
           Json::Value bodyJson;
           if (result != drogon::ReqResult::Ok || !resp)
           {
@@ -502,6 +505,26 @@ void sendWechatRequest(
               Json::Value bodyJson(Json::objectValue);
               (*cb)(bodyJson, "");
               return;
+          }
+
+          // The documented answer signature covers the response body, so every
+          // 2xx answer that carries one must verify before the service layer is
+          // allowed to read state out of it. A 204 has no body to sign and is
+          // handled above; non-2xx answers only ever drive the failure path,
+          // which an attacker who can forge them does not need this channel
+          // for. An answer that fails to verify is dropped without a body --
+          // handing the forged JSON to the caller would re-open the hole even
+          // through the error text. `verifyAnswer` is empty (boolean-false) for
+          // the certificate-download bootstrap, which must NOT dereference an
+          // empty std::function.
+          if (verifyAnswer && status >= 200 && status < 300)
+          {
+              std::string verifyError;
+              if (!verifyAnswer(resp, verifyError))
+              {
+                  (*cb)(bodyJson, "response signature verification failed: " + verifyError);
+                  return;
+              }
           }
 
           bool parsed = false;
@@ -621,7 +644,9 @@ void WechatPayClient::createTransactionNative(const Json::Value &payload, JsonCa
         return;
     }
 
-    sendWechatRequest(apiBase_, "POST", path, body, auth, timeoutMs_, std::move(callback));
+    sendWechatRequest(
+      apiBase_, "POST", path, body, auth, timeoutMs_, answerVerifier(), std::move(callback)
+    );
 }
 
 void WechatPayClient::downloadCertificates(JsonCallback &&callback)
@@ -684,6 +709,15 @@ void WechatPayClient::downloadCertificates(JsonCallback &&callback)
       body,
       auth,
       timeoutMs_,
+      // No answer verifier here on purpose: this is the bootstrap that *arms*
+      // answer verification. Verifying it would need a platform certificate,
+      // which is exactly what this response delivers -- the check would be
+      // circular. The answer authenticates itself instead: the certificate
+      // bodies are AES-GCM encrypted under the merchant's own `api_v3_key`,
+      // so only a holder of that key could have produced them, and
+      // `setPlatformCert` additionally binds serial, validity window and the
+      // optional CA anchor before anything is cached.
+      AnswerVerifier(),
       [selfWeak, cb](const Json::Value &result, const std::string &err) {
           auto self = selfWeak.lock();
           if (!self)
@@ -935,7 +969,9 @@ void WechatPayClient::queryTransaction(const std::string &orderNo, JsonCallback 
         return;
     }
 
-    sendWechatRequest(apiBase_, "GET", path, body, auth, timeoutMs_, std::move(callback));
+    sendWechatRequest(
+      apiBase_, "GET", path, body, auth, timeoutMs_, answerVerifier(), std::move(callback)
+    );
 }
 
 void WechatPayClient::closeTransaction(const std::string &orderNo, JsonCallback &&callback)
@@ -973,7 +1009,9 @@ void WechatPayClient::closeTransaction(const std::string &orderNo, JsonCallback 
         return;
     }
 
-    sendWechatRequest(apiBase_, "POST", path, body, auth, timeoutMs_, std::move(callback));
+    sendWechatRequest(
+      apiBase_, "POST", path, body, auth, timeoutMs_, answerVerifier(), std::move(callback)
+    );
 }
 
 void WechatPayClient::closeOrder(const std::string &orderNo, JsonCallback &&callback)
@@ -1002,7 +1040,9 @@ void WechatPayClient::refund(const Json::Value &payload, JsonCallback &&callback
         return;
     }
 
-    sendWechatRequest(apiBase_, "POST", path, body, auth, timeoutMs_, std::move(callback));
+    sendWechatRequest(
+      apiBase_, "POST", path, body, auth, timeoutMs_, answerVerifier(), std::move(callback)
+    );
 }
 
 void WechatPayClient::queryRefund(const std::string &refundNo, JsonCallback &&callback)
@@ -1028,7 +1068,9 @@ void WechatPayClient::queryRefund(const std::string &refundNo, JsonCallback &&ca
         return;
     }
 
-    sendWechatRequest(apiBase_, "GET", path, body, auth, timeoutMs_, std::move(callback));
+    sendWechatRequest(
+      apiBase_, "GET", path, body, auth, timeoutMs_, answerVerifier(), std::move(callback)
+    );
 }
 
 std::string WechatPayClient::buildAuthorizationHeader(
@@ -1070,11 +1112,7 @@ std::string WechatPayClient::buildAuthorizationHeader(
     return auth;
 }
 
-bool WechatPayClient::verifyCallback(
-  const std::string &timestamp,
-  const std::string &nonce,
-  const std::string &body,
-  const std::string &signature,
+std::string WechatPayClient::resolveTrustedPlatformCert(
   const std::string &serialNo,
   std::string &error
 )
@@ -1082,16 +1120,27 @@ bool WechatPayClient::verifyCallback(
     if (serialNo.empty())
     {
         error = "missing Wechatpay-Serial";
-        return false;
+        return "";
+    }
+
+    // The serial arrives in a header the far end controls and the rejection
+    // text carries it onward to our own API callers, so bound it before it can
+    // turn into a log/response injection. A WeChat certificate serial is a
+    // 32-hex-digit string; 64 leaves generous room for the public-key id
+    // spelling without any realistic echo budget.
+    if (serialNo.size() > 64)
+    {
+        error = "Wechatpay-Serial too long";
+        return "";
     }
 
     std::string certContent = getPlatformCert(serialNo);
 
-    // The notification header names the certificate that produced the
-    // signature, so a statically deployed platform certificate may only serve
-    // the serial it actually carries. Comparing against the merchant's own
-    // `serial_no` (the previous behaviour) compares two unrelated numbering
-    // spaces and rejects or mis-binds depending on configuration.
+    // The header names the certificate that produced the signature, so a
+    // statically deployed platform certificate may only serve the serial it
+    // actually carries. Comparing against the merchant's own `serial_no`
+    // compares two unrelated numbering spaces and rejects or mis-binds
+    // depending on configuration.
     if (certContent.empty() && !platformCertPath_.empty())
     {
         std::string readErr;
@@ -1099,7 +1148,7 @@ bool WechatPayClient::verifyCallback(
         if (!readErr.empty())
         {
             error = "failed to read static cert: " + readErr;
-            return false;
+            return "";
         }
         if (certificateSerialHex(staticCert) == normalizeSerialHex(serialNo))
         {
@@ -1109,9 +1158,9 @@ bool WechatPayClient::verifyCallback(
 
     if (certContent.empty())
     {
-        // Unseen serial: WeChat rotated to a new platform certificate. Fetch the
-        // current set (self-throttled) and reject this one -- WeChat retries a
-        // non-2xx answer, and by then the certificate is cached.
+        // Unseen serial: WeChat rotated to a new platform certificate. Fetch
+        // the current set (self-throttled) and reject this one -- WeChat
+        // retries, and by then the certificate is cached.
         downloadCertificates([](const Json::Value &, const std::string &err) {
             if (!err.empty() && err != "certificate download throttled")
             {
@@ -1119,11 +1168,85 @@ bool WechatPayClient::verifyCallback(
             }
         });
         error = "no trusted platform certificate for serial: " + serialNo;
+        return "";
+    }
+
+    return certContent;
+}
+
+bool WechatPayClient::verifyCallback(
+  const std::string &timestamp,
+  const std::string &nonce,
+  const std::string &body,
+  const std::string &signature,
+  const std::string &serialNo,
+  std::string &error
+)
+{
+    const std::string certContent = resolveTrustedPlatformCert(serialNo, error);
+    if (certContent.empty())
+    {
         return false;
     }
 
     std::string message = timestamp + "\n" + nonce + "\n" + body + "\n";
     return verifyMessageWithCert(message, signature, certContent, error);
+}
+
+bool WechatPayClient::verifyResponse(const drogon::HttpResponsePtr &resp, std::string &error)
+{
+    const std::string timestamp = std::string(resp->getHeader("Wechatpay-Timestamp"));
+    const std::string nonce = std::string(resp->getHeader("Wechatpay-Nonce"));
+    const std::string signature = std::string(resp->getHeader("Wechatpay-Signature"));
+    const std::string serialNo = std::string(resp->getHeader("Wechatpay-Serial"));
+
+    // Refuse a missing header set before the certificate resolver ever sees an
+    // empty serial: an unsigned answer must not be able to spend the shared
+    // download window on a refresh that cannot make it signed.
+    if (timestamp.empty() || nonce.empty() || signature.empty())
+    {
+        error = "missing Wechatpay-Timestamp/Nonce/Signature answer headers";
+        return false;
+    }
+
+    const std::string certContent = resolveTrustedPlatformCert(serialNo, error);
+    if (certContent.empty())
+    {
+        return false;
+    }
+
+    const std::string message = timestamp + "\n" + nonce + "\n" + std::string(resp->body()) + "\n";
+    return verifyMessageWithCert(message, signature, certContent, error);
+}
+
+WechatPayClient::AnswerVerifier WechatPayClient::answerVerifier()
+{
+    // Response handlers run on the IO loop after the caller may have released
+    // the client. Producers own it through shared_ptr (the registry and every
+    // service), so pinning weakly turns the shutdown race into a dropped
+    // answer -- the same call the certificate refresh made for itself. A
+    // non-shared instance cannot be pinned, and its own tests wait for the
+    // answer before destruction, so the raw binding stands for those only.
+    std::weak_ptr<WechatPayClient> weak = weak_from_this();
+    const bool pinned = !weak.expired();
+    return [weak, pinned, this](const drogon::HttpResponsePtr &resp, std::string &error) {
+        if (pinned)
+        {
+            // Hold the pin across the whole call. A bare null-check on a
+            // temporary `weak.lock()` would drop that last reference the moment
+            // it returned, so the owner could destroy the client in the gap
+            // before `verifyResponse` touched `this` -- exactly the shutdown
+            // race the pin exists to close.
+            const auto self = weak.lock();
+            if (!self)
+            {
+                error = "wechat client destroyed before the answer was verified";
+                return false;
+            }
+            return self->verifyResponse(resp, error);
+        }
+        return verifyResponse(resp, error);
+    };
 }
 
 bool WechatPayClient::decryptResource(

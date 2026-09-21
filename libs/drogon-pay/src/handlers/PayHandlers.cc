@@ -174,6 +174,7 @@ void PayController::createPayment(
                 {"notify_url", FieldType::String, true},
                 {"channel", FieldType::String, true},
                 {"user_id", FieldType::Int64, true},
+                {"time_expire", FieldType::String, true},
               },
               shapeError
             ))
@@ -206,6 +207,7 @@ void PayController::createPayment(
     request.description = json->get("description", "").asString();
     request.notifyUrl = json->get("notify_url", "").asString();
     request.channel = json->get("channel", "alipay").asString();  // Default to alipay
+    request.timeExpire = json->get("time_expire", "").asString();
 
     // Get user_id from JSON body or attributes (set by auth middleware).
     // `Attributes::get` never throws: a missing key and a key stored under
@@ -333,6 +335,7 @@ void PayController::createQRPayment(
                 {"notify_url", FieldType::String, true},
                 {"buyer_id", FieldType::String, true},
                 {"idempotency_key", FieldType::String, true},
+                {"time_expire", FieldType::String, true},
               },
               shapeError
             ))
@@ -397,12 +400,15 @@ void PayController::createQRPayment(
     }
 
     // Hand over the fields the QR service reads. Rebuilding the request from
-    // scratch used to drop all four of them, so every QR order was priced in CNY
+    // scratch used to drop all five of them, so every QR order was priced in CNY
     // (`currency`), bound to the globally configured callback URL (`notify_url`),
-    // never scoped to a `buyer_id`, and replay-guarded only by the derived
+    // never scoped to a `buyer_id`, replay-guarded only by the derived
     // "QR_<order_no>_<channel>" key -- the documented `X-Idempotency-Key` header
-    // had no effect on this route.
-    for (const char *field : {"currency", "notify_url", "buyer_id", "idempotency_key"})
+    // had no effect on this route -- and never carried the caller's
+    // `time_expire`, which left the order without an `expire_at` the close
+    // sweep could ever honour.
+    for (const char *field :
+         {"currency", "notify_url", "buyer_id", "idempotency_key", "time_expire"})
     {
         if (json->isMember(field))
         {

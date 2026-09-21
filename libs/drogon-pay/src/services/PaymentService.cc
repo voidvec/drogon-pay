@@ -1401,6 +1401,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
     std::string amount = request.get("amount", "").asString();
     std::string channel = request.get("channel", "alipay").asString();
     std::string subject = request.get("subject", "Payment").asString();
+    std::string timeExpire = request.get("time_expire", "").asString();
 
     if (orderNo.empty() || amount.empty())
     {
@@ -1457,6 +1458,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
     reqHashObj["currency"] = currencyValid ? currency : requestedCurrency;
     reqHashObj["notify_url"] = request.get("notify_url", "").asString();
     reqHashObj["buyer_id"] = request.get("buyer_id", "").asString();
+    reqHashObj["time_expire"] = timeExpire;
     std::string requestHash = drogon::utils::getSha256(pay::utils::toJsonString(reqHashObj));
 
     auto idempotencyService = idempotencyService_;
@@ -1479,6 +1481,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
        userId,
        currency,
        currencyValid,
+       timeExpire,
        request,
        sharedCb,
        idempotencyService,
@@ -1528,6 +1531,25 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
               response["code"] = 400;
               response["message"] = "Invalid currency: expected a three-letter ISO-4217 code";
               sharedCb->call(response, pay::makePayError(400, "invalid currency"));
+              return;
+          }
+
+          // `time_expire` follows the create-route discipline: a shape the
+          // channel can never honour, or a deadline outside its window, is
+          // refused before the order exists -- the same asymmetry the struct
+          // path documents (the channel moves a too-far deadline silently and
+          // the two expiries then disagree).
+          std::string timeExpireError;
+          if (
+            !timeExpire.empty() &&
+            !pay::utils::validateTimeExpire(timeExpire, channel, timeExpireError)
+          )
+          {
+              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
+              Json::Value response;
+              response["code"] = 400;
+              response["message"] = timeExpireError;
+              sharedCb->call(response, pay::makePayError(400, timeExpireError));
               return;
           }
 
@@ -1584,6 +1606,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                       return;
                   }
                   payload["notify_url"] = notifyUrl;
+              }
+              if (!timeExpire.empty())
+              {
+                  payload["time_expire"] = timeExpire;
               }
           }
           else
@@ -1963,6 +1989,7 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                                 currency,
                                 subject,
                                 userId,
+                                timeExpire,
                                 request,
                                 failQr,
                                 bookQrPayment]() {
@@ -1977,6 +2004,22 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   newOrder.setChannel(channel);
                   newOrder.setTitle(subject);
                   newOrder.setUserId(userId);
+                  if (!timeExpire.empty())
+                  {
+                      // The shape was refused upstream if it could not parse;
+                      // a late failure books the order without an expire_at and
+                      // the close sweep simply never sees it -- same discipline
+                      // as the create route.
+                      int64_t expireSeconds = 0;
+                      std::string expireError;
+                      if (pay::utils::parseRfc3339(timeExpire, expireSeconds, expireError))
+                      {
+                          newOrder.setExpireAt(trantor::Date(expireSeconds * 1000000));
+                      }
+                      // No else: the validator upstream parses through this
+                      // very function, so reaching here unparsable is not a
+                      // state this route can produce -- deliberately silent.
+                  }
 
                   orderMapper.insert(
                     newOrder,

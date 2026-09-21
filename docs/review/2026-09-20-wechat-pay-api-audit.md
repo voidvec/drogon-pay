@@ -634,8 +634,8 @@ CI-only 分支（F2 预留竞态、SPI 三参严格化、证书下载并发生�
   "系统自动调整"这个调用方观测不到的静默改期改为本地拒绝；字段长度 string(64) 同源。
 - **落点**：`pay::utils::parseRfc3339`（`PayUtils.cc:642`）严格 RFC3339 → UTC 秒；
   `validateTimeExpire`（`:702`）在其上叠加"必须晚于当前"与微信 7 天窗（按 channel 分向，
-  非微信渠道不受该窗约束）；建单在**写库之前** fail-fast（`PaymentService.cc:477`，1001 +
-  `clearReservation`，与第八轮字段守卫同位同处置），`expire_at` 用同一读数落库（`:625`）。
+  非微信渠道不受该窗约束）；建单在**写库之前** fail-fast（`PaymentService.cc:497`，1001 +
+  `clearReservation`，与第八轮字段守卫同位同处置——锚点为第十八轮重锚，原 :477/:625 已漂），`expire_at` 用同一读数落库（`:650`）。
 - **为何不复用 trantor 解析器（实测，不是推断）**：`fromISOString` 把机器时区叠在串自己声明的
   偏移之上，首版单测里"格式化为 UTC 再比对"直接读出整 8 小时的偏差与 1 秒漂移。故日历与偏移
   自算（`daysFromCivil`，`:589`），测试侧的 RFC3339 生成器同样自写 —— 被测与辅助不同源，
@@ -977,7 +977,7 @@ REFUND→order 写 `REFUNDED` 在任何入口都只是"主张"，必须与 §十
 CAS 状态机 + 流水台账 + 幂等 owner token 已构成闭环：同一通知重放最多产生
 一次状态迁移。硬验签（平台证书 + AEAD 解密 + serial 绑定，第十轮后含静态
 证书序列号核对）已挡住改包重放；无窗口即维持现状。`verifyCallback`
-（`WechatChannel.cc:1073`）不做 delta 判定是**有意决定**，非遗漏。
+（`WechatChannel.cc:1177`，第十六轮应答验签入码后重锚）不做 delta 判定是**有意决定**，非遗漏。
 
 ### 同轮发现的真缺陷：`parseAmountToFen` 溢出静默回绕（资金语义）
 - **机理**：controller 的 `validateAmount`（`PayHandlers.cc:44`）正则
@@ -1020,10 +1020,280 @@ CAS 状态机 + 流水台账 + 幂等 owner token 已构成闭环：同一通知
   进业务层。业务上无此等大额订单，属纵深防御候选而非缺陷，未加。
 - 下一轮候选首位（风险排序）：**出站应答验签整体缺位**——官方口径
   "如果应答的签名验证失败，品牌商户系统应舍弃该应答"（§二十一取证品牌页），
-  验签三元组口径已在手；当前 `Wechatpay-Signature` 头只在入站通知路径被读
-  （`WechatChannel.cc:1198`），出站应答（下单/查单/退款）信任完全押在 TLS
+  验签三元组口径已在手；当时 `Wechatpay-Signature` 头只在入站通知路径被读
+  （`WechatChannel.cc:1321`，第十六轮后重锚），出站应答（下单/查单/退款）信任完全押在 TLS
   上。改造点在 `sendWechatRequest` 收口，需先厘清平台证书轮换窗口，风险
   大于本轮所有改动，单独成轮。余下：`goods_detail` 透传、创建路径 owner 化
   统一、`CallbackService` 嵌套压平、`time_expire` 进 HTTP 契约、Alipay
   `closeTrade` 接入、查单门"已覆盖但行 PAID→升档"。
 - 文档同步：CHANGELOG Fixed 一条；`TECH_SPECS.md` 无涉；openapi 无变更。
+
+## 二十二、第十六轮：出站应答验签收口（§二十一候选首位兑现）
+
+### 官方取证（应答必须验签）
+- APIv3 签名验证总述（`wiki/doc/apiv3/wechatpay/wechatpay4_0.shtml`，
+  2026-09-21 实测）："微信支付应答商户的请求时，商户需要验签"——口径覆盖
+  **所有**请求应答场景，不止回调。
+- 微信支付公钥验签指引（`doc/brand/4015407582`，第十五轮已取得）：应答验签
+  消息组成为"应答时间戳\n应答随机串\n应答报文主体\n"，并明示"如果应答的
+  签名验证失败……应舍弃该应答"。
+- 关闭订单（`doc/v3/merchant/4012526915`）：成功应答为 **204 且无报文体**，
+  该页未记载 `Wechatpay-*` 应答头——204 没有可签名的 body，验签收口必须
+  给它让路（第十五轮 204 早退路径先于验签块，`WechatChannel.cc:503` 后）。
+- 页面重构留证：`wiki/doc/apiv3/wechatpay/wechatpay4_1.shtml` 现返回总述
+  页内容（抓取时以"内容自证身份"核对发现），未据此页做任何断言。
+
+### 缺陷与收口（单点：`sendWechatRequest`）
+- **缺陷**：入站通知自第一/十轮起已有硬验签，但**出站应答**（下单/查单/
+  关单/退款/退款查询）拿到 2xx + 可解析 JSON 就直接交给 service 层——
+  `api_base` 之后任何能终结/旁观 TLS 会话的一方，都能用一个结构良好的
+  `200 {"trade_state":"SUCCESS"}` 把任意状态写进订单机。信任完全押在传输
+  层，渠道层的签名防线只做了一半。
+- **收口**（`WechatChannel.cc:446` 新增 `verifyAnswer` 形参，`:520` 判定
+  块）：每个**带 body 的 2xx** 应答先过 `verifyResponse` 再进解析；验签
+  失败的应答**整体舍弃**——错误串只带原因，不转述伪造 body（`api_base`
+  是配置，那边回来什么都不能经我们的错误信息反射给业务方）。五个业务入口
+  （`createTransactionNative :648`、`queryTransaction :973`、
+  `closeTransaction :1013`、`refund :1044`、`queryRefund :1072`）统一传入
+  `answerVerifier()`。
+- **非 2xx 不验**（守卫方向）：失败应答在 service 层只会驱动失败/待定路径，
+  能伪造它的人本就不需要借这条通道改状态；强行收紧只会把微信合法的错误
+  应答（含网络中间设备产出的 4xx/5xx）误伤成不可用。
+- **`/v3/certificates` 例外**（`:720` 传空 verifier）：bootstrap 悖论——
+  该应答本身运送信任锚，不可能用尚未取得的锚验自己。真实性由两道自有
+  防线承担：应答 body 用 `api_v3_key` 做 AES-GCM 解密（AEAD 即自证），
+  每张证书入库前过 `setPlatformCert` 的 X.509 解析 / 有效期 / serial 绑定 /
+  CA 锚链核对（第十轮）。
+
+### `verifyResponse` 与证书解析共享
+- `verifyResponse`（`WechatChannel.cc:1196`）读 `Wechatpay-Timestamp/
+  Nonce/Signature/Serial` 四头，拼"应答时间戳\n应答随机串\n应答报文主体\n"
+  走与通知同一把 `verifyMessageWithCert`。
+- **头集合缺失在证书解析之前拒绝**（:1196 内先判三件套、:1208 落错误串，再进 resolver）：
+  未签名的应答不得消耗共享的证书下载窗口——否则一个伪造的"serial 未知"
+  应答就能反复触发限流内的全量下载，Do 掉合法轮换的收敛路径。
+- `resolveTrustedPlatformCert`（`WechatChannel.cc:1115`）本轮从
+  `verifyCallback` 串重载里**逐字提取**（三条错误串
+  "missing Wechatpay-Serial" / "failed to read static cert: …" /
+  "no trusted platform certificate for serial: …" 原样保留，既有
+  VerifyCallback 族断言零改动即证明提取无行为漂移）：缓存 → 静态证书
+  （必须携带它所服务的 serial 本身）→ 限流下载后拒绝本次。出站与入站
+  从此共用同一信任判定，入站能验的 serial 出站就能验，反之亦然。
+
+### 生命周期（异步边界上的 `this`）
+- `answerVerifier()`（`WechatChannel.cc:1222`）持 `weak_from_this()` pin：
+  生产侧客户端全部由 `shared_ptr` 持有（registry `PayPlugin.cc:118` 与
+  各 service），停机竞态下迟到的应答被丢弃（"client destroyed before the
+  answer was verified"）而非解引用死对象——与证书刷新第十三轮同款收口。
+- 栈上构造的单测客户端 pin 不住（`weak.expired()` 为真即未入主），此时
+  保留裸 `this` 绑定：这些用例自身在析构前等待应答，这是可证的窗口；
+  判据用 noexcept 的 `weak_from_this().expired()`，不捕 `bad_weak_ptr`
+  （`weak_from_this` 不抛，只有 `shared_from_this` 抛——首版 try/catch
+  是错误语义，已删）。
+
+### 测试（正负对照，本机绿）
+- `WechatPayClient_QueryTransaction_AcceptsSignedOkAnswer`
+  （`WechatPayClientTest.cc:1084`，7 断言）：one-shot listener 给出文档
+  形状的签名成功应答（200+JSON+四头，签名覆盖 ts\nnonce\nbody\n），端到端
+  必须接受且 `trade_state` 透传——**守卫方向的正向对照**，防"验签把真应答
+  也全拒了"的自锁。
+- `WechatPayClient_QueryTransaction_DropsUnsignedOkAnswer`（`:1157`，6
+  断言）：200 + 声称 SUCCESS 的合法 JSON、**无 Wechatpay-\* 头**必须整条
+  舍弃；且该客户端**不配任何平台证书**——断言**完整错误串**（评审后由前缀
+  改全串：resolver 自己的 "missing Wechatpay-Serial" 与前缀同头，前缀检查
+  分辨不出"拒绝发生在 resolver 之前"这条顺序声明），全串钉死才能证明缺头
+  拒绝发生在证书 resolver 之前（不落进下载窗口）。
+- `WechatPayClient_VerifyResponse_BindsHeadersBodyAndSerial`（`:1224`，10
+  断言）：免 socket 的单元级五态——全对通过 / body 被换而签名原样必须拒 /
+  缺头集精确错误串 / 未知 serial 精确错误串 / **超长 serial 被帽**
+  （"Wechatpay-Serial too long"，:1133——拒绝串会经 service 回显给
+  我方 API 调用方，头部输入必须先限长再进串）。
+- `WechatPayClient_DownloadCertificates_EmptyVerifierAnswersNormally`
+  （`:1295`）：证书下载走 200+body 的**空 verifier** 通道必须正常返回
+  "invalid certificate response format"（形状拒绝）——这是评审 BLOCKER
+  的回归钉：缺陷形态下 IO 回调里抛 `bad_function_call`，应答丢失/进程受损。
+  客户端必须 `make_shared` 构造（证书回调跨异步边界 weak-pin，栈对象没有
+  可 pin 的控制块——这条同时是 pin 语义的活证据）。
+- 既有应答路径零改动全绿：HTTP 404 错误映射、204 关单、guards、SPI 转发
+  四例（非 2xx 与 204 的 carve-out 各自被原断言继续钉住）。
+
+### 交付前子代理评审（两条真缺陷，均已修并钉）
+按惯例推送前派两路只读评审（实现对撞 + 声明核对）。声明核对一侧确认既有
+全部行号/断言/引文当时无漂移；实现对撞抓到两条**属实**的缺陷：
+1. **BLOCKER：空 verifier 被堆包装后恒真**。`sendWechatRequest` 曾把
+   `verifyAnswer` 包进 `make_shared<std::function<...>>` 再判 `if
+   (verifier ...)`——指向**空函数**的 shared_ptr 恒为真，`/v3/certificates`
+   （有意传空 verifier）一旦拿到 200 应答就在 IO 回调里调空 `std::function`
+   抛 `bad_function_call`，**恰好炸掉为验签装载信任锚的那条路**。三新例
+   全绿也盖不住它：证书下载旧例在签名前置检查就失败，从未触网。修复：
+   lambda 以 init-capture 直接持 `std::function` 本体（`:484`），
+   `if (verifyAnswer ...)`（:520）即"函数非空才调"；上条测试实例钉死。
+2. **MAJOR：weak-pin 判空与使用之间仍有释放窗口**。`answerVerifier` 首版
+   `if (pinned && weak.lock() == nullptr)` 里 lock 的临时 shared_ptr 在
+   表达式结束即析构——最后一个外部持有者随后释放时，对象可在
+   `verifyResponse` 触碰 `this` 前死亡。修复：pinned 分支把 `weak.lock()`
+   结果**跨整个调用持有**并走 `self->verifyResponse`（:1240）。
+评审另记两条不改代码的判断：204 carve-out 端点无关（五条路径通吃，当前
+所有消费方对空对象都不记成功——脆弱不变量，注释已点明）；`pinned` 快照
+本身（创建时 `!weak.expired()`）语义正确，维持。
+
+### 验证记录与踩坑留证
+- **cwd 地雷（本轮最大假红来源）**：集成套件自带的 Drogon listener 依赖
+  `tests/main.cc` 从 **cwd** 找 config.json；从仓库根目录跑 exe 时找不到
+  配置 → listener 从未启动 → 走 `testBaseUrl()` 的用例报 "http request
+  failed" / "Bad server address" 假红，与代码无关。定罪方式：让本轮零涉
+  及的 `HealthProbe_LivenessEndpoint` 同场对照（同样假红即非本轮改动），
+  临时用 CHECK 展开打印真实错误串取证后**已删除**（调试代码不入库）。
+  正确姿势固定为 `cd build/windows-msvc/tests/Release` 再跑。
+- 七门禁全绿：format（本轮 --fix 收敛 2 文件后 70 文件净）、架构 4、测试
+  布局 4、文档漂移 7、迁移 6、版本同步 1.0.0×3、OpenAPI 15 paths/28 ops
+  （零 HTTP 面变更）。
+
+### 诚实边界与遗留
+- 应答验签沿用第十五轮"通知不加时间戳窗口"的同一判断：官方 5 秒条款是
+  处理时限不是时钟窗；本轮未给应答加 delta 判定，签名新鲜度由请求-应答
+  会话自身保证。
+- 支付宝通道出站应答不在本收口内（独立签名体系，后续候选）。
+- §二十一两处 `WechatChannel.cc` 行号引用（verifyCallback 串重载、
+  `Wechatpay-Signature` 读取点）因本轮代码增删漂移，已重锚 :1177/:1321
+  并在原文标注。
+- 下一轮候选首位（风险排序）：`goods_detail` 透传（微信侧分账/对账依赖，
+  当前建单丢弃该字段）。余下：创建路径 owner 化统一、`CallbackService`
+  嵌套压平、`time_expire` 进 HTTP 契约、Alipay `closeTrade` 接入、查单门
+  "已覆盖但行 PAID→升档"、Alipay 出站应答验签、handler 金额位数帽
+  （纵深防御）。
+- 文档同步：CHANGELOG Fixed 一条；`TECH_SPECS.md` 无涉；openapi 无变更。
+
+## 二十三、第十七轮：金额位数帽候选证伪 + 收入台账双记账的 DB 层兜底
+
+§二十二 候选清单里的"handler 金额位数帽（纵深防御）"本轮先取证、后裁决，
+并顺手把落账路径的最后一道纯应用层防线降到 DB 层。
+
+### 候选证伪：位数帽没有官方依据
+- 官方取证（`wiki/doc/apiv3/apis/chapter3_4_1.shtml`，Native 下单请求参数页，
+  身份自证通过）：`amount.total` 原文口径为"**必填 integer…单位为分，整型，
+  必须大于0**"，**未标注任何最大值**。给 INT32（2147483647 分）设帽属于臆造
+  约束，会误拒文档允许的订单——与第十五轮"时间戳硬窗口"同一类候选：官方
+  口径不支持，证伪留证，不改码。
+- 现有防线已覆盖真实风险：`parseAmountToFen` 的 INT64 溢出守卫
+  （`PayUtils.cc:370`，第十五轮）保证转发给渠道的值不回绕；handler 正则
+  （`PayHandlers.cc:44` `^\d+(\.\d{1,2})?$`）拒负数/多小数位/科学计数法。
+- 顺带核实非缺口的两处经典门：回调金额对单已在
+  `CallbackService.cc:935-1030`（支付通知）与 `:2820+`（退款通知）；
+  查单侧对单在 `reconcileAmountProblem`（`PaymentService.cc:57`）。
+
+### 真缺口：收入账的防重全在应用层 CAS
+只读子代理对"通知→落账"三问审查（A 无单放行 / B 已关单收 SUCCESS /
+C 重复投递）结论：三门皆有、无状态机缺陷——匹配集 `openAttemptsOfOrder`
+（`CallbackService.cc:33`）排除 FAIL/关单行，查空即回滚 FAIL（`:860-879`）；
+落账 CAS `status IN ('INIT','PROCESSING')` + `forUpdate()`（`:845`）行锁；
+重复投递四层保证（幂等快照 / 终态跳过 / 行锁+CAS / 台账随事务提交）。
+**但 `pay_ledger` 收入账在 DB 层没有任何防重**：台账 append-only，五处收入
+落账点（`CallbackService.cc:1465`；`PaymentService.cc:2627/:2811/:3123/
+:3293`）全部只在各自 CAS 命中的分支写入——若该门未来回归（重构、新落账门、
+乱序回调），双记账将无声发生。这正是 003 对退款行用过的纵深防御形态。
+
+### 修复：部分唯一索引
+`sql/006_ledger_payment_income_unique.sql`：
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_ledger_payment_income
+    ON pay_ledger(payment_no)
+    WHERE entry_type = 'PAYMENT' AND payment_no IS NOT NULL;
+```
+
+- 不变式"一个 payment_no 至多一条收入账"由 DB 钉死：重复插入在落账事务内
+  响亮失败，而不是静默记两笔钱。
+- **REFUND 刻意不入索引**：部分退款对同一 payment_no 合法出现多条，且台账
+  无 `refund_no` 列可键控——收窄谓词到 `entry_type='PAYMENT'` 是唯一无合法
+  重复的形状（诚实边界：退款账的 DB 防重需要 schema 变更，单独候选）。
+- 五处收入落点逐一实测均携带 `paymentNo` 且仅在 CAS 命中后写入（本轮 grep
+  核对，防"索引正确但某落点绕过"的假安全感）。
+- `payment_no IS NOT NULL` 谓词与 004 的 FK 语义对齐（部分账目无支付行）。
+- 脏数据裁决：若既有库已含重复收入行，`CREATE UNIQUE INDEX` 会使迁移响亮
+  失败——这是特性不是事故（本轮无任何已知双记账 bug，正常库必绿）。
+
+### 验证记录
+- `check_migrations.py` 绿：7 文件、5 baselined、006 受内容规则约束并通过。
+- 本机无 Postgres（AGENTS.md 环境约束）：索引强制行为与迁移重放均为
+  **CI-only 裁决**；本轮无 C++ 改动，既有全部本机用例不受影响（未重跑，
+  零代码变更即零回归面）。
+- 测试夹具自带 `CREATE TABLE IF NOT EXISTS pay_ledger` 最小表（QueryOrder/
+  RefundQuery/Idempotency 族），不建 006 索引——夹具语义与生产 schema 的
+  这处差异如实记录；强制用例（插重复收入账期望失败）待 DB 族在 CI 补钉。
+
+### 诚实边界与遗留
+- 本轮修复是**兜底加固**而非在案缺陷：没有证据表明双记账已发生过；价值在
+  于把最关键的金额不变式从"依赖调用点纪律"降级为"DB 拒绝违约"。
+- 子代理附带的低危观察如实留档不展开："SUCCESS∧全 attempt 已关闭"的异常
+  通知目前只有 LOG_ERROR+FAIL 重试（通道语义上不可达：微信侧关单成功即
+  不再受理支付），未落人工处理台账；refund 账 DB 防重需先加 `refund_no` 列。
+- 后轮候选（风险排序）：`goods_detail` 透传（官方选填、审计自评"不算缺陷"，
+  属功能增强）、创建路径 owner 化统一、`CallbackService` 嵌套压平、
+  `time_expire` 进 HTTP 契约、Alipay `closeTrade`、查单门升档（§十四 有
+  记录的刻意设计，重开需新证据）、Alipay 出站应答验签、**refund 账 DB
+  防重（补 refund_no 列）**。位数帽已证伪出清。
+
+## 二十四、第十八轮：time_expire 从未有 HTTP 入口——到期关单整链在生产不可达
+
+§二十一 以来的候选"time_expire 进 HTTP 契约"本轮定罪为**真缺陷**并收口。
+
+### 缺陷链（全部实测）
+- `CreatePaymentRequest::timeExpire`（`PaymentService.h:47`）全仓**无任何赋值
+  点**（handler、QR 路径都没读这个字段）→ 恒为空。
+- 空字段使第十轮的三段上游修复全部空转：前置校验 `PaymentService.cc:497`、
+  渠道透传 `:712`、以及全仓唯一 `order.setExpireAt` 写入点 `:650`。
+- `pay_order.expire_at` 恒 NULL → 第十四轮主动关单的清扫门
+  "NOTPAY ∧ expire_at 已过"（`ReconciliationService.cc:214` 的注释链：
+  "the channel asks the question, `expire_at` answers it"）**在生产永不满足**
+  ——超时未付订单只能靠微信侧自动失效，我方主动关单能力形同虚设。
+
+### 修复（两入口同形接线）
+- `/api/pay/create`（struct 路径）：shape 表加 `time_expire`
+  （`PayHandlers.cc:177`）；请求装配 `request.timeExpire = json->get(...)`
+  （`:210`）。服务侧校验/透传/落库为第十轮既有代码，本轮起才活。
+- `/api/qrpay/create`（JSON 路径）：shape 表（`PayHandlers.cc:338`）+ 透传
+  字段环（`:410`，注释从"all four"改"all five"）；服务侧读取
+  `PaymentService.cc:1404`、**进重放哈希**（`:1461`——改期即冲突非重放）、
+  预订前 400 校验（`:1545`，与 struct 路径同一 `validateTimeExpire` 官窗口
+  径）、微信分支透传（`:1612`）、QR 落单 `setExpireAt`（`:2017`，解析失败
+  沿 struct 路径纪律：照常落单不写 expire）。
+- OpenAPI：两 schema 各加 `time_expire`（create 注明**两渠道一律 RFC 3339**
+  ——校验器本体就是 parseRfc3339，`yyyy-MM-dd HH:mm:ss` 空格形会被拒——且仅
+  微信透传到渠道、支付宝只用于本地 expire_at；QR 注明仅微信透传、哈希
+  覆盖、400-先于-预订）。
+- 支付宝 QR 分支不透传（渠道不认此形），与 struct 路径既有语义一致。
+
+### 测试（本机绿）
+- `PayHandlers_CreatePayment_TimeExpireNumber_Answers400InsteadOfThrowing`
+  （`RequestBodyShapeTest.cc:199`，2 断言）与
+  `PayHandlers_CreateQRPayment_TimeExpireNumber_...`（`:278`，2 断言）：
+  数值形 `time_expire` 必须在 shape 门 400，不得裸穿到服务层。
+- 邻集回归：两条既有 shape 例、`PayUtils_ValidateTimeExpire`（39 断言）、
+  `CreateQRPayment_NegativeAmount_Refused` 全绿；QR 端到端预订（expire_at
+  落库、改期冲突）属 DB 族——**CI-only**（T2 首跑 exit=127 瞬态伪码，cmd
+  复跑 RET=0 全绿，与前轮同象留证）。
+
+### 诚实边界与遗留
+- 本轮未做子代理评审（预算轮尽），交付前对撞由锚点逐条实测替代；推送授权
+  到手后可补跑评审。
+- §十七/§二十二 引用的 `WechatChannel.cc` 锚点本轮实测未漂（`:648/:973` 原
+  样）。docs-drift 唯一红仍是 006 未 stage（授权链副作用，第十七轮已记）。
+- 后轮候选（风险排序）：`goods_detail` 透传（功能增强）、refund 账 DB 防重
+  （需 `refund_no` 列）、创建路径 owner 化统一、`CallbackService` 嵌套压平、
+  Alipay `closeTrade`、查单门升档（刻意设计）、Alipay 出站应答验签。
+
+### 交付前子代理评审（第十八轮补跑，兑现 §二十四 的明示缺口）
+只读评审按"clearReservation 泄漏 / 哈希自洽 / 校验-解析接受集一致 / 绕过面 /
+契约对撞 / 锚点对撞"六路攻击。结论：**修后推送**，两条已当场修复——
+- **MAJOR**：openapi create schema 与 §二十四 曾写"Alipay honours
+  `yyyy-MM-dd HH:mm:ss`"——实测 `validateTimeExpire` 无条件走 `parseRfc3339`
+  （`PayUtils.cc:754`），空格形在 `PayUtilsTest.cc:399` 就被钉为拒绝；且支付宝
+  从不透传该字段（struct/QR 两分支均 wechat-only），只落本地 expire_at。文案
+  已改为"两渠道一律 RFC 3339、仅微信透传"。（代码行为本身安全，纯文档误导。）
+- **MINOR×2**：`PaymentService.cc` QR `setExpireAt` 无 else 的静默与 struct 路径
+  不同形——补注释声明"校验器与本解析器同源、不可达、故意静默"；CHANGELOG 与
+  §十六 的 `:477/:625` 历史锚点漂移——重锚 `:497/:650` 并标注。
+评审同时**正向确认**：QR 拒绝分支与相邻 currency/amount 分支同形无预留泄漏；
+重放哈希对缺省空串稳定；校验器与解析器接受集一致（不存在"渠道拒而本地无
+expire"错位）；直调 service 的既有测试不带该键不抛。
