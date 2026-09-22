@@ -10,7 +10,9 @@
 ///
 /// The mismatch case proves the guard rejects; the match case is the positive
 /// control that proves it does not reject legitimate amounts (a guard that
-/// always refuses would otherwise pass the suite).
+/// always refuses would otherwise pass the suite). The settled-payment case
+/// exists because the gate is written twice — a PROCESSING fixture never walks
+/// the copy that runs when the payment row already says SUCCESS.
 /// =============================================================================
 
 #include <drogon/drogon.h>
@@ -85,18 +87,22 @@ void ensureSchema(const DbClientPtr &client)
     );
 }
 
-// An order mid-flight: 88.88 requested, payment still PROCESSING, so the sync
-// is what decides whether it becomes PAID.
+// The sync path carries two copies of the gate, one per payment state: the
+// PROCESSING branch advances the payment and then checks, the SUCCESS branch
+// skips that and only checks. A fixture therefore has to say which state it
+// starts in, and 88.88 requested against a PROCESSING payment is the case where
+// the sync decides whether the order becomes PAID.
 struct Fixture
 {
     std::string orderNo;
     std::string paymentNo;
 };
 
-Fixture insertPendingAlipayOrder(
+Fixture insertAlipayFixture(
   const DbClientPtr &client,
   int64_t userId,
-  const std::string &amount
+  const std::string &amount,
+  const std::string &paymentStatus
 )
 {
     Fixture fx;
@@ -120,7 +126,7 @@ Fixture insertPendingAlipayOrder(
     PayPayment payment;
     payment.setOrderNo(fx.orderNo);
     payment.setPaymentNo(fx.paymentNo);
-    payment.setStatus("PROCESSING");
+    payment.setStatus(paymentStatus);
     payment.setAmount(amount);
     payment.setCreatedAt(trantor::Date::now());
     payment.setUpdatedAt(trantor::Date::now());
@@ -128,6 +134,30 @@ Fixture insertPendingAlipayOrder(
 
     return fx;
 }
+
+// Removes the rows even when an assertion aborts the case: a leaked PAYING
+// alipay order is visible to the reconcile sweep tests that run after this one
+// in the same process.
+struct ScopeCleanup
+{
+    DbClientPtr client;
+    std::string orderNo;
+    std::string paymentNo;
+
+    ~ScopeCleanup()
+    {
+        try
+        {
+            client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
+            client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
+            client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+        }
+        catch (const std::exception &)
+        {
+            // Throwing from a destructor would terminate the test process.
+        }
+    }
+};
 
 // The shape alipay.trade.query returns and the callback handler forwards to the
 // sync entry point: a success code plus the trade fields the gate reads.
@@ -184,7 +214,7 @@ std::string readOrderStatus(const DbClientPtr &client, const std::string &orderN
     );
 
     auto future = shared->get_future();
-    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
     {
         return "<timeout>";
     }
@@ -210,16 +240,19 @@ std::string readPaymentStatus(const DbClientPtr &client, const std::string &paym
     );
 
     auto future = shared->get_future();
-    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
     {
         return "<timeout>";
     }
     return future.get();
 }
 
+// Bounded on purpose: one ctest case covers the whole suite and coverage.yml
+// runs it under `ctest --timeout`, so a poll that kept retrying would take the
+// lane down with it rather than failing on its own.
 std::string waitForStatus(const std::function<std::string()> &read, const std::string &expected)
 {
-    for (int attempt = 0; attempt < 40; ++attempt)
+    for (int attempt = 0; attempt < 10; ++attempt)
     {
         const std::string seen = read();
         if (seen == expected)
@@ -257,7 +290,8 @@ DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_AmountMismatch_RefusesCredit)
     REQUIRE(client != nullptr);
     ensureSchema(client);
 
-    const Fixture fx = insertPendingAlipayOrder(client, 30001, "88.88");
+    const Fixture fx = insertAlipayFixture(client, 31001, "88.88", "PROCESSING");
+    ScopeCleanup cleanup{client, fx.orderNo, fx.paymentNo};
 
     PayPlugin plugin;
     plugin.setTestClients(nullptr, nullptr, client);
@@ -274,10 +308,6 @@ DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_AmountMismatch_RefusesCredit)
     // the payment moved, and no ledger row was written for it.
     CHECK(readOrderStatus(client, fx.orderNo) == "PAYING");
     CHECK(readPaymentStatus(client, fx.paymentNo) == "PROCESSING");
-
-    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fx.orderNo);
-    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fx.paymentNo);
-    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fx.orderNo);
 }
 
 DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_AmountMatches_CreditsOrder)
@@ -286,7 +316,8 @@ DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_AmountMatches_CreditsOrder)
     REQUIRE(client != nullptr);
     ensureSchema(client);
 
-    const Fixture fx = insertPendingAlipayOrder(client, 30002, "88.88");
+    const Fixture fx = insertAlipayFixture(client, 31002, "88.88", "PROCESSING");
+    ScopeCleanup cleanup{client, fx.orderNo, fx.paymentNo};
 
     PayPlugin plugin;
     plugin.setTestClients(nullptr, nullptr, client);
@@ -299,8 +330,29 @@ DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_AmountMatches_CreditsOrder)
     CHECK(
       waitForStatus([&] { return readPaymentStatus(client, fx.paymentNo); }, "SUCCESS") == "SUCCESS"
     );
+}
 
-    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fx.orderNo);
-    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fx.paymentNo);
-    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fx.orderNo);
+// The second copy of the gate. When the payment row already says SUCCESS the
+// service takes a different branch and checks the amount there, so this state
+// has its own case: without it that copy could be deleted and the suite stay
+// green.
+DROGON_TEST(PayPlugin_SyncOrderStatusFromAlipay_SettledPaymentAmountMismatch_RefusesCredit)
+{
+    auto client = openTestDb();
+    REQUIRE(client != nullptr);
+    ensureSchema(client);
+
+    const Fixture fx = insertAlipayFixture(client, 31003, "88.88", "SUCCESS");
+    ScopeCleanup cleanup{client, fx.orderNo, fx.paymentNo};
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+
+    const auto outcome = runSync(plugin, fx.orderNo, alipayTradeResult("0.01"));
+    REQUIRE(outcome.ready);
+    CHECK(outcome.status == "");
+
+    // The order is the row at risk here: it must not move to PAID on a
+    // notification for an amount the order never asked for.
+    CHECK(readOrderStatus(client, fx.orderNo) == "PAYING");
 }
