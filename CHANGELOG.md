@@ -305,7 +305,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real transaction through `setTestClients`: the mismatch case requires the
   service to report `""` and the order and payment to stay `PAYING` /
   `PROCESSING` after the rollback, the match case requires `PAID` / `SUCCESS`,
-  so a guard that refused everything could not pass the suite.
+  so a guard that refused everything could not pass the suite. The gate is
+  written twice, once per payment state, so
+  `PayPlugin_SyncOrderStatusFromAlipay_SettledPaymentAmountMismatch_RefusesCredit`
+  covers the copy that a `PROCESSING` fixture never reaches.
 - **A refused order sync was acknowledged as handled.** The notification handler
   called `syncOrderStatusFromAlipay()` and answered `{"code":"SUCCESS"}` for
   every outcome, including the empty status the service returns when it rolls
