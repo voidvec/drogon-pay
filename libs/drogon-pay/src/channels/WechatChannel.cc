@@ -495,27 +495,21 @@ void sendWechatRequest(
 
           const int status = static_cast<int>(resp->statusCode());
 
-          // `204 No Content` is a documented success answer (the close-order
-          // API answers with it and no body at all), so an empty 2xx body is
-          // success with an empty object rather than "invalid json response".
-          if (status == 204)
-          {
-              bodyJson = Json::Value(Json::objectValue);
-              (*cb)(bodyJson, "");
-              return;
-          }
-
-          // The documented answer signature covers the response body, so every
-          // 2xx answer that carries one must verify before the service layer is
-          // allowed to read state out of it. A 204 has no body to sign and is
-          // handled above; non-2xx answers only ever drive the failure path,
-          // which an attacker who can forge them does not need this channel
-          // for. An answer that fails to verify is dropped without a body --
-          // handing the forged JSON to the caller would re-open the hole even
-          // through the error text. `verifyAnswer` is empty (boolean-false) for
-          // the certificate-download bootstrap, which must NOT dereference an
-          // empty std::function.
-          if (verifyAnswer && status >= 200 && status < 300)
+          // The documented answer signature covers the response body, so EVERY
+          // answer this request path can carry has to verify before the service
+          // layer reads state or an error code out of it. That includes `204 No
+          // Content` -- the close-order answer, which the verification guide
+          // signs over an empty body (`应答时间戳\n应答随机串\n应答报文主体\n`)
+          // rather than exempting -- and it includes the non-2xx error envelope,
+          // because RefundService decides "WeChat refused it" from exactly that
+          // code and message. Only the file/image download interfaces are
+          // exempt, and they do not come through here. An answer that fails to
+          // verify is dropped without a body: handing the forged JSON to the
+          // caller would re-open the hole even through the error text.
+          // `verifyAnswer` is empty (boolean-false) for the certificate-download
+          // bootstrap, whose answer is authenticated by its AES-256-GCM tag
+          // instead, and which must NOT dereference an empty std::function.
+          if (verifyAnswer)
           {
               std::string verifyError;
               if (!verifyAnswer(resp, verifyError))
@@ -523,6 +517,15 @@ void sendWechatRequest(
                   (*cb)(bodyJson, "response signature verification failed: " + verifyError);
                   return;
               }
+          }
+
+          // 204 has been verified above and has no body to parse, so it is
+          // success with an empty object rather than "invalid json response".
+          if (status == 204)
+          {
+              bodyJson = Json::Value(Json::objectValue);
+              (*cb)(bodyJson, "");
+              return;
           }
 
           bool parsed = false;
