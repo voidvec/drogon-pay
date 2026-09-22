@@ -124,15 +124,28 @@ class QrStubChannel : public drogon_pay::PaymentChannel
 
 std::shared_ptr<drogon::orm::DbClient> makeTestClient()
 {
-    Json::Value root;
-    if (
-      !loadConfig(root) || !root.isMember("db_clients") || !root["db_clients"].isArray() ||
-      root["db_clients"].empty()
-    )
-    {
-        return nullptr;
-    }
-    return drogon::orm::DbClient::newPgClient(buildPgConnInfo(root["db_clients"][0]), 4);
+    // One client for the whole run, released on the main thread at exit. These
+    // cases answer through a promise and return as soon as the answer lands,
+    // while the chain that produced it is still finishing its own database
+    // work -- `failQr` clears the idempotency reservation after the caller has
+    // been answered. Drogon destroys a DbClient on whichever thread drops the
+    // last reference, and that destructor joins the client's own loop threads,
+    // so a chain that outlives the case and ends up holding the last reference
+    // joins itself and aborts the process (0xC0000409). Production cannot reach
+    // this: its client comes from `app().getDbClient()`, which the framework
+    // keeps until teardown.
+    static const std::shared_ptr<drogon::orm::DbClient> client = [] {
+        Json::Value root;
+        if (
+          !loadConfig(root) || !root.isMember("db_clients") || !root["db_clients"].isArray() ||
+          root["db_clients"].empty()
+        )
+        {
+            return std::shared_ptr<drogon::orm::DbClient>{};
+        }
+        return drogon::orm::DbClient::newPgClient(buildPgConnInfo(root["db_clients"][0]), 4);
+    }();
+    return client;
 }
 
 void ensureQrTables(const std::shared_ptr<drogon::orm::DbClient> &client)
