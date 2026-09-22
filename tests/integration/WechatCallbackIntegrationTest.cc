@@ -1221,23 +1221,23 @@ DROGON_TEST(PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry)
     CHECK(reservations.empty());
     const auto stillProcessing =
       client->execSqlSync("SELECT status FROM pay_payment WHERE payment_no = $1", paymentNo);
-    CHECK(!stillProcessing.empty());
-    CHECK(
-      !stillProcessing.empty() &&
-      stillProcessing.front()["status"].as<std::string>() == "PROCESSING"
-    );
+    // No `&&` inside a CHECK: drogon decomposes the expression with
+    // `Decomposer() <= expr`, and `Lhs::operator&&` is a stub that always
+    // answers false, so a compound condition fails even when both halves hold.
+    REQUIRE(stillProcessing.size() == 1);
+    CHECK(stillProcessing.front()["status"].as<std::string>() == "PROCESSING");
 
     const auto second = deliver();
     CHECK(!second.second);
     CHECK(second.first.get("code", "").asString() == "SUCCESS");
     const auto settled =
       client->execSqlSync("SELECT status FROM pay_payment WHERE payment_no = $1", paymentNo);
-    CHECK(!settled.empty());
-    CHECK(!settled.empty() && settled.front()["status"].as<std::string>() == "SUCCESS");
+    REQUIRE(settled.size() == 1);
+    CHECK(settled.front()["status"].as<std::string>() == "SUCCESS");
     const auto orderRows =
       client->execSqlSync("SELECT status FROM pay_order WHERE order_no = $1", orderNo);
-    CHECK(!orderRows.empty());
-    CHECK(!orderRows.empty() && orderRows.front()["status"].as<std::string>() == "PAID");
+    REQUIRE(orderRows.size() == 1);
+    CHECK(orderRows.front()["status"].as<std::string>() == "PAID");
 
     // The winning retry reserved with its own owner token and finalized through
     // the ownership guard: a snapshot with an empty token column would mean an
@@ -1247,9 +1247,9 @@ DROGON_TEST(PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry)
       "SELECT response_snapshot, owner_token FROM pay_idempotency WHERE idempotency_key = $1",
       notifyId
     );
-    CHECK(finalizedRows.size() == 1);
-    CHECK(!finalizedRows.empty() && !finalizedRows.front()["response_snapshot"].isNull());
-    CHECK(!finalizedRows.empty() && !finalizedRows.front()["owner_token"].isNull());
+    REQUIRE(finalizedRows.size() == 1);
+    CHECK(!finalizedRows.front()["response_snapshot"].isNull());
+    CHECK(!finalizedRows.front()["owner_token"].isNull());
 
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1", paymentNo);
