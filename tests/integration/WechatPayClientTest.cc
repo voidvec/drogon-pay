@@ -948,10 +948,90 @@ DROGON_TEST(WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure)
     auto future = errorPromise.get_future();
     REQUIRE(pay::test_util::waitForFutureReady(future, std::chrono::seconds(10)));
     const std::string err = future.get();
-    CHECK(err.rfind("HTTP 404", 0) == 0);
+    // Round 19 moved the answer-status check behind the signature check, so
+    // what this listener's unsigned 404 now proves is the stronger property: a
+    // non-2xx is refused even before its status is read. The exact status line
+    // still has to reach the caller when the answer *is* signed, which is the
+    // case below -- RefundService's "WeChat refused this refund" verdict is
+    // derived from that text.
+    CHECK(
+      err ==
+      "response signature verification failed: "
+      "missing Wechatpay-Timestamp/Nonce/Signature answer headers"
+    );
 
     EVP_PKEY_free(pkey);
     removeTempPem(keyPath);
+}
+
+// The signed half of the pair above: an error envelope the channel can
+// authenticate must still be reported as a failure, with WeChat's own code and
+// message carried through. This is the answer `refundCertainlyDidNotHappen`
+// reads as a refusal, so it has to survive verification -- dropping it would
+// turn every real 4xx into an unknown outcome.
+DROGON_TEST(WechatPayClient_QueryTransaction_ReportsSignedHttpErrorWithEnvelope)
+{
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+    const std::string keyPem = privateKeyPem(pkey);
+    CHECK(!keyPem.empty());
+    const auto keyPath = writeTempPem(keyPem);
+    const auto certPath = writeTempPem(certPem);
+
+    const std::string body = R"({"code":"ORDER_NOT_EXIST","message":"订单不存在"})";
+    const std::string timestamp = "1700000000";
+    const std::string nonce = kTestNonce;
+    std::string signatureB64;
+    CHECK(signMessage(timestamp + "\n" + nonce + "\n" + body + "\n", pkey, signatureB64));
+
+    std::string responseBytes;
+    responseBytes += "HTTP/1.1 404 Not Found\r\n";
+    responseBytes += "Content-Type: application/json\r\n";
+    responseBytes += "Wechatpay-Timestamp: " + timestamp + "\r\n";
+    responseBytes += "Wechatpay-Nonce: " + nonce + "\r\n";
+    responseBytes += "Wechatpay-Signature: " + signatureB64 + "\r\n";
+    responseBytes += "Wechatpay-Serial: " + std::string(kTestSerial) + "\r\n";
+    responseBytes += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
+    responseBytes += body;
+
+    std::string capturedRequest;
+    std::promise<unsigned> portPromise;
+    auto portFuture = portPromise.get_future();
+    std::thread listener(
+      [&capturedRequest, &responseBytes, promise = std::move(portPromise)]() mutable {
+          OneShotListener::runOnce(capturedRequest, std::move(promise), responseBytes);
+      }
+    );
+    const unsigned port = portFuture.get();
+
+    Json::Value config;
+    config["mch_id"] = "1900000000";
+    config["serial_no"] = kTestSerial;
+    config["private_key_path"] = keyPath.string();
+    config["platform_cert_path"] = certPath.string();
+    config["api_base"] = "http://127.0.0.1:" + std::to_string(port);
+    WechatPayClient client(config);
+
+    std::promise<std::pair<std::string, Json::Value>> outcome;
+    client.queryTransaction(
+      "TEST-ORDER-404", [&outcome](const Json::Value &result, const std::string &err) {
+          outcome.set_value({err, result});
+      }
+    );
+
+    auto future = outcome.get_future();
+    const bool answered = pay::test_util::waitForFutureReady(future, std::chrono::seconds(10));
+    listener.join();
+    REQUIRE(port != 0);
+    REQUIRE(answered);
+    const auto [err, result] = future.get();
+    CHECK(err.rfind("HTTP 404", 0) == 0);
+    CHECK(err.find("ORDER_NOT_EXIST") != std::string::npos);
+
+    EVP_PKEY_free(pkey);
+    removeTempPem(keyPath);
+    removeTempPem(certPath);
 }
 
 // Audit round 14: the close API answers success with `204 No Content` and no
@@ -960,7 +1040,13 @@ DROGON_TEST(WechatPayClient_QueryTransaction_ReportsHttpErrorAsFailure)
 // `invalid json response` -- the one answer that proves the trade shut would
 // have been indistinguishable from a failure. This case pins both halves: the
 // request shape (method, path, mchid-only body, signed) and the 204 success.
-DROGON_TEST(WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape)
+//
+// Audit round 19 adds the third half. The verification guide signs a 204 over
+// an empty body (`应答时间戳\n应答随机串\n应答报文主体\n`) instead of exempting
+// it, so the answer here carries the Wechatpay-* headers like any other and the
+// listener has to sign them -- otherwise this case would be proving that an
+// unauthenticated 204 passes.
+DROGON_TEST(WechatPayClient_CloseTransaction_AcceptsSigned204AndSendsCloseShape)
 {
     EVP_PKEY *pkey = nullptr;
     std::string certPem;
@@ -968,19 +1054,35 @@ DROGON_TEST(WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape)
     const std::string keyPem = privateKeyPem(pkey);
     CHECK(!keyPem.empty());
     const auto keyPath = writeTempPem(keyPem);
+    const auto certPath = writeTempPem(certPem);
+
+    const std::string timestamp = "1700000000";
+    const std::string nonce = kTestNonce;
+    std::string signatureB64;
+    CHECK(signMessage(timestamp + "\n" + nonce + "\n\n", pkey, signatureB64));
+
+    std::string responseBytes;
+    responseBytes += "HTTP/1.1 204 No Content\r\n";
+    responseBytes += "Wechatpay-Timestamp: " + timestamp + "\r\n";
+    responseBytes += "Wechatpay-Nonce: " + nonce + "\r\n";
+    responseBytes += "Wechatpay-Signature: " + signatureB64 + "\r\n";
+    responseBytes += "Wechatpay-Serial: " + std::string(kTestSerial) + "\r\n\r\n";
 
     std::string capturedRequest;
     std::promise<unsigned> portPromise;
     auto portFuture = portPromise.get_future();
-    std::thread listener([&capturedRequest, promise = std::move(portPromise)]() mutable {
-        OneShotListener::runOnce(capturedRequest, std::move(promise));
-    });
+    std::thread listener(
+      [&capturedRequest, &responseBytes, promise = std::move(portPromise)]() mutable {
+          OneShotListener::runOnce(capturedRequest, std::move(promise), responseBytes);
+      }
+    );
     const unsigned port = portFuture.get();
 
     Json::Value config;
     config["mch_id"] = "1900000000";
     config["serial_no"] = kTestSerial;
     config["private_key_path"] = keyPath.string();
+    config["platform_cert_path"] = certPath.string();
     config["api_base"] = "http://127.0.0.1:" + std::to_string(port);
     WechatPayClient client(config);
 
@@ -1018,6 +1120,65 @@ DROGON_TEST(WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape)
 
     EVP_PKEY_free(pkey);
     removeTempPem(keyPath);
+    removeTempPem(certPath);
+}
+
+// The negative of the case above, and the reason round 19 stopped treating 204
+// as "no body, so nothing to sign": an unsigned 204 is the cheapest possible
+// forged answer, because it needs no crafted JSON at all. Every other consumer
+// reads success as `error.empty()`, so accepting one would let a bystander shut
+// an order out of the ledger's reach.
+DROGON_TEST(WechatPayClient_CloseTransaction_DropsUnsigned204Answer)
+{
+    EVP_PKEY *pkey = nullptr;
+    std::string certPem;
+    CHECK(generateKeyAndCert(&pkey, certPem));
+    const std::string keyPem = privateKeyPem(pkey);
+    CHECK(!keyPem.empty());
+    const auto keyPath = writeTempPem(keyPem);
+    const auto certPath = writeTempPem(certPem);
+
+    std::string capturedRequest;
+    std::promise<unsigned> portPromise;
+    auto portFuture = portPromise.get_future();
+    std::thread listener([&capturedRequest, promise = std::move(portPromise)]() mutable {
+        // Empty answer bytes: the listener's own default is a bare
+        // `HTTP/1.1 204 No Content` with no signature headers.
+        OneShotListener::runOnce(capturedRequest, std::move(promise));
+    });
+    const unsigned port = portFuture.get();
+
+    Json::Value config;
+    config["mch_id"] = "1900000000";
+    config["serial_no"] = kTestSerial;
+    config["private_key_path"] = keyPath.string();
+    config["platform_cert_path"] = certPath.string();
+    config["api_base"] = "http://127.0.0.1:" + std::to_string(port);
+    WechatPayClient client(config);
+
+    std::promise<std::pair<std::string, Json::Value>> outcome;
+    client.closeTransaction(
+      "TEST-CLOSE-ORDER-4", [&outcome](const Json::Value &result, const std::string &err) {
+          outcome.set_value({err, result});
+      }
+    );
+
+    auto future = outcome.get_future();
+    const bool answered = pay::test_util::waitForFutureReady(future, std::chrono::seconds(10));
+    listener.join();
+    REQUIRE(port != 0);
+    REQUIRE(answered);
+    const auto [err, result] = future.get();
+    CHECK(
+      err ==
+      "response signature verification failed: "
+      "missing Wechatpay-Timestamp/Nonce/Signature answer headers"
+    );
+    CHECK(result.isNull());
+
+    EVP_PKEY_free(pkey);
+    removeTempPem(keyPath);
+    removeTempPem(certPath);
 }
 
 // The close guards run before the network: an order the caller cannot name, or
