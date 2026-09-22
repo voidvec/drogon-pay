@@ -1717,8 +1717,7 @@ void RefundService::updateRefundWithSuccess(
             dbClient_->execSqlAsync(
               "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) AS sum_amount "
               "FROM pay_refund WHERE order_no = $1 AND status = $2",
-              [this,
-               respond,
+              [respond,
                sharedCb,
                writeRefundedOrder,
                refundNo,
