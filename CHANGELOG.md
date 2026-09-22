@@ -296,7 +296,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   genuine notification. `CallbackController_Alipay_ForgedSignature_Rejected`
   and `..._MissingSignature_Rejected` pin both reject reasons and so prove the
   notification never reached the order-sync path; neither reaches the `app_id`
-  guard, which sits behind a signature the suite cannot mint.
+  guard, which sits behind a signature the suite cannot mint. Their assertions
+  are literal (`"signature verification failed"`) rather than "either reject
+  reason", so the cases fail loudly if a future config lets a forged
+  notification be refused by the "client not configured" branch instead.
+  `PayPlugin_SyncOrderStatusFromAlipay_AmountMismatch_RefusesCredit` and its
+  positive control `..._AmountMatches_CreditsOrder` drive the gate against a
+  real transaction through `setTestClients`: the mismatch case requires the
+  service to report `""` and the order and payment to stay `PAYING` /
+  `PROCESSING` after the rollback, the match case requires `PAID` / `SUCCESS`,
+  so a guard that refused everything could not pass the suite.
+- **A refused order sync was acknowledged as handled.** The notification handler
+  called `syncOrderStatusFromAlipay()` and answered `{"code":"SUCCESS"}` for
+  every outcome, including the empty status the service returns when it rolls
+  the transaction back (amount mismatch, a failed update, a missing order), and
+  logged that refusal at `LOG_INFO` as a completed sync. Whoever reads the
+  response or the log — an operator reconciling a stuck order, a channel tool
+  echoing the body — was told the payment was booked when the service had just
+  refused to book it. The handler now answers
+  `{"code":"FAIL","message":"order sync rejected"}` at `LOG_ERROR`, matching the
+  level the `app_id` reject already uses. This changes what *we* report, not
+  what Alipay does with it: our success body is already JSON rather than the
+  plain-text `success` Alipay expects (recorded in `TECH_SPECS.md` "回调响应"),
+  so the retry schedule is unaffected either way and that conformance stays a
+  separate follow-up.
 - **Alipay's own notifications could fail our verifier.** `verifyCallback()`
   built the signed payload from every parameter except `sign`/`sign_type`, but
   the official rule also drops parameters whose value is *empty*. A genuine
@@ -304,12 +327,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hashed a different string than the one Alipay signed, verification failed,
   and the order stayed unconfirmed while Alipay kept retrying a notification we
   kept refusing. The verifier now skips empty-valued members, guarded by
-  `AlipayVerifyCallbackTest`, which mints a throwaway keypair, signs a
-  notification containing empty fields and requires both that it verifies and
-  that a wrong signature does not. The same build path called the non-reentrant
+  `AlipayVerifyCallbackTest`, which mints a throwaway keypair and signs a
+  notification containing empty fields three ways: under the official rule (must
+  verify), under the rule this verifier used to implement, which folded the empty
+  fields in (must be rejected — the pre-fix code accepted exactly this one, so it
+  is the assertion that pins which rule is in force), and a wrong signature (must
+  be rejected). The fixture's temporary PEMs are named per invocation, because two
+  test processes running at once would otherwise truncate each other's key files
+  mid-verification. The same build path called the non-reentrant
   `std::localtime()` while composing the common request parameters; Drogon can
   serve from several IO-loop threads, so the timestamp is now formatted through
   `localtime_s`/`localtime_r`.
+- **The amount gate could compare two amounts to the same wrapped number.**
+  `parseAmountToFen()` parsed the yuan part with `std::stoll`, which accepts
+  anything up to `int64_t`'s own limit, and then scaled it by 100 — signed
+  overflow is undefined behaviour, and on the wrapping arithmetic every build
+  actually ships, `92233720368547758` yuan lands on a fen value that collides
+  with a small legitimate one. The gate that exists to catch a low-value payment
+  confirming a high-value order compares those fen with `!=`, so the collision is
+  the exact failure it cannot afford. It now refuses to return a fen value it
+  cannot represent (`PayUtils_ParseAmountToFen_RejectsOverflow`), which also makes
+  the unparseable-amount path fail closed. Both gate sites in
+  `syncOrderStatusFromAlipay()` had meanwhile grown the same parse-and-compare
+  with the same rollback, so the comparison lives once as
+  `pay::utils::amountEqualsFen()` — negative expectations (the caller's "could not
+  resolve" sentinel) never match, pinned by `PayUtils_AmountEqualsFen`.
+- **An enabled Alipay channel with no `app_id` booted silently.** The
+  merchant-identity re-check enforces only when the client knows its own `app_id`,
+  so a deployment that forgot `ALIPAY_SANDBOX_APP_ID` — where the placeholder
+  resolves to an empty string rather than failing — kept accepting notifications
+  with that check disabled, and signed every gateway request with an empty
+  `app_id`. Nothing said so until a callback from another app arrived, or the
+  gateway rejected a request. `StartupValidator::validateChannelReadiness()` now
+  walks the resolved config for enabled channels and reports each missing
+  `app_id` as a `LOG_WARN` at startup; it stays a warning because a partial
+  rollout (one channel configured, another not) has to keep booting.
 
 - **A tag no pipeline had ever run could deploy production.** `deploy.yml`
   triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
