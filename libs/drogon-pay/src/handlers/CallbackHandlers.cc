@@ -221,8 +221,8 @@ void AlipayCallbackController::notify(
     const std::string expectedAppId = alipayClient->getAppId();
     if (!expectedAppId.empty() && appId != expectedAppId)
     {
-        LOG_WARN << "[ALIPAY_CALLBACK] app_id mismatch, rejecting callback. expected="
-                 << expectedAppId << " got=" << appId;
+        LOG_ERROR << "[ALIPAY_CALLBACK] app_id mismatch, rejecting callback. expected="
+                  << expectedAppId << " got=" << appId;
         Json::Value response;
         response["code"] = "FAIL";
         response["message"] = "app_id mismatch";
@@ -252,6 +252,24 @@ void AlipayCallbackController::notify(
     // Call syncOrderStatusFromAlipay to update the database.
     paymentService->syncOrderStatusFromAlipay(
       outTradeNo, alipayResult, [callback, outTradeNo, tradeStatus](const std::string &status) {
+          // An empty status is this service's signal that the order was refused
+          // or not advanced (amount mismatch, DB failure). Reporting success
+          // would tell Alipay the notification was processed, so the refusal
+          // would never surface again on a retry.
+          if (status.empty())
+          {
+              LOG_ERROR << "[AlipayCallback] Order sync REJECTED for " << outTradeNo
+                        << ", trade_status=" << tradeStatus;
+              Json::Value rejected;
+              rejected["code"] = "FAIL";
+              rejected["message"] = "order sync rejected";
+              auto rejResp = HttpResponse::newHttpJsonResponse(rejected);
+              rejResp->setContentTypeString("application/json");
+              rejResp->addHeader("Content-Type", "application/json; charset=utf-8");
+              callback(rejResp);
+              return;
+          }
+
           LOG_DEBUG << "[ALIPAY_CALLBACK] Sync completed for order " << outTradeNo
                     << " status=" << status;
 
