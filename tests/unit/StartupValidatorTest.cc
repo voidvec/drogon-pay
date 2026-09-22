@@ -64,3 +64,53 @@ DROGON_TEST(StartupValidator_ValidateRequired_PlaceholderVar)
     CHECK(!result.ok);
     CHECK(result.missingVars.size() == 1);
 }
+
+namespace
+{
+// The config shape PayPlugin reads: a top-level plugins array whose PayPlugin
+// entry carries the channels map.
+Json::Value configWithAlipayChannel(bool enabled, const std::string &app_id)
+{
+    Json::Value channel;
+    channel["enabled"] = enabled;
+    channel["app_id"] = app_id;
+
+    Json::Value payConfig;
+    payConfig["channels"]["alipay"] = channel;
+
+    Json::Value plugin;
+    plugin["name"] = "PayPlugin";
+    plugin["config"] = payConfig;
+
+    Json::Value root;
+    root["plugins"].append(plugin);
+    return root;
+}
+}  // namespace
+
+DROGON_TEST(StartupValidator_ChannelReadiness_WarnsWhenAppIdMissing)
+{
+    // An unset environment variable resolves to an empty string, and an
+    // unresolved placeholder is equally unusable; both have to be reported.
+    for (const char *app_id : {"", "__env_var:ALIPAY_SANDBOX_APP_ID__"})
+    {
+        const auto warnings =
+          StartupValidator::validateChannelReadiness(configWithAlipayChannel(true, app_id));
+        REQUIRE(warnings.size() == 1);
+        CHECK(warnings[0].find("alipay") != std::string::npos);
+        CHECK(warnings[0].find("app_id") != std::string::npos);
+    }
+}
+
+DROGON_TEST(StartupValidator_ChannelReadiness_SilentWhenUsableOrDisabled)
+{
+    CHECK(
+      StartupValidator::validateChannelReadiness(configWithAlipayChannel(true, "2021000000000000"))
+        .empty()
+    );
+    CHECK(StartupValidator::validateChannelReadiness(configWithAlipayChannel(false, "")).empty());
+
+    // A config without the plugin (or without channels) is not a warning case:
+    // the plugin itself already reports a missing channels block.
+    CHECK(StartupValidator::validateChannelReadiness(Json::Value(Json::objectValue)).empty());
+}

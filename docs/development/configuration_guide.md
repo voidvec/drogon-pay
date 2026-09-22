@@ -173,10 +173,17 @@ Required by the example host (`StartupValidator`): `PAY_DB_PASSWORD`,
 `PAY_API_KEY`. `PAY_REDIS_PASSWORD` is optional. See
 [environment_setup.md](environment_setup.md) for the full list.
 
+A missing channel variable is not fatal, because a partial rollout (one channel
+configured, another not) has to keep booting — but `app_id` for an `enabled`
+channel is reported as a `LOG_WARN` at startup (`validateChannelReadiness`).
+Without it the merchant-identity re-check on incoming Alipay notifications
+enforces nothing, since it only compares against an id it knows.
+
 ## Validation
 
 Configuration is validated on startup:
 - Required parameters must be present
+- An enabled channel whose `app_id` never resolved is warned about (not fatal)
 - Certificate files must exist
 - Database connection must succeed
 - Redis connection must succeed (when `redis_client` is configured)
