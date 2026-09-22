@@ -63,3 +63,50 @@ void StartupValidator::validate(const std::vector<std::string> &requiredVars)
         }
     }
 }
+
+std::vector<std::string> StartupValidator::validateChannelReadiness(
+  const Json::Value &processedConfig
+)
+{
+    std::vector<std::string> warnings;
+
+    const Json::Value &plugins = processedConfig["plugins"];
+    if (!plugins.isArray())
+    {
+        return warnings;
+    }
+
+    for (const auto &plugin : plugins)
+    {
+        if (plugin.get("name", "").asString() != "PayPlugin")
+        {
+            continue;
+        }
+        const Json::Value &channels = plugin["config"]["channels"];
+        if (!channels.isObject())
+        {
+            continue;
+        }
+        for (const auto &name : channels.getMemberNames())
+        {
+            const Json::Value &channel = channels[name];
+            if (!channel.get("enabled", false).asBool())
+            {
+                continue;
+            }
+            // isPlaceholder covers both spellings of "not configured": an
+            // env var that was absent (ConfigLoader leaves an empty string) and
+            // one that never got resolved at all.
+            if (isPlaceholder(channel.get("app_id", "").asString()))
+            {
+                const std::string warning = "Channel '" + name +
+                                            "' is enabled but app_id is not set; "
+                                            "its API calls and callbacks will be rejected";
+                warnings.push_back(warning);
+                LOG_WARN << warning;
+            }
+        }
+    }
+
+    return warnings;
+}
