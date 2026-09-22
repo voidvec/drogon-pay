@@ -50,6 +50,7 @@ class PayIdempotency
         static const std::string _expire_at;
         static const std::string _created_at;
         static const std::string _updated_at;
+        static const std::string _owner_token;
     };
 
     static const int primaryKeyNumber;
@@ -154,8 +155,18 @@ class PayIdempotency
     ///Set the value of the column updated_at
     void setUpdatedAt(const ::trantor::Date &pUpdatedAt) noexcept;
 
+    /**  For column owner_token  */
+    ///Get the value of the column owner_token, returns the default value if the column is null
+    const std::string &getValueOfOwnerToken() const noexcept;
+    ///Return a shared_ptr object pointing to the column const value, or an empty shared_ptr object if the column is null
+    const std::shared_ptr<std::string> &getOwnerToken() const noexcept;
+    ///Set the value of the column owner_token
+    void setOwnerToken(const std::string &pOwnerToken) noexcept;
+    void setOwnerToken(std::string &&pOwnerToken) noexcept;
+    void setOwnerTokenToNull() noexcept;
 
-    static size_t getColumnNumber() noexcept {  return 6;  }
+
+    static size_t getColumnNumber() noexcept {  return 7;  }
     static const std::string &getColumnName(size_t index) noexcept(false);
 
     Json::Value toJson() const;
@@ -183,6 +194,7 @@ class PayIdempotency
     std::shared_ptr<::trantor::Date> expireAt_;
     std::shared_ptr<::trantor::Date> createdAt_;
     std::shared_ptr<::trantor::Date> updatedAt_;
+    std::shared_ptr<std::string> ownerToken_;
     struct MetaData
     {
         const std::string colName_;
@@ -194,7 +206,7 @@ class PayIdempotency
         const bool notNull_;
     };
     static const std::vector<MetaData> metaData_;
-    bool dirtyFlag_[6]={ false };
+    bool dirtyFlag_[7]={ false };
   public:
     static const std::string &sqlForFindingByPrimaryKey()
     {
@@ -244,6 +256,11 @@ class PayIdempotency
         {
             needSelection=true;
         }
+        if(dirtyFlag_[6])
+        {
+            sql += "owner_token,";
+            ++parametersCount;
+        }
         if(parametersCount > 0)
         {
             sql[sql.length()-1]=')';
@@ -292,6 +309,11 @@ class PayIdempotency
         else
         {
             sql +="default,";
+        }
+        if(dirtyFlag_[6])
+        {
+            n = snprintf(placeholderStr,sizeof(placeholderStr),"$%d,",placeholder++);
+            sql.append(placeholderStr, n);
         }
         if(parametersCount > 0)
         {
