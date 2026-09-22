@@ -43,6 +43,46 @@ DROGON_TEST(PayUtils_ParseAmountToFen)
     CHECK(!pay::utils::parseAmountToFen("-1.00", fen));
 }
 
+// The amount consistency gate compares fen with `!=`, so a value that wraps on
+// yuan * 100 could collide with a small legitimate amount and be accepted.
+// parseAmountToFen must refuse to produce a fen value it cannot represent.
+DROGON_TEST(PayUtils_ParseAmountToFen_RejectsOverflow)
+{
+    int64_t fen = 0;
+
+    // Largest amount that still fits: fen max is int64 max, so 92233720368547757.99.
+    CHECK(pay::utils::parseAmountToFen("92233720368547757.99", fen));
+    CHECK(fen == 9223372036854775799LL);
+
+    // One above the representable scale: rejected rather than wrapping.
+    CHECK(!pay::utils::parseAmountToFen("92233720368547758", fen));
+    CHECK(!pay::utils::parseAmountToFen("92233720368547758.07", fen));
+
+    // Past int64 entirely: stoll throws, the parse reports failure.
+    CHECK(!pay::utils::parseAmountToFen("9223372036854775808", fen));
+    CHECK(!pay::utils::parseAmountToFen("999999999999999999999999.99", fen));
+}
+
+DROGON_TEST(PayUtils_AmountEqualsFen)
+{
+    CHECK(pay::utils::amountEqualsFen("88.88", 8888));
+    // Equivalent spellings of the same amount must compare equal.
+    CHECK(pay::utils::amountEqualsFen("0.5", 50));
+    CHECK(pay::utils::amountEqualsFen("0.50", 50));
+    CHECK(pay::utils::amountEqualsFen("12", 1200));
+
+    CHECK(!pay::utils::amountEqualsFen("88.88", 8889));
+    CHECK(!pay::utils::amountEqualsFen("88.8", 8888));
+
+    // Unparsable amounts never match, whatever was expected.
+    CHECK(!pay::utils::amountEqualsFen("", 0));
+    CHECK(!pay::utils::amountEqualsFen("12.345", 12345));
+
+    // The caller's "could not resolve" sentinel is negative: fail closed.
+    CHECK(!pay::utils::amountEqualsFen("88.88", -1));
+    CHECK(!pay::utils::amountEqualsFen("0.00", -1));
+}
+
 DROGON_TEST(PayUtils_MapTradeState)
 {
     std::string orderStatus;

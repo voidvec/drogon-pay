@@ -9,6 +9,12 @@ bool getRequiredString(const Json::Value &json, const char *key, std::string &va
 
 bool parseAmountToFen(const std::string &amount, int64_t &fen);
 
+// True when `amount` parses and equals `expectedFen`. A negative expectedFen
+// (the caller's "could not resolve" sentinel) never matches, so callers get a
+// fail-closed comparison from one call instead of repeating the parse + compare
+// that a channel-notification consistency check needs.
+bool amountEqualsFen(const std::string &amount, int64_t expectedFen);
+
 std::string toJsonString(const Json::Value &value);
 
 void mapTradeState(

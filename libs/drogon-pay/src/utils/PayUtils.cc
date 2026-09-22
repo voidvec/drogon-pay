@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 
 namespace
 {
@@ -261,6 +262,13 @@ bool parseAmountToFen(const std::string &amount, int64_t &fen)
     {
         const int64_t yuan = std::stoll(yuanPart);
         const int64_t cents = std::stoll(centPart);
+        // stoll accepts anything that fits int64_t, but the caller's scale is
+        // fen: yuan * 100 overflows (UB) past ~9.2e16 yuan, and a wrapped value
+        // could collide with a small legitimate amount.
+        if (yuan > (std::numeric_limits<int64_t>::max() - 99) / 100)
+        {
+            return false;
+        }
         fen = yuan * 100 + cents;
         return true;
     }
@@ -268,6 +276,14 @@ bool parseAmountToFen(const std::string &amount, int64_t &fen)
     {
         return false;
     }
+}
+
+bool amountEqualsFen(const std::string &amount, int64_t expectedFen)
+{
+    int64_t fen = 0;
+    // A negative expectation (an amount the caller could not resolve) never
+    // matches: parsed fen is always >= 0, so the guard fails closed.
+    return parseAmountToFen(amount, fen) && fen == expectedFen;
 }
 
 std::string toJsonString(const Json::Value &value)
