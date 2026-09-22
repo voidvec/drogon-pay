@@ -917,7 +917,7 @@ REFUND→order 写 `REFUNDED` 在任何入口都只是"主张"，必须与 §十
 ### 测试
 - 通道级（本机绿，无 DB）：
   `WechatPayClient_CloseTransaction_AcceptsSigned204AndSendsCloseShape`
-  （`WechatPayClientTest.cc:1049`；第十九轮按取证给 204 补上应答签名并如此更名）
+  （`WechatPayClientTest.cc:1051`；第十九轮按取证给 204 补上应答签名并如此更名）
   在测试内起一次性裸 socket 监听，捕获真实
   出网请求并回 204——请求线（POST + 编码路径 + `/close`）、签名头
   （大小写无关匹配 `authorization: wechatpay2-...`）、body 恰含 `mchid` 且无
@@ -1344,21 +1344,21 @@ PR #15 等三平台 CI 裁决期间补跑评审。三路子代理评审（迁移
   一致（通知类文档同样只给处理时限与重复通知义务），本轮**不加**。
 - 评审提"签名串不绑定请求路径与我们自己的随机串"：成立，但窗口也治不了它。
   真判据是**应答身份字段须与所请求一致**——而三处读数点
-  （`PaymentService.cc:2357`、`ReconciliationService.cc:227`、
-  `RefundService.cc:1471`）只读 `trade_state`/`status`，不校
+  （`PaymentService.cc:2383`、`ReconciliationService.cc:227`、
+  `RefundService.cc:1478`）只读 `trade_state`/`status`，不校
   `out_trade_no`/`out_refund_no`。列为后轮首位候选（需真端点语料确认字段
   恒在，否则失败即停摆结算）。
 
 ### 测试（本机绿）
 - 通道族（无 DB）：`WechatPayClient_CloseTransaction_AcceptsSigned204AndSendsCloseShape`
-  （`WechatPayClientTest.cc:1049`，原 `Accepts204AndSends...` 更名）——监听端
+  （`WechatPayClientTest.cc:1051`，原 `Accepts204AndSends...` 更名）——监听端
   现按指南对空主体签名，正向对照"签名 204 仍等于成功"；新增
-  `..._DropsUnsigned204Answer`（`:1131`）钉未签名 204 → 精确验签失败串、空
+  `..._DropsUnsigned204Answer`（`:1133`）钉未签名 204 → 精确验签失败串、空
   主体不外泄；新增
   `WechatPayClient_QueryTransaction_ReportsSignedHttpErrorWithEnvelope`
-  （`:972`）证明**签名**的 404 仍带 `HTTP 404: ORDER_NOT_EXIST`（终态判定的
+  （`:974`）证明**签名**的 404 仍带 `HTTP 404: ORDER_NOT_EXIST`（终态判定的
   合法来源不能被验签门一起削掉）；既有
-  `..._ReportsHttpErrorAsFailure`（`:922`）期望改为验签失败——未签名 404 现在
+  `..._ReportsHttpErrorAsFailure`（`:924`）期望改为验签失败——未签名 404 现在
   在读状态行之前就被拒。
 - 服务族（DB）：新增 `PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail`
   （`RefundQueryTest.cc:3930`）：桩通道回验签失败 → 响应 `REFUNDING`、退款行
@@ -1378,3 +1378,86 @@ PR #15 等三平台 CI 裁决期间补跑评审。三路子代理评审（迁移
 - `CHECK(a && b)` 陷阱：评审独立全量扫 `tests/`，无顶级 `&&`/`||` 残留（第十七
   轮 `bb54e59` 的清扫仍成立）。
 - 本机：`/WX` 全绿编译；220 例 / 2005 断言全绿 exit=0（较上轮 +3 例）。
+
+---
+
+## 二十六、第二十轮：CI 裁决打到三条真问题——QR 拒绝路径"先应答后落库"
+
+PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：先分清哪些影响本任务、
+哪些只是环境噪声），逐条对撞日志后结论是**三条全是本分支的真实缺陷**，没有一条
+可以推给环境：
+
+### 一、Linux 腿编译红：`unused variable 'winsock'`（GCC 独有）
+`OneShotListener::runOnce` 里的 `static WinsockGuard winsock;` 在 `_WIN32`
+分支是有构造副作用的（`WSAStartup`），但非 Windows 分支的类型是空 struct
+（`WechatPayClientTest.cc:339`），GCC 因此按普通未使用局部变量报
+`-Werror=unused-variable`。MSVC 看不见（本地 `/W4` 不报），clang 这一轮也没报，
+所以只有 Linux 腿红。改法取"意图声明"而非删除：`[[maybe_unused]]`
+（现 `:521`），并写明跨平台差异，防止后人当成冗余删掉副作用构造。
+
+### 二、macOS 腿编译红：`lambda capture 'this' is not used`（clang 独有）
+第十九轮把 SUM 聚合上提时，`RefundService.cc` 结算 lambda 的捕获表仍带着
+`this`——lambda 体内一个成员都不碰（`reportMapperFailure` 是 28 行的文件级自由
+函数），clang 的 `-Wunused-lambda-capture` 直接判死。MSVC 无此类诊断。删 `this`
+后必须证明安全：`dbClient_->execSqlAsync` 属于**外层** `settleOrder`
+（`:1717`，仍捕获 `this`），`Mapper<PayRefundModel> refundUpdater(dbClient_)`
+在**函数体**（`:1791`），两者都在该 lambda 之外——已逐处实测。
+
+### 三、Linux + Windows 双腿测例红：QR 拒绝路径的响应抢在自己的写前面
+这条与前两条不是一个量级——它是**功能缺陷**，且是本轮唯一被 CI 打到、
+本地全绿却漏掉的：
+
+- 现象：`PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry`
+  （`QrPaymentBookingTest.cc:360`）在 `:382` 读到 `INIT`，期望 `FAIL`。
+  Windows 腿挂 2 条断言，Linux 腿挂 4 条（同一测例的 retry 半边也挂）。
+- 根因：QR 分支拒绝时把两件事**发了不等**——`markQrPaymentFailed` 只发
+  `pay_payment` 的 FAIL 更新、`failQr` 只发幂等预留的删除，两个 `updateBy`/
+  `deleteBy` 都没挂后续，紧接着就回调应答。于是客户端被告知"这单失败、可重试"
+  时，库里那行还是 `INIT`（所有恢复过滤都读成"仍在途"），预留行也还在——
+  **一次更正后的重试会因一笔渠道从未见过的支付被拒**。
+- 为什么本地绿：断言本身没问题，问题在代码的时序。本地 Release 快，写赶在
+  读之前落库；CI 慢（尤其 coverage 的 Debug+gcov）就露出。这是时序缺陷的典型
+  形态，不能靠"本地多跑几次"当证据。
+- 修复形状不是新发明：同文件主建单（jsapi/struct）路径自第三轮起就是
+  `bookRefusedAttempt(db, paymentNo, orderNo, errPayload, done)`
+  （`PaymentService.cc:360`）——把应答作为 `done` 续体传进去，写完才答；
+  QR 的成功分支也早就 `promoteQrRows` → `respondQr`（幂等快照写完才答，
+  见 `:1560` 注释）。**QR 的拒绝分支是这个文件里唯一的离群者。**
+  本轮把应答接回这两处写的下游：`failQr`（`:1538`）从 `clearReservation`
+  的回调里答；`markQrPaymentFailed`（`:1695`）新增 `afterClose` 续体，用
+  `makeOnceCallback` 包住，经写回调或 `catch` 恰好一次触发（写失败的分支也
+  必须答，否则请求永久悬置）。
+- 测试零改动：钉的就是这个不变量，改代码即可，不需要动测例。
+
+### 锚点漂移声明（本轮如实标注）
+本轮 `PaymentService.cc` 在 1531 之后净增 26 行，因此 §十~§二十二 里凡是
+`PaymentService.cc:1783/2403/2418/2464/2481/2542/2553/2595/2627/2875/2966/2992`
+一类**旧快照锚点**都整体后移（`check_docs_drift.py` 的七条规则不校验行锚点，
+故门禁不会红）。§二十五 引用的四处测例锚点与两处读数点锚点是本轮新增节的
+主张，已逐条重测：`WechatPayClientTest.cc` `:922→:924`、`:972→:974`、
+`:1049→:1051`、`:1131→:1133`；`PaymentService.cc:2357→:2383`、
+`RefundService.cc:1471→:1478`（`ReconciliationService.cc:227` 未受影响）。
+历史节锚点按"各轮当时实测"理解，需要精确位置时以内容 grep 为准。
+
+### 验证记录
+- `/WX` + `-DDROGON_PAY_WERROR=ON` 全量重建绿（含 `[[maybe_unused]]`、删 `this`、
+  QR 续体三处改动）。
+- 本机连跑 8 次套件：`PASS=8 FAIL=0`（220 例 / 2005 断言）。**注意**：修复前
+  本机同样全绿，所以本机绿不是这条的证据；证据是顺序论证——应答改由写回调
+  触发，行的可见状态在因果上先于响应，不再依赖快慢。最终裁决仍待 CI。
+- 仓库 `clang_format.py --check`：本轮三个文件均 format-clean（本地唯一红是
+  gitignore 掉的 `libs/drogon-pay/src/models_backup/`，CI 走 git 索引看不见）。
+
+### 诚实边界与遗留
+- 时序类缺陷的守卫仍是"测例 + CI"，没有静态化。若要更硬的证据，需要把
+  `offerQrPayment` 的 DB 写注入屏障（测试内可强制延后），成本高，暂列后轮。
+- 同文件其余 `clearReservation(..., [](bool){})` 的 fire-and-forget（`:1413`
+  币种非法、`:1432` `time_expire` 非法、`:1518` 渠道不存在、`:1448`）**与本轮
+  修的缺陷同形且同样可达**：这三处都在 `checkAndSetStatus`（`:1350`）取到预留
+  **之后**应答，客户端按 400 更正参数立即重试时，删除尚未落地，重试会撞上
+  "1004 idempotency request in progress"——被一笔已经失败的请求拒在门外。
+  本轮**未动**它们，原因不是判断无碍，而是用户把本轮边界划在"CI 与评审意见
+  修完即停"：改动范围不含新增测例。列为**下一轮首位候选**（修法与本轮同形，
+  即把应答接进删除回调；三处 transport 文案与 body 文案不同形，收口时须逐处
+  保留原串，不能顺手统一）。
+- 第十九轮遗留的"应答身份字段须与所请求一致"仍是后轮首位候选。

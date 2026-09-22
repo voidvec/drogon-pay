@@ -416,6 +416,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_id` as a `LOG_WARN` at startup; it stays a warning because a partial
   rollout (one channel configured, another not) has to keep booting.
 
+- **A refused QR order answered before the writes that refuse it had landed**
+  (audit round 20). The QR branch closed the attempt and released its
+  idempotency reservation with two fire-and-forget writes and called the
+  response callback immediately after issuing them, so the client was told
+  "this failed, retry" while the database still said the opposite: the
+  `pay_payment` row remained `INIT`, which every recovery filter reads as an
+  attempt still in flight, and the reservation row was still there for the
+  retry to trip over. A corrected retry — the case the reservation exists to
+  protect — could therefore be refused for a payment the channel never saw.
+  Both writes are now chained ahead of the answer: `failQr`
+  (`PaymentService.cc:1538`) responds from the `clearReservation` callback, and
+  `markQrPaymentFailed` (`:1695`) takes the response as its `afterClose`
+  continuation, invoked exactly once through either the write's own callback or
+  the `catch`. This was the outlier, not a new rule: the success branch already
+  answered from `respondQr` after its writes settled, and the jsapi path has
+  passed the answer into `bookRefusedAttempt` as `done`
+  (`PaymentService.cc:360`) since round 3. CI caught what local runs could not:
+  `PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry`
+  (`QrPaymentBookingTest.cc:360`) read `INIT` where it required `FAIL` on both
+  the Linux and Windows legs, and the Linux leg — the slower one — also failed
+  the retry half of the same case for the reservation reason. The assertion was
+  sound; only the code's ordering was not, so no test changed.
+  The same round cleared two compile errors that only non-MSVC compilers can
+  see, both introduced here: `static WinsockGuard winsock` is an unused
+  variable under GCC once the type collapses to an empty struct off Windows
+  (`WechatPayClientTest.cc:521`, now `[[maybe_unused]]`), and `this` was a dead
+  capture in the refund SUM lambda, which clang reports as
+  `-Wunused-lambda-capture` (`RefundService.cc:1720`).
+
 - **The outbound answer-verification gate sat after the two answers an
   attacker finds easiest to forge** (audit round 19). `sendWechatRequest`
   verified only `2xx && status != 204`, and answered `204 No Content` as

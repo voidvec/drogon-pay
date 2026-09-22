@@ -127,11 +127,13 @@ std::shared_ptr<drogon::orm::DbClient> makeTestClient()
     // One client for the whole run, released on the main thread at exit. These
     // cases answer through a promise and return as soon as the answer lands,
     // while the chain that produced it is still finishing its own database
-    // work -- `failQr` clears the idempotency reservation after the caller has
-    // been answered. Drogon destroys a DbClient on whichever thread drops the
-    // last reference, and that destructor joins the client's own loop threads,
-    // so a chain that outlives the case and ends up holding the last reference
-    // joins itself and aborts the process (0xC0000409). Production cannot reach
+    // work -- the shape refusals in front of the booking
+    // (`PaymentService.cc:1413`, `:1432`, `:1518`) still clear the idempotency
+    // reservation after the caller has been answered. Drogon destroys a DbClient
+    // on whichever thread drops the last reference, and that destructor joins
+    // the client's own loop threads, so a chain that outlives the case and ends
+    // up holding the last reference joins itself and aborts the process
+    // (0xC0000409). Production cannot reach
     // this: its client comes from `app().getDbClient()`, which the framework
     // keeps until teardown.
     static const std::shared_ptr<drogon::orm::DbClient> client = [] {

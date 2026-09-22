@@ -516,7 +516,9 @@ class OneShotListener
       const std::string &responseBytes = std::string()
     )
     {
-        static WinsockGuard winsock;
+        // The guard exists for its constructor on Windows; off that platform the
+        // type is empty, so GCC sees a plain unused variable without this.
+        [[maybe_unused]] static WinsockGuard winsock;
         unsigned long long raw = 0;
         if (TestSockets::openSocket(raw) != 0)
         {

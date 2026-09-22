@@ -1531,20 +1531,23 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // answers through here: the reservation is released so a corrected retry
           // is not poisoned, and the transport error carries the same status the
           // body names. `extra` holds the channel's own code fields when it has
-          // them.
+          // them. The client hears back only once that delete has settled --
+          // answering first let a retry that landed inside the delete read an
+          // in-flight reservation and get refused for an attempt that had already
+          // failed, which is the ordering `respondQr` already keeps on success.
           auto failQr = [sharedCb, idempotencyService, idempotencyKey, requestHash](
                           int code, const std::string &message, const Json::Value &extra
                         ) {
-              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
               Json::Value response = extra;
               response["code"] = code;
               response["message"] = message;
-              if (code >= 400 && code < 500)
-              {
-                  sharedCb->call(response, pay::makePayError(code, message));
-                  return;
-              }
-              sharedCb->call(response, std::make_error_code(std::errc::io_error));
+              const std::error_code ec = (code >= 400 && code < 500)
+                                           ? pay::makePayError(code, message)
+                                           : std::make_error_code(std::errc::io_error);
+              idempotencyService
+                ->clearReservation(idempotencyKey, requestHash, [sharedCb, response, ec](bool) {
+                    sharedCb->call(response, ec);
+                });
           };
 
           auto respondQr =
@@ -1687,27 +1690,41 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // would hide money that is genuinely payable.
           // Runs from the channel callback, which a real (HTTP) channel fires
           // after the service may already be gone: hold the DB client, not `this`.
+          // `afterClose` carries the answer, so the caller waits for the row:
+          // responding first let a retry see this attempt still open.
           auto markQrPaymentFailed = [db = dbClient_](
-                                       const PayPaymentModel &payment, const std::string &message
+                                       const PayPaymentModel &payment,
+                                       const std::string &message,
+                                       std::function<void()> &&rawAfterClose
                                      ) {
               Json::Value errJson;
               errJson["error"] = message;
               const std::string responseText = pay::utils::toJsonString(errJson);
               const std::string paymentNo = payment.getValueOfPaymentNo();
-              auto reportFault = [paymentNo](const std::string &detail) {
-                  LOG_WARN << "[PaymentService] Failed to record the QR payment failure for "
-                           << paymentNo << ": " << detail;
+              // Once-only: the write settles through its callback or the catch
+              // below, and a faulted row must still answer exactly once -- it
+              // just stays open for the recovery filters a little longer.
+              auto afterClose = pay::utils::makeOnceCallback<void()>(std::move(rawAfterClose));
+              auto reportFault = [paymentNo, afterClose](const std::string &detail) {
+                  if (!detail.empty())
+                  {
+                      LOG_WARN << "[PaymentService] Failed to record the QR payment failure for "
+                               << paymentNo << ": " << detail;
+                  }
+                  afterClose.call();
               };
               try
               {
                   Mapper<PayPaymentModel> paymentUpdater(db);
                   paymentUpdater.updateBy(
                     {PayPaymentModel::Cols::_status, PayPaymentModel::Cols::_response_payload},
-                    [reportFault, paymentNo](const size_t updated) {
+                    [reportFault](const size_t updated) {
                         if (updated == 0)
                         {
                             reportFault("the row had already moved out of INIT/PROCESSING");
+                            return;
                         }
+                        reportFault(std::string());
                     },
                     [reportFault](const DrogonDbException &e) { reportFault(e.base().what()); },
                     Criteria(PayPaymentModel::Cols::_payment_no, CompareOperator::EQ, paymentNo) &&
@@ -1736,94 +1753,103 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // no payment row, answered FAIL, and the money sat on an order that could
           // never settle (audit item C5). Booking first also turns a database fault
           // into "no charge was offered" instead of an orphaned transaction.
-          auto offerQrChannel =
-            [channelImpl, payload, orderNo, channel, failQr, markQrPaymentFailed, promoteQrRows](
-              const PayOrderModel &order, const PayPaymentModel &payment
-            ) {
-                channelImpl->createQRPayment(
-                  payload,
-                  [orderNo, channel, failQr, markQrPaymentFailed, promoteQrRows, order, payment](
-                    const Json::Value &result, const std::string &error
-                  ) {
-                      if (!error.empty())
-                      {
-                          const std::string message = "QR payment creation failed: " + error;
-                          if (attemptCertainlyNotCreated(error))
-                          {
-                              markQrPaymentFailed(payment, message);
-                          }
-                          else
-                          {
-                              // The channel may still have created the transaction.
-                              // Closing the row would hide a code the user can pay
-                              // from every recovery filter, so an attempt with an
-                              // unknown outcome stays in flight for the notification
-                              // or reconciliation to settle.
-                              LOG_WARN << "[PaymentService] QR attempt "
-                                       << payment.getValueOfPaymentNo()
-                                       << " outcome unknown; leaving it in flight: " << error;
-                          }
-                          failQr(500, message, Json::Value());
-                          return;
-                      }
+          auto offerQrChannel = [channelImpl,
+                                 payload,
+                                 orderNo,
+                                 channel,
+                                 failQr,
+                                 markQrPaymentFailed,
+                                 promoteQrRows](
+                                  const PayOrderModel &order, const PayPaymentModel &payment
+                                ) {
+              channelImpl->createQRPayment(
+                payload,
+                [orderNo, channel, failQr, markQrPaymentFailed, promoteQrRows, order, payment](
+                  const Json::Value &result, const std::string &error
+                ) {
+                    if (!error.empty())
+                    {
+                        const std::string message = "QR payment creation failed: " + error;
+                        if (attemptCertainlyNotCreated(error))
+                        {
+                            markQrPaymentFailed(payment, message, [failQr, message] {
+                                failQr(500, message, Json::Value());
+                            });
+                        }
+                        else
+                        {
+                            // The channel may still have created the transaction.
+                            // Closing the row would hide a code the user can pay
+                            // from every recovery filter, so an attempt with an
+                            // unknown outcome stays in flight for the notification
+                            // or reconciliation to settle.
+                            LOG_WARN << "[PaymentService] QR attempt "
+                                     << payment.getValueOfPaymentNo()
+                                     << " outcome unknown; leaving it in flight: " << error;
+                            failQr(500, message, Json::Value());
+                        }
+                        return;
+                    }
 
-                      // Success is per channel: V3 has no business-code field, so a
-                      // WeChat order is only accepted once it carries code_url.
-                      const std::string resultError = channelResultError(channel, result);
-                      if (!resultError.empty())
-                      {
-                          Json::Value extra;
-                          if (channel == "alipay")
-                          {
-                              extra["alipay_code"] = result.get("code", "").asString();
-                              extra["alipay_sub_code"] = result.get("sub_code", "").asString();
-                          }
-                          else
-                          {
-                              extra["wechat_code"] = result.get("code", "").asString();
-                          }
-                          if (attemptCertainlyNotCreated(resultError))
-                          {
-                              markQrPaymentFailed(payment, resultError);
-                          }
-                          else
-                          {
-                              LOG_WARN << "[PaymentService] QR attempt "
-                                       << payment.getValueOfPaymentNo()
-                                       << " answered without a payable code; leaving it in "
-                                          "flight: "
-                                       << resultError;
-                          }
-                          failQr(500, resultError, extra);
-                          return;
-                      }
+                    // Success is per channel: V3 has no business-code field, so a
+                    // WeChat order is only accepted once it carries code_url.
+                    const std::string resultError = channelResultError(channel, result);
+                    if (!resultError.empty())
+                    {
+                        Json::Value extra;
+                        if (channel == "alipay")
+                        {
+                            extra["alipay_code"] = result.get("code", "").asString();
+                            extra["alipay_sub_code"] = result.get("sub_code", "").asString();
+                        }
+                        else
+                        {
+                            extra["wechat_code"] = result.get("code", "").asString();
+                        }
+                        if (attemptCertainlyNotCreated(resultError))
+                        {
+                            markQrPaymentFailed(payment, resultError, [failQr, resultError, extra] {
+                                failQr(500, resultError, extra);
+                            });
+                        }
+                        else
+                        {
+                            LOG_WARN << "[PaymentService] QR attempt "
+                                     << payment.getValueOfPaymentNo()
+                                     << " answered without a payable code; leaving it in "
+                                        "flight: "
+                                     << resultError;
+                            failQr(500, resultError, extra);
+                        }
+                        return;
+                    }
 
-                      Json::Value data;
-                      data["order_no"] = orderNo;
-                      if (channel == "wechat")
-                      {
-                          // Native transactions hand back a `weixin://` URL to render.
-                          data["code_url"] = result.get("code_url", "").asString();
-                      }
-                      else
-                      {
-                          // Alipay precreate hands back the QR content plus the
-                          // merchant order number echoed as `out_trade_no`. It is
-                          // not Alipay's own number -- that is `trade_no`, which
-                          // only exists once the buyer has paid.
-                          if (result.isMember("qr_code"))
-                          {
-                              data["qr_code"] = result["qr_code"].asString();
-                          }
-                          if (result.isMember("out_trade_no"))
-                          {
-                              data["out_trade_no"] = result["out_trade_no"].asString();
-                          }
-                      }
-                      promoteQrRows(payment, order, result, data);
-                  }
-                );
-            };
+                    Json::Value data;
+                    data["order_no"] = orderNo;
+                    if (channel == "wechat")
+                    {
+                        // Native transactions hand back a `weixin://` URL to render.
+                        data["code_url"] = result.get("code_url", "").asString();
+                    }
+                    else
+                    {
+                        // Alipay precreate hands back the QR content plus the
+                        // merchant order number echoed as `out_trade_no`. It is
+                        // not Alipay's own number -- that is `trade_no`, which
+                        // only exists once the buyer has paid.
+                        if (result.isMember("qr_code"))
+                        {
+                            data["qr_code"] = result["qr_code"].asString();
+                        }
+                        if (result.isMember("out_trade_no"))
+                        {
+                            data["out_trade_no"] = result["out_trade_no"].asString();
+                        }
+                    }
+                    promoteQrRows(payment, order, result, data);
+                }
+              );
+          };
 
           // One payment row per attempt: `pay_payment.order_no` is indexed, not
           // unique, so a retry appends rather than collides.
