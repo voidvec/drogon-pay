@@ -325,7 +325,17 @@ DROGON_TEST(PayPlugin_WechatCallback_WechatClientNotReady)
     CHECK(result["message"].asString() == "wechat client not ready");
 }
 
-DROGON_TEST(PayPlugin_WechatCallback_DbClientNotReady)
+// This case used to be named `..._DbClientNotReady`, which described a guard
+// that does not exist: `handlePaymentCallback` checks `wechatClient_` and the
+// signature and then goes straight into a Mapper over `dbClient_`. There is no
+// null-DB branch to reach, because PayPlugin::initPlugin refuses to wire the
+// services at all when `getDbClient` hands back nothing (PayPlugin.cc:174). So
+// what this case actually pins, and what it is now named for, is the gate in
+// front of the database: the verifying client here is fully configured (cert,
+// APIv3 key, serial), the only thing missing is a signature over the body --
+// and an unsigned notification must be refused before anything reads or writes
+// state. The editorial-signature case covers the signed-but-tampered half.
+DROGON_TEST(PayPlugin_WechatCallback_DropsUnsignedBodyBeforeDb)
 {
     EVP_PKEY *pkey = nullptr;
     std::string certPem;
@@ -376,7 +386,9 @@ DROGON_TEST(PayPlugin_WechatCallback_DbClientNotReady)
     REQUIRE(errorFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
     const auto result = resultFuture.get();
     const auto error = errorFuture.get();
-    CHECK(error);
+    CHECK(error);  // the refusal reports 1400 alongside the FAIL body
+    CHECK(result["code"].asString() == "FAIL");
+    CHECK(result["message"].asString() == "signature verification failed");
 
     EVP_PKEY_free(pkey);
     std::error_code ec;
@@ -1266,7 +1278,19 @@ DROGON_TEST(PayPlugin_WechatCallback_UnfinalizedReservationIsReprocessedOnRetry)
     );
     REQUIRE(finalizedRows.size() == 1);
     CHECK(!finalizedRows.front()["response_snapshot"].isNull());
-    CHECK(!finalizedRows.front()["owner_token"].isNull());
+    // Shape, not just presence: `newReservationToken()` mints a dashless UUID,
+    // so 32 hex characters is the only thing a stored value can legitimately
+    // look like. A bare non-null check would also pass if the column were
+    // written back with the idempotency key, an empty string, or anything else
+    // the finalize path happened to echo there. What this cannot prove is the
+    // cross-delivery half of the guard -- the row legitimately carries the
+    // *later* delivery's token here, because the re-reserve overwrote the one
+    // the timed-out delivery left -- so it is a staleness check on the token's
+    // format only.
+    REQUIRE(!finalizedRows.front()["owner_token"].isNull());
+    const std::string ownerToken = finalizedRows.front()["owner_token"].as<std::string>();
+    CHECK(ownerToken.size() == 32);
+    CHECK(ownerToken.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos);
 
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_callback WHERE payment_no = $1", paymentNo);

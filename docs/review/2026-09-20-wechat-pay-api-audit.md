@@ -903,8 +903,9 @@ REFUND→order 写 `REFUNDED` 在任何入口都只是"主张"，必须与 §十
   （`missing orderNo` / `missing mch_id`），路径段过 `urlEncodePathSegment`，
   body 仅 `mchid`，POST 签名走既有 `buildAuthorizationHeader`；SPI 入口
   `closeOrder`（`:979`）转发。
-- **204 即成功**（`WechatChannel.cc:500-505`）：显式分支返回空对象 + 空错误，
-  置于 JSON 解析之前。
+- **204 即成功**（现 `WechatChannel.cc:524`）：显式分支返回空对象 + 空错误，
+  置于 JSON 解析之前。第十九轮取证后该分支移到验签之后——204 并非验签豁免，
+  见 §二十五。
 - **清扫门**（`ReconciliationService.cc:195` 读 `row.getExpireAt()` 可空指针，
   `:223-241` 判据）：仅当渠道自己仍答 `NOTPAY` **且**该 order 行的
   `expire_at` 已过，才 `closeOrder`。`NOTPAY` 是唯一"渠道未支付且本地未定"的
@@ -915,8 +916,9 @@ REFUND→order 写 `REFUNDED` 在任何入口都只是"主张"，必须与 §十
 
 ### 测试
 - 通道级（本机绿，无 DB）：
-  `WechatPayClient_CloseTransaction_Accepts204AndSendsCloseShape`
-  （`WechatPayClientTest.cc:954`）在测试内起一次性裸 socket 监听，捕获真实
+  `WechatPayClient_CloseTransaction_AcceptsSigned204AndSendsCloseShape`
+  （`WechatPayClientTest.cc:1049`；第十九轮按取证给 204 补上应答签名并如此更名）
+  在测试内起一次性裸 socket 监听，捕获真实
   出网请求并回 204——请求线（POST + 编码路径 + `/close`）、签名头
   （大小写无关匹配 `authorization: wechatpay2-...`）、body 恰含 `mchid` 且无
   `appid`、调用方拿到"空错误 + object"四半同时钉死。
@@ -1297,3 +1299,82 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_ledger_payment_income
 评审同时**正向确认**：QR 拒绝分支与相邻 currency/amount 分支同形无预留泄漏；
 重放哈希对缺省空串稳定；校验器与解析器接受集一致（不存在"渠道拒而本地无
 expire"错位）；直调 service 的既有测试不带该键不抛。
+
+---
+
+## 二十五、第十九轮：出站验签门放错位置 + 退款终态判定采信了不该采信的应答
+
+PR #15 等三平台 CI 裁决期间补跑评审。三路子代理评审（迁移 SQL、应答验签
+绕过面、测试有效性）全部返回，两条前轮遗留的编译门禁修复另记（`fb3cd80`：
+`-Wunused-but-set-variable` 与 MSVC `C4456` 各一处，属"本机单一编译器视角
+看不到"的类）。
+
+### 取证（官方"如何使用微信支付公钥验签"页 `doc/brand/4015407582`）
+四问四答，逐字取回：
+1. 验签义务覆盖**所有标准 API 应答**，不限 2xx；指南并要求"如果应答的签名
+   验证失败，应舍弃该应答"。
+2. 豁免只有**文件/图片下载接口**（其响应头不含签名值）；**204 不在豁免内**，
+   验签串按空主体构造，即 `应答时间戳\n应答随机串\n\n`。
+3. 指南**不要求**把 `Wechatpay-Timestamp` 与本地钟差做窗口判定，时间戳只作
+   签名输入。
+4. 签名串三行、行尾 `\n`。
+
+### 缺陷与修复
+- **MAJOR 一（`WechatChannel.cc`）**：验签门原写作 `if (verifyAnswer && status
+  >= 200 && status < 300)`，且 204 分支在其之前直接返回成功——于是伪造的
+  **未签名 204** 是所有伪造应答里最便宜的一种（连报文都不用编），却对一切
+  端点等于"调用成功"；伪造的 **4xx 报文**同样绕过验签，其 `code`/`message`
+  又成为退款终态判定的输入。取证 (1)(2) 说明这两类应答本来都要验签。修复：
+  把验签前移为"凡带 verifier 先验签"（`:512`），204 分支移到其后（`:524`），
+  只保留证书下载引导（`verifyAnswer` 为空，其应答由 AES-256-GCM 认证标签
+  自证）作为豁免。
+- **MAJOR 二（`RefundService.cc:58` `refundCertainlyDidNotHappen`）**：它按错误
+  串形状反推"请求是否发出过"，黑名单只有 `HTTP `/`http request`/`invalid
+  json response` 三类。第十八轮把出站验签接上后，新增的
+  `response signature verification failed: …`（以及 `WechatChannel.cc:1241`
+  "客户端在应答被验签前销毁"）都不以 `HTTP` 开头，于是被判成"本地故障、
+  肯定没发生"→ 直接 `updateRefundWithError` 落 `REFUND_FAIL` 并向调用方回
+  1502。请求其实已发出且有人答了，只是不该信这个答；调用方拿终态失败换新
+  `out_refund_no` 重试，微信会把它当成第二笔退款——正是该函数头注释自己列的
+  要避免的场景。修复：验签失败族并入"已过 HTTP/结果未知"，走 `REFUNDING` +
+  `LOG_WARN`，交给对账裁定。
+
+### 候选证伪 / 降级
+- 评审提"出站无时间戳窗口"：按取证 (3) 非规范义务，且与第十五轮入站结论
+  一致（通知类文档同样只给处理时限与重复通知义务），本轮**不加**。
+- 评审提"签名串不绑定请求路径与我们自己的随机串"：成立，但窗口也治不了它。
+  真判据是**应答身份字段须与所请求一致**——而三处读数点
+  （`PaymentService.cc:2357`、`ReconciliationService.cc:227`、
+  `RefundService.cc:1471`）只读 `trade_state`/`status`，不校
+  `out_trade_no`/`out_refund_no`。列为后轮首位候选（需真端点语料确认字段
+  恒在，否则失败即停摆结算）。
+
+### 测试（本机绿）
+- 通道族（无 DB）：`WechatPayClient_CloseTransaction_AcceptsSigned204AndSendsCloseShape`
+  （`WechatPayClientTest.cc:1049`，原 `Accepts204AndSends...` 更名）——监听端
+  现按指南对空主体签名，正向对照"签名 204 仍等于成功"；新增
+  `..._DropsUnsigned204Answer`（`:1131`）钉未签名 204 → 精确验签失败串、空
+  主体不外泄；新增
+  `WechatPayClient_QueryTransaction_ReportsSignedHttpErrorWithEnvelope`
+  （`:972`）证明**签名**的 404 仍带 `HTTP 404: ORDER_NOT_EXIST`（终态判定的
+  合法来源不能被验签门一起削掉）；既有
+  `..._ReportsHttpErrorAsFailure`（`:922`）期望改为验签失败——未签名 404 现在
+  在读状态行之前就被拒。
+- 服务族（DB）：新增 `PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail`
+  （`RefundQueryTest.cc:3930`）：桩通道回验签失败 → 响应 `REFUNDING`、退款行
+  仍 `REFUND_INIT`；正对照 `PayPlugin_Refund_WechatErrorPersistsPayload`
+  （`:1069`）配置缺失（从未发出）→ `REFUND_FAIL`。`RefundStubChannel` 与
+  `settleRefund` 各加一个默认为空的 error 形参，既有调用点行为不变。
+- 测试有效性评审的两条自身问题：`PayPlugin_WechatCallback_DbClientNotReady`
+  只有一句 `CHECK(error)`，且请求体未签名，实际走的是
+  `CallbackService.cc:365` 的签名拒绝，而非其名字声称的 DB 未就绪分支——实测
+  `handlePaymentCallback` 根本没有 null-DB 分支（`PayPlugin.cc:174` 在取不到
+  DbClient 时直接早退，不装配服务），故更名为
+  `PayPlugin_WechatCallback_DropsUnsignedBodyBeforeDb`
+  （`WechatCallbackIntegrationTest.cc:338`）并补 `code=FAIL` +
+  `message="signature verification failed"` 两条断言；owner_token 断言由
+  "非空"升为"32 位十六进制"形状检查，并写明它**不能**证明跨投递归属（该行
+  本就该带后到投递重预订后的 token）。
+- `CHECK(a && b)` 陷阱：评审独立全量扫 `tests/`，无顶级 `&&`/`||` 残留（第十七
+  轮 `bb54e59` 的清扫仍成立）。
+- 本机：`/WX` 全绿编译；220 例 / 2005 断言全绿 exit=0（较上轮 +3 例）。
