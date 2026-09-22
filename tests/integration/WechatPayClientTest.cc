@@ -379,7 +379,10 @@ class TestSockets
     static int boundPort(unsigned long long handle, int &port)
     {
         sockaddr_in bound{};
-        int boundLen = sizeof(bound);
+        // getsockname writes the address length back through this pointer, so it
+        // has to be the platform's own type: socklen_t is `int` in winsock but
+        // `unsigned int` on POSIX, and an `int` here compiles on Windows only.
+        socklen_t boundLen = static_cast<socklen_t>(sizeof(bound));
         if (::getsockname(toNative(handle), reinterpret_cast<sockaddr *>(&bound), &boundLen) != 0)
         {
             return -1;
