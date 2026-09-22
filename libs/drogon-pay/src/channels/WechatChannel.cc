@@ -360,7 +360,6 @@ bool decryptAesGcm(
         }
     }
 
-    int totalLen = 0;
     if (textLen > 0)
     {
         plaintext.resize(textLen);
@@ -378,7 +377,6 @@ bool decryptAesGcm(
             error = "decrypt update failed";
             return false;
         }
-        totalLen = outLen;
     }
     else
     {
@@ -502,7 +500,7 @@ void sendWechatRequest(
           // success with an empty object rather than "invalid json response".
           if (status == 204)
           {
-              Json::Value bodyJson(Json::objectValue);
+              bodyJson = Json::Value(Json::objectValue);
               (*cb)(bodyJson, "");
               return;
           }
