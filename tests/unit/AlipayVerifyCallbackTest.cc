@@ -4,6 +4,7 @@
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -33,8 +34,14 @@ KeyFiles makeTempKeypair()
     kf.pkey = pkey;
 
     auto dir = std::filesystem::temp_directory_path();
-    kf.privatePath = (dir / "alipay_test_private.pem").string();
-    kf.publicPath = (dir / "alipay_test_public.pem").string();
+    // Unique per invocation: a fixed name lets a second PayBackendTests process
+    // (a developer's run beside ctest) truncate the PEMs mid-test.
+    static int invocation = 0;
+    const std::string tag =
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
+      std::to_string(invocation++);
+    kf.privatePath = (dir / ("alipay_test_" + tag + "_private.pem")).string();
+    kf.publicPath = (dir / ("alipay_test_" + tag + "_public.pem")).string();
 
     {
         BIO *bio = BIO_new(BIO_s_mem());
@@ -81,10 +88,12 @@ std::string rsaSignBase64(EVP_PKEY *pkey, const std::string &data)
     return out;
 }
 
-// Build the Alipay string-to-sign exactly as the open platform defines it:
-// every parameter except sign and sign_type, dropping entries whose value is
-// empty, sorted by key in ASCII order, joined as key=value with '&'.
-std::string alipaySignString(const Json::Value &params)
+// Build the Alipay string-to-sign as the open platform defines it: every
+// parameter except sign and sign_type, sorted by key in ASCII order, joined as
+// key=value with '&'. `dropEmptyValues` selects between the official rule
+// (empty-valued parameters excluded) and the rule this verifier used to
+// implement (they were included), so a test can pin which side is accepted.
+std::string alipaySignString(const Json::Value &params, bool dropEmptyValues)
 {
     std::vector<std::string> keys;
     for (const auto &key : params.getMemberNames())
@@ -99,7 +108,7 @@ std::string alipaySignString(const Json::Value &params)
     for (const auto &key : keys)
     {
         const std::string value = params[key].asString();
-        if (value.empty())
+        if (dropEmptyValues && value.empty())
         {
             continue;
         }
@@ -140,10 +149,20 @@ DROGON_TEST(AlipayVerifyCallback_EmptyParamExcluded)
     params["refund_amount"] = "";  // empty: must be skipped by the verifier
     params["gmt_refund"] = "";     // empty: must be skipped by the verifier
 
-    const std::string signature = rsaSignBase64(kf.pkey, alipaySignString(params));
+    const std::string signature =
+      rsaSignBase64(kf.pkey, alipaySignString(params, /*dropEmptyValues=*/true));
     params["sign"] = signature;
 
     CHECK(client.verifyCallback(params, signature) == true);
+
+    // Discriminating control: a signature over the pre-fix string-to-sign (which
+    // folded the empty-valued parameters in) covers a different byte sequence, so
+    // the verifier must reject it. The old implementation accepted exactly this
+    // one, which is what makes the pair pin the rule rather than just "some
+    // signature works".
+    const std::string legacySignature =
+      rsaSignBase64(kf.pkey, alipaySignString(params, /*dropEmptyValues=*/false));
+    CHECK(client.verifyCallback(params, legacySignature) == false);
 
     // Sanity: a tampered signature must still be rejected.
     CHECK(client.verifyCallback(params, "AAAAAAAAAAAAAAAA") == false);
