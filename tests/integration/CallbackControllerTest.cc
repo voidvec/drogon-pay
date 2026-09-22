@@ -13,7 +13,6 @@
 #include <chrono>
 #include <future>
 
-#include "drogon_pay/PayPlugin.h"
 #include "handlers/CallbackHandlers.h"
 
 namespace
@@ -25,18 +24,6 @@ struct CtrlResult
     Json::Value body;
     bool called{false};
 };
-
-// The Alipay controller rejects a notification for one of two reasons before
-// it touches an order: no client to verify with, or a signature that does not
-// check out. Which one applies depends on whether the loaded config registered
-// the channel, so a test that wants to pin the reject *branch* has to ask the
-// same question the handler asks.
-std::string expectedAlipayReject()
-{
-    auto plugin = drogon::app().getPlugin<PayPlugin>();
-    return (plugin && plugin->alipayClient()) ? "signature verification failed"
-                                              : "Alipay client not configured";
-}
 
 }  // namespace
 
@@ -147,6 +134,13 @@ DROGON_TEST(CallbackController_Wechat_UnknownEventType_Rejected)
 // =============================================================================
 // P0-1: Alipay callback controller — an unauthenticated notification is
 // rejected before it can advance any order state.
+//
+// Both cases assert the "signature verification failed" reason literally: the
+// shared config registers the Alipay channel (config.json channels.alipay
+// enabled, and the client tolerates missing key files), so the only reject
+// branch a forged notification can reach is verification. The assertion fails
+// loudly if that assumption ever stops holding, instead of quietly accepting
+// the "client not configured" reject.
 // =============================================================================
 
 DROGON_TEST(CallbackController_Alipay_ForgedSignature_Rejected)
@@ -184,7 +178,7 @@ DROGON_TEST(CallbackController_Alipay_ForgedSignature_Rejected)
 
     // P0-1: the notification is acknowledged as FAIL, never SUCCESS.
     CHECK(r.body["code"].asString() == "FAIL");
-    CHECK(r.body["message"].asString() == expectedAlipayReject());
+    CHECK(r.body["message"].asString() == "signature verification failed");
 }
 
 DROGON_TEST(CallbackController_Alipay_MissingSignature_Rejected)
@@ -218,5 +212,5 @@ DROGON_TEST(CallbackController_Alipay_MissingSignature_Rejected)
     CHECK(r.called);
 
     CHECK(r.body["code"].asString() == "FAIL");
-    CHECK(r.body["message"].asString() == expectedAlipayReject());
+    CHECK(r.body["message"].asString() == "signature verification failed");
 }

@@ -17,6 +17,7 @@ set(TEST_SRC
     unit/AlipayVerifyCallbackTest.cc
     unit/StartupValidatorTest.cc
     # Integration tests: exercise the running Drogon app, DB or HTTP surface.
+    integration/AlipayAmountGateTest.cc      # P0: Alipay reconcile amount consistency gate (+ positive control)
     integration/CallbackControllerTest.cc    # P0: controller-level callback validation (C1-2, C2-1)
     integration/CreatePaymentIntegrationTest.cc
     integration/HealthProbeTest.cc
