@@ -416,6 +416,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_id` as a `LOG_WARN` at startup; it stays a warning because a partial
   rollout (one channel configured, another not) has to keep booting.
 
+- **The outbound answer-verification gate sat after the two answers an
+  attacker finds easiest to forge** (audit round 19). `sendWechatRequest`
+  verified only `2xx && status != 204`, and answered `204 No Content` as
+  success *before* that check. Per the official response-verification guide
+  the exemption list is the file/image download interfaces only: a 204 is
+  signed over an empty body (`应答时间戳\n应答随机串\n\n`), and error answers
+  are standard responses like any other. So an unsigned 204 — the cheapest
+  forged answer there is, no body to construct — read as "call succeeded" to
+  every consumer that keys success on an empty error, and an unsigned 4xx
+  envelope fed `RefundService`'s terminal-failure decision. Verification now
+  runs first for every answer that has a verifier, leaving the certificate
+  download bootstrap (whose answer is self-authenticating via its GCM tag) as
+  the only skip. The same round fixed what that made reachable:
+  `refundCertainlyDidNotHappen` infers "the request never left" from the shape
+  of the error string, and the verification-failure text added in round 16 is
+  not `HTTP …`-prefixed, so a refund WeChat may have *accepted* was booked
+  `REFUND_FAIL` — inviting the retry-under-a-new-`out_refund_no` that becomes
+  a second refund. An unreadable answer is now an unknown outcome
+  (`REFUNDING`, warn, reconciliation decides), while a genuine pre-send fault
+  still books terminal FAIL. Not changed, and stated as a limitation: the
+  signed message binds neither the request path nor our own nonce, so the
+  remaining replay control is matching the answer's `out_trade_no` /
+  `out_refund_no` against what was asked, which no read site does today
+  (§二十五 of the audit doc). A clock-skew window on answers is deliberately
+  not added — the guide requires none, matching the inbound conclusion of
+  round 15.
+
 - **A tag no pipeline had ever run could deploy production.** `deploy.yml`
   triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
   and `deploy-production` legs depended only on `preflight` — which checks whether
