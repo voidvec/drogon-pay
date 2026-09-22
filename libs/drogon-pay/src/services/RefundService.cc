@@ -45,10 +45,16 @@ void reportMapperFailure(
 // out_refund_no, which WeChat would honour as a second refund.
 //   - a local channel fault (missing config, client not ready) never sent a
 //     request, so nothing happened;
-//   - `HTTP 4xx: <code> <message>` is WeChat refusing the refund;
+//   - `HTTP 4xx: <code> <message>` is WeChat refusing the refund -- safe to
+//     read only because the channel verifies the answer signature over an
+//     error body as well as over a success one;
 //   - a 5xx, a 4xx with no error envelope (an intermediary answered for us),
-//     a timeout, a transport failure or an unparseable body says nothing
-//     either way -- reconciliation decides those from the channel's answer.
+//     a timeout, a transport failure, an unparseable body or an answer that
+//     failed to verify says nothing either way -- reconciliation decides those
+//     from the channel's answer. An unverifiable answer is NOT a local fault:
+//     the request left and something answered, so booking terminal FAIL here
+//     would invite a retry under a fresh out_refund_no that WeChat honours as
+//     a second refund.
 bool refundCertainlyDidNotHappen(const std::string &error)
 {
     const bool httpRefusal =
@@ -59,7 +65,8 @@ bool refundCertainlyDidNotHappen(const std::string &error)
     }
     const bool wentThroughHttp = error.rfind("HTTP ", 0) == 0 ||
                                  error.rfind("http request", 0) == 0 ||
-                                 error == "invalid json response";
+                                 error == "invalid json response" ||
+                                 error.rfind("response signature verification failed", 0) == 0;
     return !wentThroughHttp;
 }
 

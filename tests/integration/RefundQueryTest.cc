@@ -71,7 +71,11 @@ bool pingRedis(const drogon::nosql::RedisClientPtr &client)
 class RefundStubChannel : public drogon_pay::PaymentChannel
 {
   public:
-    explicit RefundStubChannel(Json::Value answer) : answer_(std::move(answer))
+    // `error` stays empty for every case that only needs an answer. The one
+    // case that passes it drives the "the channel answered, but we may not read
+    // the answer" branch, which books a different refund state than a refusal.
+    explicit RefundStubChannel(Json::Value answer, std::string error = std::string())
+        : answer_(std::move(answer)), error_(std::move(error))
     {
     }
 
@@ -103,7 +107,7 @@ class RefundStubChannel : public drogon_pay::PaymentChannel
 
     void refund(const Json::Value &, JsonCallback &&callback) override
     {
-        callback(answer_, std::string());
+        callback(answer_, error_);
     }
 
     void queryRefund(const std::string &, JsonCallback &&callback) override
@@ -122,6 +126,7 @@ class RefundStubChannel : public drogon_pay::PaymentChannel
 
   private:
     Json::Value answer_;
+    std::string error_;
 };
 
 // nullptr instead of a client that retries: this machine has no Postgres, and a
@@ -274,14 +279,18 @@ struct RefundSettlement
 RefundSettlement settleRefund(
   const std::shared_ptr<drogon::orm::DbClient> &client,
   const CoverageFixture &fixture,
-  const std::string &refundAmount
+  const std::string &refundAmount,
+  const std::string &channelError = std::string()
 )
 {
     Json::Value answer;
     answer["status"] = "SUCCESS";
     answer["refund_id"] = "rf_" + drogon::utils::getUuid();
 
-    auto stub = std::make_shared<RefundStubChannel>(answer);
+    // With a channel error the service never reads `answer`, so the same stub
+    // serves both halves: an empty error is the success shape, a non-empty one
+    // is whatever refusal or fault the case is about.
+    auto stub = std::make_shared<RefundStubChannel>(answer, channelError);
     PayPlugin plugin;
     plugin.setTestChannels({{"wechat", stub}}, client);
 
@@ -3900,6 +3909,54 @@ DROGON_TEST(PayPlugin_Refund_CumulativeRefundsSettleOrder)
     REQUIRE(!settled.timedOut);
     CHECK(settled.responseStatus == "REFUND_SUCCESS");
     CHECK(readOrderStatus(client, fixture.orderNo) == "REFUNDED");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// An answer we are not allowed to read is not the same event as an answer that
+// says "no". Round 16 put signature verification on the outbound answers, and
+// round 19 made every answer (204 and error envelopes included) go through it,
+// which means `response signature verification failed: ...` became an error the
+// refund path can receive *after* the request was sent. `RefundService`'s
+// classifier decides terminal FAIL versus "still unknown" from the shape of that
+// string, and terminal FAIL is what double-refunds: the caller is handed a
+// dead outcome, retries under a fresh out_refund_no, and WeChat honours a
+// refund it had already accepted. The positive control for the other half is
+// `PayPlugin_Refund_WechatErrorPersistsPayload`, where nothing was ever sent
+// ("wechat pay config missing") and REFUND_FAIL is the honest bookkeeping.
+DROGON_TEST(PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    const auto fixture = seedRefundCoverageOrder(client, "9.01", "");
+    const auto settled = settleRefund(
+      client,
+      fixture,
+      "9.01",
+      "response signature verification failed: "
+      "missing Wechatpay-Timestamp/Nonce/Signature answer headers"
+    );
+    REQUIRE(!settled.timedOut);
+    CHECK(settled.responseStatus == "REFUNDING");
+
+    // Nothing terminal may be written for this attempt either: the row has to
+    // stay open so the reconciliation sweep can settle it from the channel's
+    // own answer later.
+    const auto rows = client->execSqlSync(
+      "SELECT status, response_payload FROM pay_refund "
+      "WHERE order_no = $1 AND payment_no = $2",
+      fixture.orderNo,
+      fixture.paymentNo
+    );
+    REQUIRE(rows.size() == 1);
+    const std::string bookedStatus = rows.front()["status"].as<std::string>();
+    CHECK(bookedStatus != "REFUND_FAIL");
+    CHECK(bookedStatus == "REFUND_INIT");
 
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
