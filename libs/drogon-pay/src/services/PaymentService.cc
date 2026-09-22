@@ -2343,27 +2343,23 @@ void PaymentService::syncOrderStatusFromAlipay(
                                       // Amount consistency gate: never credit a PAID order
                                       // whose stored amount differs from what the callback
                                       // says was actually paid (Alipay notification rule).
-                                      if (orderStatus == "PAID")
+                                      if (
+                                        orderStatus == "PAID" &&
+                                        !pay::utils::amountEqualsFen(orderAmount, notifiedFen)
+                                      )
                                       {
-                                          int64_t orderFen = 0;
-                                          if (
-                                            notifiedFen < 0 ||
-                                            !pay::utils::parseAmountToFen(orderAmount, orderFen) ||
-                                            orderFen != notifiedFen
-                                          )
+                                          int64_t orderFen = -1;
+                                          pay::utils::parseAmountToFen(orderAmount, orderFen);
+                                          LOG_ERROR << "Alipay reconcile REJECTED: amount mismatch"
+                                                    << " for order " << orderNo
+                                                    << " (notified fen=" << notifiedFen
+                                                    << ", order fen=" << orderFen << ")";
+                                          transPtr->rollback();
+                                          if (callback)
                                           {
-                                              LOG_ERROR << "Alipay reconcile REJECTED: amount "
-                                                           "mismatch for order "
-                                                        << orderNo
-                                                        << " (notified fen=" << notifiedFen
-                                                        << ", order fen=" << orderFen << ")";
-                                              transPtr->rollback();
-                                              if (callback)
-                                              {
-                                                  callback("");
-                                              }
-                                              return;
+                                              callback("");
                                           }
+                                          return;
                                       }
                                       order.setStatus(orderStatus);
                                       try
@@ -2535,27 +2531,26 @@ void PaymentService::syncOrderStatusFromAlipay(
                                     const auto userId = order.getValueOfUserId();
                                     const auto orderAmount = order.getValueOfAmount();
                                     const auto orderNo = order.getValueOfOrderNo();
-                                    // Amount consistency gate (see Alipay notification rule).
-                                    if (orderStatus == "PAID")
+                                    // Amount consistency gate: never credit a PAID order
+                                    // whose stored amount differs from what the callback
+                                    // says was actually paid (Alipay notification rule).
+                                    if (
+                                      orderStatus == "PAID" &&
+                                      !pay::utils::amountEqualsFen(orderAmount, notifiedFen)
+                                    )
                                     {
-                                        int64_t orderFen = 0;
-                                        if (
-                                          notifiedFen < 0 ||
-                                          !pay::utils::parseAmountToFen(orderAmount, orderFen) ||
-                                          orderFen != notifiedFen
-                                        )
+                                        int64_t orderFen = -1;
+                                        pay::utils::parseAmountToFen(orderAmount, orderFen);
+                                        LOG_ERROR << "Alipay reconcile REJECTED: amount mismatch"
+                                                  << " for order " << orderNo
+                                                  << " (notified fen=" << notifiedFen
+                                                  << ", order fen=" << orderFen << ")";
+                                        transPtr->rollback();
+                                        if (callback)
                                         {
-                                            LOG_ERROR << "Alipay reconcile REJECTED: amount "
-                                                         "mismatch for order "
-                                                      << orderNo << " (notified fen=" << notifiedFen
-                                                      << ", order fen=" << orderFen << ")";
-                                            transPtr->rollback();
-                                            if (callback)
-                                            {
-                                                callback("");
-                                            }
-                                            return;
+                                            callback("");
                                         }
+                                        return;
                                     }
                                     order.setStatus(orderStatus);
                                     try
