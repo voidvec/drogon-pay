@@ -1,0 +1,24 @@
+# Findings that are known false positives, ignored by exact fingerprint.
+#
+# Prefer this over an [allowlist] regex in .gitleaks.toml: an allowlist entry
+# widens the ruleset for every future scan, while a fingerprint retires one
+# already-published finding. Note that gitleaks' allowlist regexes are matched
+# against the *secret* by default (regexTarget = "secret"), not the line, so an
+# entry shaped like the surrounding code will silently match nothing.
+#
+# Fingerprints embed the commit SHA, so these stop applying if the commits below
+# are rebased or squashed away. That is the intended failure mode: re-decide
+# rather than carry a stale suppression forward.
+
+# The AES-256-GCM fixture key in WechatCallbackIntegrationTest.cc. Every
+# encrypted case there encrypts with it and then feeds the ciphertext straight
+# back to the decrypting path, so the value only has to be self-consistent -- it
+# is not a credential. The tip now computes it (see testApiV3Key()) instead of
+# spelling it out; these six suppress the commits that introduced the literal,
+# which stay in the PR's scanned history.
+6b81c727e6ef1696107d1355f1db8646ce49a85b:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:5086
+c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:3312
+c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6638
+c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6897
+ec17dc48fc3e7cecf90e9621ef9da7df1b30bb11:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:1129
+ec17dc48fc3e7cecf90e9621ef9da7df1b30bb11:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:944
