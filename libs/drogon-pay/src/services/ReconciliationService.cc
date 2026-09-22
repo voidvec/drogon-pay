@@ -185,7 +185,13 @@ void ReconciliationService::syncPendingWeChatOrders(const std::shared_ptr<int> &
              orm::Criteria(PayOrderModel::Cols::_channel, orm::CompareOperator::EQ, "wechat")) &&
               (orm::Criteria(PayOrderModel::Cols::_status, orm::CompareOperator::EQ, "PAYING") ||
                orm::Criteria(PayOrderModel::Cols::_created_at, orm::CompareOperator::LT, cutoff)),
-            [this, wechatChannel](const std::vector<PayOrderModel> &rows) {
+            // The sweep outlives this call: the channel answers on their own
+            // loop, and a plugin teardown (or a test that let the service go
+            // out of scope) destroys the service while those answers are still
+            // pending. So the callbacks hold what they use by value and never
+            // reach back through `this`.
+            [paymentService = paymentService_,
+             wechatChannel](const std::vector<PayOrderModel> &rows) {
                 for (const auto &row : rows)
                 {
                     const std::string orderNo = row.getValueOfOrderNo();
@@ -195,7 +201,7 @@ void ReconciliationService::syncPendingWeChatOrders(const std::shared_ptr<int> &
                     const auto expireAt = row.getExpireAt();
                     wechatChannel->queryPayment(
                       orderNo,
-                      [this,
+                      [paymentService,
                        wechatChannel,
                        orderNo,
                        expireAt](const Json::Value &result, const std::string &error) {
@@ -205,7 +211,7 @@ void ReconciliationService::syncPendingWeChatOrders(const std::shared_ptr<int> &
                                        << error;
                               return;
                           }
-                          paymentService_->syncOrderStatusFromWechat(
+                          paymentService->syncOrderStatusFromWechat(
                             orderNo, result, [](const std::string &) {}
                           );
                           // An unpaid trade whose deadline has passed is still
@@ -291,13 +297,15 @@ void ReconciliationService::syncPendingAlipayOrders(const std::shared_ptr<int> &
              orm::Criteria(PayOrderModel::Cols::_channel, orm::CompareOperator::EQ, "alipay")) &&
               (orm::Criteria(PayOrderModel::Cols::_status, orm::CompareOperator::EQ, "PAYING") ||
                orm::Criteria(PayOrderModel::Cols::_created_at, orm::CompareOperator::LT, cutoff)),
-            [this, alipayChannel](const std::vector<PayOrderModel> &rows) {
+            [paymentService = paymentService_,
+             alipayChannel](const std::vector<PayOrderModel> &rows) {
                 for (const auto &row : rows)
                 {
                     const std::string orderNo = row.getValueOfOrderNo();
                     alipayChannel->queryPayment(
                       orderNo,
-                      [this, orderNo](const Json::Value &result, const std::string &error) {
+                      [paymentService,
+                       orderNo](const Json::Value &result, const std::string &error) {
                           if (!error.empty())
                           {
                               LOG_WARN << "Alipay query failed for order " << orderNo << ": "
@@ -305,7 +313,7 @@ void ReconciliationService::syncPendingAlipayOrders(const std::shared_ptr<int> &
                               return;
                           }
                           // Sync order status from Alipay response
-                          paymentService_->syncOrderStatusFromAlipay(
+                          paymentService->syncOrderStatusFromAlipay(
                             orderNo, result, [orderNo](const std::string &status) {
                                 if (!status.empty())
                                 {
@@ -361,20 +369,22 @@ void ReconciliationService::syncPendingRefunds(const std::shared_ptr<int> &faile
               orm::CompareOperator::In,
               std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
             ),
-            [this, wechatChannel](const std::vector<PayRefundModel> &rows) {
+            [refundService = refundService_,
+             wechatChannel](const std::vector<PayRefundModel> &rows) {
                 for (const auto &row : rows)
                 {
                     const std::string refundNo = row.getValueOfRefundNo();
                     wechatChannel->queryRefund(
                       refundNo,
-                      [this, refundNo](const Json::Value &result, const std::string &error) {
+                      [refundService,
+                       refundNo](const Json::Value &result, const std::string &error) {
                           if (!error.empty())
                           {
                               LOG_WARN << "Wechat refund query failed for " << refundNo << ": "
                                        << error;
                               return;
                           }
-                          refundService_->syncRefundStatusFromWechat(
+                          refundService->syncRefundStatusFromWechat(
                             refundNo, result, [](const std::string &) {}
                           );
                       }

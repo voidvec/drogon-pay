@@ -7,6 +7,7 @@
 #include "services/PaymentService.h"
 #include "services/RefundService.h"
 #include "services/ReconciliationService.h"
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -24,9 +25,12 @@ namespace
 using pay::test_util::buildPgConnInfo;
 using pay::test_util::loadConfig;
 
-// Answers a channel query with a chosen body and records every SPI close the
-// reconciliation sweep issues, so the assertions read the sweep's gate
-// directly: unpaid on the channel plus past the row's own deadline.
+// Answers a channel query with a chosen body and records which orders the
+// reconciliation sweep asked about and which it asked to close, so the
+// assertions read the sweep's gate directly: unpaid on the channel plus past
+// the row's own deadline. The sweep reads every unpaid wechat order in the
+// database, so both records are per order -- a scenario judges only its own
+// row, never whoever else was left in the table.
 class CloseRecordingChannel : public drogon_pay::PaymentChannel
 {
   public:
@@ -34,8 +38,8 @@ class CloseRecordingChannel : public drogon_pay::PaymentChannel
     {
         std::mutex mutex;
         std::condition_variable cv;
+        std::vector<std::string> queried;
         std::vector<std::string> closed;
-        bool decided{false};
     };
 
     CloseRecordingChannel(Json::Value answer, std::shared_ptr<State> state)
@@ -64,17 +68,17 @@ class CloseRecordingChannel : public drogon_pay::PaymentChannel
         callback(Json::Value(Json::objectValue), "unused by this case");
     }
 
-    void queryPayment(const std::string &, JsonCallback &&callback) override
+    void queryPayment(const std::string &orderNo, JsonCallback &&callback) override
     {
-        // Marking the decision point before answering: the sweep decides from
-        // inside this callback, so a scenario that must NOT close is proven by
-        // "the sweep looked and no close followed".
+        // Answer first, record second: the sweep decides inside this callback,
+        // so once an order shows up in `queried` its close decision is final
+        // and a scenario can read `closed` for that one order alone.
+        callback(answer_, std::string());
         {
             const std::lock_guard<std::mutex> lock(state_->mutex);
-            state_->decided = true;
+            state_->queried.push_back(orderNo);
         }
         state_->cv.notify_all();
-        callback(answer_, std::string());
     }
 
     void closeOrder(const std::string &orderNo, JsonCallback &&callback) override
@@ -82,7 +86,6 @@ class CloseRecordingChannel : public drogon_pay::PaymentChannel
         {
             const std::lock_guard<std::mutex> lock(state_->mutex);
             state_->closed.push_back(orderNo);
-            state_->decided = true;
         }
         state_->cv.notify_all();
         callback(Json::Value(Json::objectValue), std::string());
@@ -110,22 +113,16 @@ class CloseRecordingChannel : public drogon_pay::PaymentChannel
     // The reconcile callback fires at dispatch time, not completion, so each
     // scenario waits on the downstream event that actually matters: either a
     // close was recorded, or the sweep looked at the order and stopped there.
-    bool waitFor(std::function<bool()> predicate, int seconds)
+    // The predicate reads the state through the reference it is handed because
+    // it runs while waitFor holds the mutex; taking the same non-recursive lock
+    // again to read those fields is a self-deadlock, and MSVC answers it by
+    // throwing out of the wait instead of blocking.
+    bool waitFor(const std::function<bool(const State &)> &predicate, int seconds)
     {
         std::unique_lock<std::mutex> lock(state_->mutex);
-        return state_->cv.wait_for(lock, std::chrono::seconds(seconds), predicate);
-    }
-
-    size_t closedCount()
-    {
-        const std::lock_guard<std::mutex> lock(state_->mutex);
-        return state_->closed.size();
-    }
-
-    bool isDecided()
-    {
-        const std::lock_guard<std::mutex> lock(state_->mutex);
-        return state_->decided;
+        return state_->cv.wait_for(lock, std::chrono::seconds(seconds), [this, &predicate] {
+            return predicate(*state_);
+        });
     }
 
     std::vector<std::string> closedOrders()
@@ -141,15 +138,25 @@ class CloseRecordingChannel : public drogon_pay::PaymentChannel
 
 std::shared_ptr<drogon::orm::DbClient> makeCloseTestClient()
 {
-    Json::Value root;
-    if (
-      !loadConfig(root) || !root.isMember("db_clients") || !root["db_clients"].isArray() ||
-      root["db_clients"].empty()
-    )
-    {
-        return nullptr;
-    }
-    return drogon::orm::DbClient::newPgClient(buildPgConnInfo(root["db_clients"][0]), 1);
+    // The sweep is background work: reconcile() reports dispatch, not
+    // completion, so queries and bookings it started are still running when the
+    // helper that called it returns. Drogon destroys a DbClient on whichever
+    // thread drops the last reference, and that destructor joins the client's
+    // own loop threads -- a release from one of those threads joins itself and
+    // aborts the process. So this file holds one client for the whole run and
+    // lets it die on the main thread at exit.
+    static const std::shared_ptr<drogon::orm::DbClient> client = [] {
+        Json::Value root;
+        if (
+          !loadConfig(root) || !root.isMember("db_clients") || !root["db_clients"].isArray() ||
+          root["db_clients"].empty()
+        )
+        {
+            return std::shared_ptr<drogon::orm::DbClient>{};
+        }
+        return drogon::orm::DbClient::newPgClient(buildPgConnInfo(root["db_clients"][0]), 1);
+    }();
+    return client;
 }
 
 void ensureCloseSweepTables(const std::shared_ptr<drogon::orm::DbClient> &client)
@@ -221,23 +228,29 @@ void ensureCloseSweepTables(const std::shared_ptr<drogon::orm::DbClient> &client
 struct SweepOutcome
 {
     bool timedOut{false};
-    std::vector<std::string> closedOrders;
+    bool examinedSelf{false};
+    bool closedSelf{false};
     std::string orderStatus;
     std::string paymentStatus;
 };
 
+bool namesOrder(const std::vector<std::string> &orders, const std::string &orderNo)
+{
+    return std::find(orders.begin(), orders.end(), orderNo) != orders.end();
+}
+
 // Books one wechat order (with one open payment attempt) whose expire_at is
 // `expireOffsetSeconds` from now -- nullopt leaves the column NULL -- lets the
 // reconcile sweep look at it through a stub whose query answers `tradeState`,
-// and reports which orders the sweep asked to close plus where the rows
-// landed. `wantedCloses` says how many closes this scenario must see before
-// the decision is final; the rows are then polled until they reach
-// `wantedOrderStatus` because the sync that books them is an async chain.
+// and reports what the sweep decided about that one order plus where its rows
+// landed. The sweep reads every unpaid wechat order in the database up to its
+// batch limit, newest first, so this row is booked as the newest one and the
+// wait is for the sweep's answer about it -- not for a count of closes that
+// whatever else is in the table would also feed.
 SweepOutcome runCloseSweep(
   const std::shared_ptr<drogon::orm::DbClient> &client,
   const std::string &tradeState,
   const std::optional<int64_t> &expireOffsetSeconds,
-  size_t wantedCloses,
   const std::string &wantedOrderStatus
 )
 {
@@ -256,7 +269,7 @@ SweepOutcome runCloseSweep(
       "INSERT INTO pay_order (order_no, user_id, amount, currency, status, channel, title, "
       "expire_at, created_at, updated_at) VALUES ($1, $2, $3, 'CNY', 'PAYING', 'wechat', "
       "'Close Sweep', " +
-        expireExpr + ", NOW() - INTERVAL '600 seconds', NOW() - INTERVAL '600 seconds')",
+        expireExpr + ", NOW() - INTERVAL '600 seconds', NOW())",
       orderNo,
       int64_t{31001},
       amount
@@ -290,20 +303,22 @@ SweepOutcome runCloseSweep(
     reconciliation.reconcile([&dispatched](int, int) { dispatched.set_value(); });
 
     SweepOutcome outcome;
-    const bool decisionSeen = stub->waitFor(
-      [stub, wantedCloses] {
-          return wantedCloses > 0 ? stub->closedCount() >= wantedCloses : stub->isDecided();
+    outcome.examinedSelf = stub->waitFor(
+      [&orderNo](const CloseRecordingChannel::State &state) {
+          return namesOrder(state.queried, orderNo);
       },
       10
     );
     if (
-      !decisionSeen ||
+      !outcome.examinedSelf ||
       dispatched.get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready
     )
     {
         outcome.timedOut = true;
     }
-    outcome.closedOrders = stub->closedOrders();
+    // Read once the sweep has answered about this order: it decides inside that
+    // answer, so the close it provoked is already on the list.
+    outcome.closedSelf = namesOrder(stub->closedOrders(), orderNo);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline)
@@ -342,9 +357,10 @@ DROGON_TEST(PayPlugin_Reconcile_ExpiredUnpaidWechatOrderIsClosedOnChannel)
     REQUIRE(client != nullptr);
     ensureCloseSweepTables(client);
 
-    const auto closed = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(-3600), 1, "PAYING");
+    const auto closed = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(-3600), "PAYING");
     CHECK(!closed.timedOut);
-    CHECK(closed.closedOrders.size() == 1);
+    CHECK(closed.examinedSelf);
+    CHECK(closed.closedSelf);
     // The close ends the trade on the channel; the local rows converge to
     // CLOSED on the next sweep, so this one must leave them untouched.
     CHECK(closed.orderStatus == "PAYING");
@@ -353,18 +369,21 @@ DROGON_TEST(PayPlugin_Reconcile_ExpiredUnpaidWechatOrderIsClosedOnChannel)
     // deadline has not passed, or on an order nobody measured a deadline for,
     // must never reach the close API -- closing early would cut off a payment
     // the merchant is still waiting for.
-    const auto alive = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(3600), 0, "PAYING");
+    const auto alive = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(3600), "PAYING");
     CHECK(!alive.timedOut);
-    CHECK(alive.closedOrders.empty());
+    CHECK(alive.examinedSelf);
+    CHECK(!alive.closedSelf);
 
-    const auto unmeasured = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(), 0, "PAYING");
+    const auto unmeasured = runCloseSweep(client, "NOTPAY", std::optional<int64_t>(), "PAYING");
     CHECK(!unmeasured.timedOut);
-    CHECK(unmeasured.closedOrders.empty());
+    CHECK(unmeasured.examinedSelf);
+    CHECK(!unmeasured.closedSelf);
 
     // And a trade the channel reports as paid is settled, not closed, even
     // after its deadline: the money arrived, so the close door stays shut.
-    const auto paid = runCloseSweep(client, "SUCCESS", std::optional<int64_t>(-3600), 0, "PAID");
+    const auto paid = runCloseSweep(client, "SUCCESS", std::optional<int64_t>(-3600), "PAID");
     CHECK(!paid.timedOut);
-    CHECK(paid.closedOrders.empty());
+    CHECK(paid.examinedSelf);
+    CHECK(!paid.closedSelf);
     CHECK(paid.paymentStatus == "SUCCESS");
 }
