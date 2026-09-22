@@ -23,7 +23,20 @@
 -- Idempotent: CREATE UNIQUE INDEX IF NOT EXISTS. If an existing volume
 -- already carries duplicate PAYMENT rows (it should not -- no such bug has
 -- been observed), the index creation fails the migration loudly, which is the
--- point: fix the data before shipping the guard.
+-- point: fix the data before shipping the transaction aborts, migrate_db.py
+-- records no schema_migrations row, and the next run retries from scratch.
+-- To find out before the run instead of during it, this is the exact condition
+-- the index tests for:
+--
+--   SELECT payment_no, count(*) FROM pay_ledger
+--    WHERE entry_type = 'PAYMENT' AND payment_no IS NOT NULL
+--    GROUP BY payment_no HAVING count(*) > 1;
+--
+-- Note this is a plain CREATE UNIQUE INDEX, not CONCURRENTLY: migrate_db.py
+-- wraps each file in an explicit transaction, and CONCURRENTLY cannot run
+-- inside one. On a live volume the build takes a SHARE lock over pay_ledger,
+-- which blocks the append-only inserts for its duration -- so run the migration
+-- before the rollout that opens the settle doors, not while traffic is on it.
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_ledger_payment_income
     ON pay_ledger(payment_no)

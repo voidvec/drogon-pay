@@ -117,9 +117,9 @@ std::string newReservationToken()
 // Finalize the reservation THIS delivery owns: write the response snapshot and
 // report back whether the ownership guard held. Raw SQL under the documented
 // `UPDATE ... RETURNING` exemption (db-operations): the generated
-// PayIdempotencyModel predates owner_token and models are drogon_ctl-only, so
-// Mapper/Criteria cannot express the owner-scoped WHERE, and RETURNING gives a
-// deterministic match count like the reserve INSERT does.
+// PayIdempotencyModel can express the owner-scoped WHERE through Criteria, but
+// no Mapper form emits RETURNING, and a deterministic match count is exactly
+// what this needs -- same reason the reserve INSERT gives one.
 //
 // Zero matched rows means the reservation was dropped (the read path of a
 // concurrent retry) and re-reserved by a later delivery while this handler
