@@ -1418,16 +1418,78 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
 - 为什么本地绿：断言本身没问题，问题在代码的时序。本地 Release 快，写赶在
   读之前落库；CI 慢（尤其 coverage 的 Debug+gcov）就露出。这是时序缺陷的典型
   形态，不能靠"本地多跑几次"当证据。
-- 修复形状不是新发明：同文件主建单（jsapi/struct）路径自第三轮起就是
-  `bookRefusedAttempt(db, paymentNo, orderNo, errPayload, done)`
-  （`PaymentService.cc:360`）——把应答作为 `done` 续体传进去，写完才答；
-  QR 的成功分支也早就 `promoteQrRows` → `respondQr`（幂等快照写完才答，
-  见 `:1560` 注释）。**QR 的拒绝分支是这个文件里唯一的离群者。**
+- 修复形状不是新发明（**本条归属已更正，初稿说错了**）：初稿写"主建单路径自
+  第三轮起就是 `bookRefusedAttempt(db, paymentNo, orderNo, errPayload, done)`
+  （`PaymentService.cc:360`）"，两处都不准。实测出处：`bookRefusedAttempt`
+  （唯一调用点 `:965`）由**本分支第 12 个提交** `2dafa9c`（"stop the suite from
+  aborting on chains that outlive their caller"）引入，动机是 Drogon `DbClient`
+  自 join 崩溃（0xC0000409），不是第三轮的设计决定。真正更老、更硬的先例是主
+  建单（jsapi/struct）路径的校验拒绝——它们在 `clearReservation` 的回调**里**
+  应答（现 `:570-573`、`:593-597`），`git show 02b43ad:` 该文件即已如此（那版
+  `:356`、`:378`，另有一处按 `result/error` 应答的分支 `:408`），而 `02b43ad`
+  在 `master` 上、**早于本审计分支**（`git merge-base --is-ancestor` 已验）。
+  同一次取证顺带说明另一件事：QR 分支的 fire-and-forget 也自 `02b43ad` 起就在
+  （那版 `:1253` 的 unknown-channel）。所以准确的表述是**本轮恢复的是文件创建
+  时就存在的一条纪律**，而"QR 拒绝分支是唯一离群者"说过头了——同路由另有六处
+  同形站点（见"诚实边界与遗留"），"离群"只对**渠道拒绝分支**成立。
+  `8313743` 的提交说明沿用了旧的错表述；提交已推送，不追溯改写，以本节为准。
   本轮把应答接回这两处写的下游：`failQr`（`:1538`）从 `clearReservation`
   的回调里答；`markQrPaymentFailed`（`:1695`）新增 `afterClose` 续体，用
   `makeOnceCallback` 包住，经写回调或 `catch` 恰好一次触发（写失败的分支也
   必须答，否则请求永久悬置）。
-- 测试零改动：钉的就是这个不变量，改代码即可，不需要动测例。
+- 修复本身零测例改动：`QrPaymentBookingTest.cc:406`（写初稿时还在 `:360`，
+  因下面的支付宝对照而在本轮内后移，见锚点漂移声明）钉的就是这个不变量，改代码
+  即可。评审项（改动是否影响支付宝）另补了两条正向对照，见第四节。
+
+### 四、评审项：本轮改动是否影响支付宝 channel
+这条不是形式检查——本轮改的正是**两渠道共用**的那段代码。`findChannel`
+（`:1515`）按注册名取实现，`offerQrChannel` 里一次 `channelImpl->createQRPayment`
+同时服务微信 native 与支付宝 precreate（`:1178-1180` 注释已言明），而
+`failQr` / `markQrPaymentFailed` 两个被改序的对象就在这条共用路径的下游。所以
+"不影响支付宝"必须证，不能默认。
+
+**影响面界定（逐条对撞 `8313743` 的 hunk）**：`PaymentService.cc` 的改动只覆盖
+`:1531-1856`。支付宝自己的 struct 建单分支（`:776` 载荷、`:950` 渠道名文案、
+`:1027` `alipay_response`）与 `queryOrder` 的 alipay 分支（`:2240`）都在 hunk
+之外；`RefundService.cc` 只删了一个未使用的 `this` 捕获（捕获表改动，见上文二）。
+
+**语义不变的三条论证**：
+1. **响应体不变**。`failQr` 仍先 `response = extra` 再设 `code`/`message`，
+   `alipay_code`/`alipay_sub_code`（`:1800-1804`）原样带上；transport 错误类仍按
+   `400<=code<500` 分派，只是 `ec` 先算好再进回调——同函数同分支，无渠道判断。
+2. **不会悬置请求**。应答挪到了写的下游，前提是那些写的回调**必然**触发：
+   `clearReservation` 自己用 `makeOnceCallback` 包住回调，四条出口全触发（空
+   key `IdempotencyService.cc:348-352`、删除命中 `:369-373`、DB 异常
+   `:374-377`、Mapper 构造异常 `:380-389`）；`markQrPaymentFailed` 三条出口
+   （`updateBy` 成功回调、`DrogonDbException` 回调、`catch`）之外还有
+   `afterClose` 自身是 OnceCallback 兜底。两渠道走的是同一对函数，没有支付宝
+   独有的出口。
+3. **日志契约不变**。`reportFault` 新增 `!detail.empty()` 判空不是顺手改动：
+   成功路径如今也要经过它，若不判空，每笔支付宝"确定未创建"的拒绝都会打一条
+   detail 为空的 `Failed to record the QR payment failure` 假 WARN。
+
+**补的正向对照（此前一条都没有）**：本文件 14 条 QR 用例的 `channel` 全部写死
+`"wechat"`，支付宝分支只靠读代码保证。新增两条——
+`PayPlugin_QrBooking_AlipayBusinessCodeRefusalClosesThePaymentAndAllowsRetry`
+（200 + `code=40004`：`channelResultError` 的 alipay 分支产出 `"Alipay error: …"`，
+`attemptCertainlyNotCreated`（`:330`）认这个前缀为"确定未创建"，于是走 `:1811`
+那条被改序的调用点；断言应答瞬间预留已闭、行已 `FAIL`、`alipay_code` 与
+`alipay_sub_code` 到位、支付宝拿到的是自己名下按元的 `total_amount` 而非微信的
+分制 `amount` 对象，随后同参数重试成功并追加第二行支付）与
+`..._AlipayTransportRefusalsCloseOrStayInFlight`（HTTP 4xx 关单、HTTP 5xx 留飞，
+覆盖 `:1775` 与 `:1789`，并钉住 4xx 那笔**没有**业务码字段可回显）。另加
+`reservationOpen` 探针（`pay_idempotency` 中 `response_snapshot IS NULL` 的行是否
+还在），在应答那一刻直接查——原来那条微信用例也补了同一探针；再加
+`reservationSettled` 作它的正向对照，防止探针因为查了个服务从不写入的 key 而永远返回
+false。
+
+**这些断言为什么能红（敏感性证据）**：修复前 CI 腿的原文可引——run
+`35717078661` 的 Windows 腿在 `QrPaymentBookingTest.cc:382` 报
+`"INIT" == "FAIL"`、`:383` 报 `find("HTTP 403")` 落空，正是支付宝用例 A 所断言的
+同一对性质（行已闭 + 应答载荷），经由同一个 `markQrPaymentFailed`，只是入口从
+transport 分支换成业务码分支。**诚实边界**：本机想做更硬的反向实验（把
+`PaymentService.cc` 临时回退到 `8313743~1` 重跑）被权限分类器拦下、未执行，因此
+支付宝两例的"能红"是从共享代码 + 微信腿的 CI 原文推得，不是本机独立复现。
 
 ### 锚点漂移声明（本轮如实标注）
 本轮 `PaymentService.cc` 在 1531 之后净增 26 行，因此 §十~§二十二 里凡是
@@ -1438,6 +1500,11 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
 `:1049→:1051`、`:1131→:1133`；`PaymentService.cc:2357→:2383`、
 `RefundService.cc:1471→:1478`（`ReconciliationService.cc:227` 未受影响）。
 历史节锚点按"各轮当时实测"理解，需要精确位置时以内容 grep 为准。
+第四节补完支付宝对照后，`QrPaymentBookingTest.cc` 又在本轮内整体后移一次：钉住
+本轮修复的那条用例 `:360→:406`，它断言行已闭的那条断言 `:385→:429`；夹具
+`reservationOpen` 现 `:296`、`reservationSettled` 现 `:312`，两条新用例现
+`:457`、`:527`。上文引用的 CI 原文 `:382/:383` 是**修复前那份文件**的行号，
+保持原样不换算。
 
 ### 验证记录
 - `/WX` + `-DDROGON_PAY_WERROR=ON` 全量重建绿（含 `[[maybe_unused]]`、删 `this`、
@@ -1447,6 +1514,12 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
   触发，行的可见状态在因果上先于响应，不再依赖快慢。最终裁决仍待 CI。
 - 仓库 `clang_format.py --check`：本轮三个文件均 format-clean（本地唯一红是
   gitignore 掉的 `libs/drogon-pay/src/models_backup/`，CI 走 git 索引看不见）。
+- 第四节落地后再测一次：`/W4 /WX` 增量重建绿，套件 **222 例 / 2042 断言**全绿，
+  本机连跑 8 次 `PASS=8 FAIL=0`（新增两例与探针没有引入抖动）；
+  `clang_format.py --fix` 报 0 drift；`check_docs_drift.py` 七规则绿。
+  本机 `C:\Program Files\LLVM\bin` 无 `clang-tidy.exe`，故 `clang_tidy_gate.py`
+  跑不了，tidy 门仍只有 CI 裁决——新增代码是测试夹具与两条用例，风格照抄同文件
+  既有用例，风险记在此处而非当作已通过。
 
 ### 诚实边界与遗留
 - 时序类缺陷的守卫仍是"测例 + CI"，没有静态化。若要更硬的证据，需要把

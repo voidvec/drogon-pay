@@ -203,6 +203,17 @@ Json::Value qrRequest(const std::string &orderNo, const std::string &amount)
     return request;
 }
 
+// The Alipay spelling of the same booking. The channel name is the only thing
+// that changes which payload the service builds and which success test it
+// applies, so the cases that use it exercise the shared path from the other
+// channel's side.
+Json::Value alipayQrRequest(const std::string &orderNo, const std::string &amount)
+{
+    Json::Value request = qrRequest(orderNo, amount);
+    request["channel"] = "alipay";
+    return request;
+}
+
 struct QrAnswer
 {
     Json::Value result;
@@ -276,6 +287,38 @@ bool anyPaymentHasStatus(
         }
     }
     return false;
+}
+
+// Is a reservation still open (booked, no snapshot yet) for this key at the
+// moment the caller was answered? This is the property the answer-after-the-writes
+// ordering exists for: a retry that lands right on the answer must not be told
+// another attempt is in progress for an attempt that already failed.
+bool reservationOpen(
+  const std::shared_ptr<drogon::orm::DbClient> &client,
+  const std::string &idempotencyKey
+)
+{
+    const auto rows = client->execSqlSync(
+      "SELECT 1 FROM pay_idempotency WHERE idempotency_key = $1 AND response_snapshot IS NULL",
+      idempotencyKey
+    );
+    return !rows.empty();
+}
+
+// The other side of that probe, so a case cannot pass on an empty result set for
+// the wrong reason: a key the service never books looks exactly like a reservation
+// that was cleanly released. This says the row *is* visible under the name the
+// case checked, and that the snapshot column is what distinguishes the two.
+bool reservationSettled(
+  const std::shared_ptr<drogon::orm::DbClient> &client,
+  const std::string &idempotencyKey
+)
+{
+    const auto rows = client->execSqlSync(
+      "SELECT 1 FROM pay_idempotency WHERE idempotency_key = $1 AND response_snapshot IS NOT NULL",
+      idempotencyKey
+    );
+    return !rows.empty();
 }
 
 // Stands a booking up directly so a case can start from a state the service
@@ -379,6 +422,7 @@ DROGON_TEST(PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry)
     const auto refused = offerQrPayment(plugin.paymentService(), qrRequest(orderNo, "12.34"), stub);
     CHECK(refused.error);
     CHECK(refused.result.get("code", 0).asInt() == 500);
+    CHECK(!reservationOpen(client, "QR_" + orderNo + "_wechat"));
     CHECK(orderStatusOf(client, orderNo) == "CREATED");
     const auto afterRefusal = paymentsOf(client, orderNo);
     REQUIRE(afterRefusal.size() == 1);
@@ -401,6 +445,121 @@ DROGON_TEST(PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry)
     REQUIRE(afterRetry.size() == 2);
     CHECK(anyPaymentHasStatus(afterRetry, "FAIL"));
     CHECK(anyPaymentHasStatus(afterRetry, "PROCESSING"));
+}
+
+// Every case above names `wechat`, so the Alipay half of this shared path was
+// pinned by reading only -- and Alipay has a refusal shape WeChat does not: a 200
+// whose body names a failing business code. `channelResultError` turns that into
+// "Alipay error: ...", `attemptCertainlyNotCreated` accepts the prefix as proof
+// nothing was created, and the answer the caller gets carries Alipay's own code
+// fields. This is the case that shows the answer-after-the-writes ordering holds
+// for that channel too, and that its response body came out unchanged.
+DROGON_TEST(PayPlugin_QrBooking_AlipayBusinessCodeRefusalClosesThePaymentAndAllowsRetry)
+{
+    auto client = makeTestClient();
+    REQUIRE(client != nullptr);
+    ensureQrTables(client);
+
+    const std::string orderNo = qrOrderNo();
+    auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
+    Json::Value refused;
+    refused["code"] = "40004";
+    refused["sub_code"] = "BUSINESS_FAILED";
+    refused["sub_msg"] = "The order is invalid";
+    stub->succeedWith(refused);
+
+    PayPlugin plugin;
+    plugin.setTestChannels({{"alipay", stub}}, client);
+
+    const auto answer =
+      offerQrPayment(plugin.paymentService(), alipayQrRequest(orderNo, "8.88"), stub);
+    CHECK(answer.error);
+    CHECK(answer.channelCalls == 1);
+    CHECK(answer.result.get("code", 0).asInt() == 500);
+    CHECK(answer.result.get("message", "").asString() == "Alipay error: The order is invalid");
+    // The channel's own fields ride along on the answer -- the part of the
+    // refusal body no WeChat case can see.
+    CHECK(answer.result["alipay_code"].asString() == "40004");
+    CHECK(answer.result["alipay_sub_code"].asString() == "BUSINESS_FAILED");
+
+    // Alipay is offered its yuan field under its own name, not the fen object.
+    CHECK(stub->lastPayload()["total_amount"].asString() == "8.88");
+    CHECK(!stub->lastPayload().isMember("amount"));
+
+    // The caller only heard back once the row was already closed, so the retry
+    // below cannot observe this attempt still in flight.
+    CHECK(!reservationOpen(client, "QR_" + orderNo + "_alipay"));
+    const auto afterRefusal = paymentsOf(client, orderNo);
+    REQUIRE(afterRefusal.size() == 1);
+    CHECK(afterRefusal.front().first == "FAIL");
+    CHECK(afterRefusal.front().second.find("Alipay error") != std::string::npos);
+    CHECK(orderStatusOf(client, orderNo) == "CREATED");
+
+    Json::Value accepted;
+    accepted["code"] = "10000";
+    accepted["qr_code"] = "https://qr.alipay.com/bax0test";
+    accepted["out_trade_no"] = orderNo;
+    stub->succeedWith(accepted);
+
+    const auto retried =
+      offerQrPayment(plugin.paymentService(), alipayQrRequest(orderNo, "8.88"), stub);
+    CHECK(!retried.error);
+    REQUIRE(retried.result.get("code", -1).asInt() == 0);
+    CHECK(retried.result["data"]["qr_code"].asString() == "https://qr.alipay.com/bax0test");
+    CHECK(retried.result["data"]["out_trade_no"].asString() == orderNo);
+    CHECK(orderStatusOf(client, orderNo) == "PAYING");
+    // And the key the refusal probe checked is the one the service books: the
+    // settled attempt leaves its snapshot behind under that same name, so
+    // `reservationOpen` returning false above was not an empty result set for the
+    // wrong reason.
+    CHECK(reservationSettled(client, "QR_" + orderNo + "_alipay"));
+    const auto afterRetry = paymentsOf(client, orderNo);
+    REQUIRE(afterRetry.size() == 2);
+    CHECK(anyPaymentHasStatus(afterRetry, "FAIL"));
+    CHECK(anyPaymentHasStatus(afterRetry, "PROCESSING"));
+}
+
+// The transport branch, seen from Alipay: its gateway's 4xx is proof nothing was
+// created, so the attempt closes; a 5xx may have come from an intermediary that
+// did forward the request, so that attempt stays in flight for reconciliation.
+// The first answers without any business-code field to echo, which is the other
+// shape `failQr` has to preserve.
+DROGON_TEST(PayPlugin_QrBooking_AlipayTransportRefusalsCloseOrStayInFlight)
+{
+    auto client = makeTestClient();
+    REQUIRE(client != nullptr);
+    ensureQrTables(client);
+
+    auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
+    PayPlugin plugin;
+    plugin.setTestChannels({{"alipay", stub}}, client);
+
+    const std::string closed = qrOrderNo();
+    stub->failWith("HTTP 400: Invalid arguments [isv.invalid-parameter]");
+    const auto refused =
+      offerQrPayment(plugin.paymentService(), alipayQrRequest(closed, "12.00"), stub);
+    CHECK(refused.error);
+    CHECK(refused.result.get("code", 0).asInt() == 500);
+    CHECK(
+      refused.result.get("message", "").asString() ==
+      "QR payment creation failed: HTTP 400: Invalid arguments [isv.invalid-parameter]"
+    );
+    CHECK(!refused.result.isMember("alipay_code"));
+    const auto closedRows = paymentsOf(client, closed);
+    REQUIRE(closedRows.size() == 1);
+    CHECK(closedRows.front().first == "FAIL");
+    CHECK(orderStatusOf(client, closed) == "CREATED");
+
+    const std::string inFlight = qrOrderNo();
+    stub->failWith("HTTP 502: bad gateway from an intermediary");
+    const auto unknown =
+      offerQrPayment(plugin.paymentService(), alipayQrRequest(inFlight, "12.00"), stub);
+    CHECK(unknown.error);
+    CHECK(unknown.result.get("code", 0).asInt() == 500);
+    const auto openRows = paymentsOf(client, inFlight);
+    REQUIRE(openRows.size() == 1);
+    CHECK(openRows.front().first == "INIT");
+    CHECK(orderStatusOf(client, inFlight) == "CREATED");
 }
 
 // The other direction of that guard: an answer that proves nothing -- here a 5xx,

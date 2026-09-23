@@ -430,14 +430,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `markQrPaymentFailed` (`:1695`) takes the response as its `afterClose`
   continuation, invoked exactly once through either the write's own callback or
   the `catch`. This was the outlier, not a new rule: the success branch already
-  answered from `respondQr` after its writes settled, and the jsapi path has
-  passed the answer into `bookRefusedAttempt` as `done`
-  (`PaymentService.cc:360`) since round 3. CI caught what local runs could not:
+  answered from `respondQr` after its writes settled, and the plugin library's
+  first revision (`02b43ad`, which predates this branch) already answered the
+  main path's validation refusals from *inside* the `clearReservation` callback
+  (`PaymentService.cc:570-573`, `:593-597`). `bookRefusedAttempt` (`:360`)
+  carries the same discipline on the jsapi path, but it arrived with `2dafa9c`
+  on this branch rather than in round 3 as this entry first claimed. CI caught
+  what local runs could not:
   `PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry`
-  (`QrPaymentBookingTest.cc:360`) read `INIT` where it required `FAIL` on both
+  (`QrPaymentBookingTest.cc:406`) read `INIT` where it required `FAIL` on both
   the Linux and Windows legs, and the Linux leg — the slower one — also failed
   the retry half of the same case for the reservation reason. The assertion was
-  sound; only the code's ordering was not, so no test changed.
+  sound; only the code's ordering was not, so the fix needed no test change.
+  Reviewing the fix found the coverage gap instead: every case in that file
+  names `channel: "wechat"`, although the whole path is shared — Alipay
+  precreate goes through the same call, and its refusal has no WeChat
+  equivalent (a 200 whose body names a failing business code). Two Alipay cases
+  now pin the ordering from that side (`:457`, `:527`), along with a
+  `reservationOpen` probe (`:296`) that reads the reservation at the instant the
+  answer lands — added to the WeChat case as well.
   The same round cleared two compile errors that only non-MSVC compilers can
   see, both introduced here: `static WinsockGuard winsock` is an unused
   variable under GCC once the type collapses to an empty struct off Windows
