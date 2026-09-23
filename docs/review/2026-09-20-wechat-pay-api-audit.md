@@ -1712,3 +1712,116 @@ false。
   §二十六被 CI 打回的原因。
 - 其余支付宝遗留：`AlipayChannel` 的 closeTrade 至今无调用点（§十四只给了微信）、
   支付宝出站应答验签缺位、notify_url 谓词收紧对非规范公网 IPv6 的误拒。
+
+## 二十八、按 master 整合（rebase）后的对撞：一处结论翻转、core 覆盖门禁收口、锚点重测
+
+PR #13 合入后本分支与 master 冲突。整合方式由用户选定为 **rebase 到 master 之上**：
+26 个提交重放到 `origin/master`（`7ae7bf7`）之上。本节记整合结果、它对 §二十七
+结论的影响，以及 PR #15 那条红色 CI 检查（`linux-coverage`）的收口。
+
+### 一、整合与验证
+- 重放停在 4 处冲突：`PayUtils.h`、`PayUtils.cc`、`PaymentService.cc`、
+  `CHANGELOG.md`（两次）。解完用三条实测收口：
+  `git diff --stat backup/pre-rebase-b198394..HEAD` 恰等于 master 引入的 16 个文件
+  （即"本轮没丢也没多改动"）；冲突标记计数 0；`/W4 /WX` 全量重建 + 套件
+  `All tests passed (2094 assertions in 232 tests cases)`。
+- 两处语义收敛（不是文本合并能给的）：
+  1. master 的 `ee27565` 已经实现了与本轮 R15 同一条金额溢出上限，两侧各留一份会变成
+     同一谓词两种拼写。合并后统一走 master 的
+     `amountEqualsFen(const std::string &, int64_t)` 与 `notifiedFen` 词表，溢出回绕的
+     守卫保留一份。
+  2. 同一个"通知金额"被解析两次的合并残留（`answerTotalFen` 与 `notifiedFen` 并存）
+     删到只留 `notifiedFen`；**两道金额门都保留**——早的那道读 payment 行、事务内那道读
+     order 行，注释写明两行不一致正是这对门要抓的东西，它们是配对而非重复。
+- `.gitleaksignore` 六枚指纹重指向新 SHA。gitleaks 按 `commitSHA:file:ruleID:number`
+  逐提交匹配，改写历史必然失效（该文件自己的注释把这定义为"重新决策"而非自动续期）；
+  本轮实测那三个提交的补丁字节未变（冲突发生在别的文件），故尾号沿用，只换 SHA。
+
+### 二、§二十七 的一处结论翻转：资金风险已由 master 收口
+- §二十七 二·10 记的是"本 PR 新引入的支付宝资金风险"：sync 被拒却仍回 SUCCESS，
+  支付宝据此停止重投。**该前提今天不再成立**——master 的 `965cf6e`
+  （`fix(handlers): tell the channel when an Alipay order sync refused`）已在
+  `CallbackHandlers.cc:305-330` 接上 sync 结果：`status.empty()` 时回
+  `{"code":"FAIL","message":"order sync rejected"}` 换重投，注释与另两支
+  "刻意不确认"（`:200-208` 无客户端、`:227-235` 验签失败）保持同一约定。
+  §二十七 五·① 因此**由 master 完成**，从下一轮首位候选里划掉。
+- 但 §二十七 二·10 末尾那句"**这一支无人测**"仍然成立，且本轮补不上，原因记清：
+  `grep -rn "order sync rejected" tests/` 为空；要经 HTTP 到达该分支必须先过验签，
+  而测试进程读不到支付宝公钥文件（日志实证 `AlipayChannel.cc:538` 的
+  `Failed to read public key`），于是 `:227-235` 的验签失败支先应答，请求根本走不到
+  sync。解锁前置条件是"测试可注入支付宝公钥"这级 seam——列下一轮首位。
+
+### 三、`linux-coverage` 的 core 桶：根因、补测与明确不追的行
+- 计量事实（`scripts/coverage_baseline.json` + 该次 CI 日志）：core 基线
+  222/286 = 77.62%，PR 侧 233/326 = 71.47%，容差 0.5pp ⇒ 门槛 77.12% ⇒ 分母 326 下
+  需 covered ≥ 252 ⇒ **缺 19 行**。不是"测试变少"：本 PR 给 core 加了 40 行可测行
+  （286→326）而只多覆盖 11 行。
+- 未覆盖的 29 行集中在两处新增代码：`guarded()` 的失败路径（`PayPlugin.cc:68-104`）
+  与宿主渠道工厂装配循环（`PayPlugin.cc:202-224`）。前者本轮**明确不动**（见下），
+  后者是文档承诺给宿主的扩展点、全仓零证明——所以补的是真测试：
+  1. `tests/unit/ChannelRegistryTest.cc`（6 例）——路由表本身的契约：未注册名返回
+     nullptr（"没有兜底渠道"）、null 渠道被拒、`freeze()` 之后的写入被忽略、
+     生命周期钩子到达每个渠道、宿主工厂按需成型、SPI 默认的 `closeOrder` 回显式拒绝
+     （`PaymentChannel.h:78` 的默认体，全仓唯一调用点 `ReconciliationService.cc:231`
+     只看 `error` 串，故正向断言按 `result.isNull()` 钉）。
+  2. `tests/StubChannel.h` + `tests/main.cc` + `tests/integration/HostChannelAssemblyTest.cc`
+     （3 例）——测试二进制就是宿主，在 `app().run()` 之前登记三个工厂（文档步骤 2），
+     再由 `initAndStart` 消费：装配成功且**拿到的就是该渠道的 JSON 块**（marker 回读，
+     钉住文档步骤 3 的承诺）、与内置同名的工厂不得顶掉内置（用"返回 stub"而非"抛异常"
+     做工厂体，否则回归时被 `:220` 的 catch 吞掉、与守卫生效无法区分）、抛异常的工厂
+     只记日志且其余装配不受影响（正向对照：alipay/wechat/host-test 三路俱在）。
+     运行日志实证三支均被执行：`PayPlugin.cc:218`、`:211`、`:222`。
+  3. `tests/unit/PayPluginConfigTest.cc`（2 例）——旧配置键必须在**第 0 步**被拒：
+     探针 `base_path` 未被采纳即顺序证明，两个被删键各一例。
+  4. `tests/integration/PayRouteBarrierTest.cc`（3 例）——只有真走
+     `registerHandler → guarded()` 才证明"一条匿名请求弄不死网关"：`{"amount":{}}`
+     打 `/api/pay/notify/wechat` 得 400/`40003`，紧接着同进程 `GET /healthz` 仍 200
+     （事件循环还活着），再打一支伪造支付宝通知。现有 handler 级用例直接调控制器，
+     证不到屏障本身；支付宝那支的期望文案按 `plugin->alipayClient()` 是否存在在运行时
+     选，避免钉死在未经证明的那一支上。
+  合计本机 `All tests passed (2153 assertions in 246 tests cases)`（2094/232 → +59/+14）。
+- **明确不追的行**：`guarded()` 的 `fault`（`PayPlugin.cc:69-76`）与两个 `catch`
+  （`:89-94`、`:98-103`），约 16 行。要覆盖它必须让某条真路由的 handler 同步抛异常，
+  而本项目所有此类形状点都已按 §二十六/§二十七收成 400 应答——为凑覆盖率制造一条"能抛"
+  的路径等于回退一条已修的守卫；给生产代码开一个测试专用后门则是为了指标改产品。两者
+  都拒绝，代价记在这里：core 桶要等一次真正的 seam 决策。
+- 两条口径备忘，避免下轮误判：`measure_coverage.py::collect()` 取"任一 TU 命中即算覆盖"，
+  模板体只计一次，所以驱动一条被 `guarded()` 包住的路由不会新增行数；桶归属由路径前缀
+  决定，把 `guarded()` 挪去别的目录只能"改善"core 数字，属于改指标不是改代码，不做。
+- 同样不做的是 `--seed` 重刷基线：core 的 77.62% 是 master 上实测出来的地板，本 PR 把它
+  拉到 71.47% 是事实而非噪声，重写地板等于把这条 CI 检查删掉。
+- 残余不确定性如实记下：gcov 只在 Linux 腿上有意义（本机 WSL 的 Postgres 无 `test` 角色，
+  套件跑不到退出就没有 `.gcda`），上面的 19 行是按"哪些行从未执行"读码估算的，不是实测。
+  若这一腿仍红，下一步是 seam 决策，不是删测试也不是刷基线。
+- 顺带一条与本节无关但要留痕的观测：`ChannelRegistry.h:45` 的注释说 `add()` 在
+  `freeze()` 之后"asserts"，实现（`ChannelRegistry.cc:31-36`）是 LOG_ERROR + 忽略。
+  本轮按实现钉测试（`ChannelRegistry_AddAfterFreezeIsIgnored`），未改注释——注释收紧属于
+  文档修复，另轮再做。
+
+### 四、锚点漂移（rebase 的必然代价）与 §二十七 锚点重测
+- 实测文件级位移（`backup/pre-rebase-b198394` → 现树）：`PaymentService.cc`
+  3749→3806、`PayUtils.cc` 776→784、`CallbackHandlers.cc` 306→343。位移不均匀（master
+  的插入点各自落位），所以逐条重测而非加常数。
+- §二十七 仍在使用的锚点，旧 → 新：
+
+  | 锚点 | 旧 | 新 |
+  |------|----|----|
+  | `reconcileAmountProblem` | `PaymentService.cc:55` | 未漂移 |
+  | 微信查询金额门 | `:2462` | 未漂移 |
+  | 支付宝金额门 | `:3008` | `:3022` |
+  | `notifiedFen` 初值 -1 | `:2946` | `:2951` |
+  | 支付宝两处 PAYMENT 记账 | `:3078`、`:3248` | `:3114`、`:3305` |
+  | 支付宝 CAS `UPDATE…RETURNING` | `:3186-3192` | `:3225-3228` |
+  | 无客户端→回 FAIL 支 | `CallbackHandlers.cc:200-208` | 未漂移 |
+  | 验签失败→回 FAIL 支 | `:227-235` | 未漂移 |
+  | plugin/service 缺失→回 FAIL 支 | `:266-282` | `:285-302` |
+  | ACK 支（现读 sync 结果） | `:286-303` | `:305-330` |
+  | Alipay 信封错误串 | `AlipayChannel.cc:352-368` | `:364`、`:375` |
+  | WeChat 平铺错误串 | `WechatChannel.cc:434` | 未漂移 |
+  | `attemptCertainlyNotCreated` | `PaymentService.cc:327`、`:347-349` | 未漂移 |
+  | `closeOrder` 默认体 / 唯一调用点 | `PaymentChannel.h:78`、`ReconciliationService.cc:231` | 未漂移 |
+  | `owner_token` 三处 + 预留 INSERT | `CallbackService.cc:143`、`:765`、`:2735`；`IdempotencyService.cc:98` | 未漂移 |
+  | 无客户端测例 / QR 形状测例 | `RequestBodyShapeTest.cc:493`；`QrPaymentBookingTest.cc:538` | 未漂移 |
+- §一~§二十六 的锚点**不逐条重测**：那些节是带时间戳的当轮记录，其结论由测试与 CI 钉住，
+  行号只是当时的定位辅助；重测 180 余处会产生一个只动行号的巨量 diff，把真正的评审信号
+  埋掉。需要定位时按符号名查找更可靠。
