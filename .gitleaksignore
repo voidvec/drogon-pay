@@ -16,9 +16,15 @@
 # is not a credential. The tip now computes it (see testApiV3Key()) instead of
 # spelling it out; these six suppress the commits that introduced the literal,
 # which stay in the PR's scanned history.
-6b81c727e6ef1696107d1355f1db8646ce49a85b:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:5086
-c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:3312
-c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6638
-c94795639852854f9f19a9744a80e9a12b07fb35:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6897
-ec17dc48fc3e7cecf90e9621ef9da7df1b30bb11:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:1129
-ec17dc48fc3e7cecf90e9621ef9da7df1b30bb11:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:944
+#
+# Re-decided on 2026-09-23 when the branch was rebased onto master for the
+# Alipay callback batch: same conclusion, so the six entries moved to the new
+# SHAs rather than being dropped. Only the SHA half changed -- those three
+# commits' patches are byte-identical, since the rebase conflicted in other
+# files -- so the trailing numbers carried over untouched.
+e60e81b38c23ca6c49b72892b20864634f203a8a:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:5086
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:3312
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6638
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6897
+4319f6e3c57274ef847973b431942e945ee35cae:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:1129
+4319f6e3c57274ef847973b431942e945ee35cae:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:944
