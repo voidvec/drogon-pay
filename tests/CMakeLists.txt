@@ -9,10 +9,12 @@ set(TEST_SRC
     main.cc
     # Unit tests: no HTTP/DB round-trip, pure logic of host and library helpers.
     unit/AuthCheckTest.cc
+    unit/ChannelRegistryTest.cc
     unit/ConfigLoaderTest.cc
     unit/ControllerMetricsTest.cc
     unit/OnceCallbackTest.cc
     unit/PayAuthMetricsTest.cc
+    unit/PayPluginConfigTest.cc
     unit/PayUtilsTest.cc
     unit/AlipayVerifyCallbackTest.cc
     unit/StartupValidatorTest.cc
@@ -21,9 +23,11 @@ set(TEST_SRC
     integration/CallbackControllerTest.cc    # P0: controller-level callback validation (C1-2, C2-1)
     integration/CreatePaymentIntegrationTest.cc
     integration/HealthProbeTest.cc
+    integration/HostChannelAssemblyTest.cc  # P2: host channel factory consumed by initAndStart
     integration/HttpResponseHeadersTest.cc   # P2: CORS preflight + security headers
     integration/IdempotencyIntegrationTest.cc
     integration/PayErrorCategoryTest.cc      # P3-7.2: PayErrorCategory singleton + concurrent
+    integration/PayRouteBarrierTest.cc       # P0: guarded() barrier reached through the router
     integration/QrPaymentBookingTest.cc      # C5: QR booking (payment row, retry after refusal)
     integration/QueryOrderListAndReconcileTest.cc  # P1: queryOrderList + reconcileSummary params
     integration/QueryOrderTest.cc
