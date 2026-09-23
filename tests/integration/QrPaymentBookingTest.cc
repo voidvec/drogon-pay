@@ -437,6 +437,10 @@ DROGON_TEST(PayPlugin_QrBooking_ChannelRefusalClosesThePaymentAndAllowsRetry)
     CHECK(!retried.error);
     REQUIRE(retried.result.get("code", -1).asInt() == 0);
     CHECK(retried.result["data"]["code_url"].asString() == "weixin://wxpay/bizpayurl?pr=retry");
+    // Same control as the Alipay case carries: the key the refusal probe checked
+    // is one the service really writes, so the earlier `!reservationOpen` was not
+    // a miss on a name that never existed.
+    CHECK(reservationSettled(client, "QR_" + orderNo + "_wechat"));
 
     // The order row is reused (one row) while each attempt keeps its own payment
     // row, so the failed attempt stays auditable.
