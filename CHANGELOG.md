@@ -446,7 +446,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names `channel: "wechat"`, although the whole path is shared — Alipay
   precreate goes through the same call, and its refusal has no WeChat
   equivalent (a 200 whose body names a failing business code). Two Alipay cases
-  now pin the ordering from that side (`:457`, `:527`), along with a
+  now pin the ordering from that side (`:461`, `:531`), along with a
   `reservationOpen` probe (`:296`) that reads the reservation at the instant the
   answer lands — added to the WeChat case as well.
   The same round cleared two compile errors that only non-MSVC compilers can

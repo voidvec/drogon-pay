@@ -1421,7 +1421,7 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
 - 修复形状不是新发明（**本条归属已更正，初稿说错了**）：初稿写"主建单路径自
   第三轮起就是 `bookRefusedAttempt(db, paymentNo, orderNo, errPayload, done)`
   （`PaymentService.cc:360`）"，两处都不准。实测出处：`bookRefusedAttempt`
-  （唯一调用点 `:965`）由**本分支第 12 个提交** `2dafa9c`（"stop the suite from
+  （唯一调用点 `:965`）由本分支**从旧到新第 11 个**提交 `2dafa9c`（"stop the suite from
   aborting on chains that outlive their caller"）引入，动机是 Drogon `DbClient`
   自 join 崩溃（0xC0000409），不是第三轮的设计决定。真正更老、更硬的先例是主
   建单（jsapi/struct）路径的校验拒绝——它们在 `clearReservation` 的回调**里**
@@ -1483,13 +1483,16 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
 `reservationSettled` 作它的正向对照，防止探针因为查了个服务从不写入的 key 而永远返回
 false。
 
-**这些断言为什么能红（敏感性证据）**：修复前 CI 腿的原文可引——run
+**这些断言为什么能红（敏感性证据，分强弱两档）**：修复前 CI 腿的原文可引——run
 `35717078661` 的 Windows 腿在 `QrPaymentBookingTest.cc:382` 报
-`"INIT" == "FAIL"`、`:383` 报 `find("HTTP 403")` 落空，正是支付宝用例 A 所断言的
-同一对性质（行已闭 + 应答载荷），经由同一个 `markQrPaymentFailed`，只是入口从
-transport 分支换成业务码分支。**诚实边界**：本机想做更硬的反向实验（把
-`PaymentService.cc` 临时回退到 `8313743~1` 重跑）被权限分类器拦下、未执行，因此
-支付宝两例的"能红"是从共享代码 + 微信腿的 CI 原文推得，不是本机独立复现。
+`"INIT" == "FAIL"`、`:383` 报 `find("HTTP 403")` 落空（已核对 `8313743~1` 那版
+文件，那两行就是这两条断言）。但它挂的是 **transport 入口**（stub 答
+`HTTP 403`），所以这条原文**直接**对应的是新增支付宝用例 B 的形状；用例 A 从
+业务码入口（`:1811`）进，与 CI 原文共享同一对被我改序的函数
+（`markQrPaymentFailed`/`failQr`），入口却不同，故 A 的"能红"属推得。
+**更硬的一档没做成**：本机原计划把 `PaymentService.cc` 临时回退到 `8313743~1`
+把两例真跑红（反向实验），被权限分类器拦下、未执行。因此 A/B 的敏感性目前停在
+"共享代码 + 微信腿 CI 原文"这一层，本机没有把它们跑红的记录。
 
 ### 锚点漂移声明（本轮如实标注）
 本轮 `PaymentService.cc` 在 1531 之后净增 26 行，因此 §十~§二十二 里凡是
@@ -1503,7 +1506,7 @@ transport 分支换成业务码分支。**诚实边界**：本机想做更硬的
 第四节补完支付宝对照后，`QrPaymentBookingTest.cc` 又在本轮内整体后移一次：钉住
 本轮修复的那条用例 `:360→:406`，它断言行已闭的那条断言 `:385→:429`；夹具
 `reservationOpen` 现 `:296`、`reservationSettled` 现 `:312`，两条新用例现
-`:457`、`:527`。上文引用的 CI 原文 `:382/:383` 是**修复前那份文件**的行号，
+`:461`、`:531`。上文引用的 CI 原文 `:382/:383` 是**修复前那份文件**的行号，
 保持原样不换算。
 
 ### 验证记录
@@ -1514,7 +1517,7 @@ transport 分支换成业务码分支。**诚实边界**：本机想做更硬的
   触发，行的可见状态在因果上先于响应，不再依赖快慢。最终裁决仍待 CI。
 - 仓库 `clang_format.py --check`：本轮三个文件均 format-clean（本地唯一红是
   gitignore 掉的 `libs/drogon-pay/src/models_backup/`，CI 走 git 索引看不见）。
-- 第四节落地后再测一次：`/W4 /WX` 增量重建绿，套件 **222 例 / 2042 断言**全绿，
+- 第四节落地后再测一次：`/W4 /WX` 增量重建绿，套件 **222 例 / 2043 断言**全绿，
   本机连跑 8 次 `PASS=8 FAIL=0`（新增两例与探针没有引入抖动）；
   `clang_format.py --fix` 报 0 drift；`check_docs_drift.py` 七规则绿。
   本机 `C:\Program Files\LLVM\bin` 无 `clang-tidy.exe`，故 `clang_tidy_gate.py`
