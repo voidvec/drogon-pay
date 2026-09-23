@@ -523,12 +523,19 @@ DROGON_TEST(PayPlugin_QrBooking_AlipayBusinessCodeRefusalClosesThePaymentAndAllo
     CHECK(anyPaymentHasStatus(afterRetry, "PROCESSING"));
 }
 
-// The transport branch, seen from Alipay: its gateway's 4xx is proof nothing was
-// created, so the attempt closes; a 5xx may have come from an intermediary that
-// did forward the request, so that attempt stays in flight for reconciliation.
-// The first answers without any business-code field to echo, which is the other
-// shape `failQr` has to preserve.
-DROGON_TEST(PayPlugin_QrBooking_AlipayTransportRefusalsCloseOrStayInFlight)
+// The transport branch, reached through the Alipay registry key. Both strings
+// below are the shape the SERVICE's channel contract names a refusal with --
+// `WechatChannel.cc:434` builds exactly `HTTP <status>: <detail>`, and the cases
+// prove the two halves of `attemptCertainlyNotCreated` keep their ordering fix
+// for either channel. They are NOT what a live Alipay gateway reports:
+// `AlipayChannel.cc:352-368` wraps a transport fault in a JSON envelope
+// (`{"error":"No response from Alipay server"}`, `{"error":"HTTP status code:
+// 500"}`), which matches none of those prefixes, so a real Alipay refusal takes
+// the closing branch regardless of which status it names. That gap is recorded
+// in the audit doc rather than papered over here.
+// The first answer also carries no business-code field to echo, which is the
+// other shape `failQr` has to preserve.
+DROGON_TEST(PayPlugin_QrBooking_AlipayKeyedTransportBranchesCloseOrStayInFlight)
 {
     auto client = makeTestClient();
     REQUIRE(client != nullptr);
