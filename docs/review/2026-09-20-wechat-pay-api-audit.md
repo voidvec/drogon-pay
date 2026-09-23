@@ -1476,8 +1476,10 @@ PR #15 的三平台裁决下来后，先做归属判断（用户明确要求：�
 那条被改序的调用点；断言应答瞬间预留已闭、行已 `FAIL`、`alipay_code` 与
 `alipay_sub_code` 到位、支付宝拿到的是自己名下按元的 `total_amount` 而非微信的
 分制 `amount` 对象，随后同参数重试成功并追加第二行支付）与
-`..._AlipayTransportRefusalsCloseOrStayInFlight`（HTTP 4xx 关单、HTTP 5xx 留飞，
-覆盖 `:1775` 与 `:1789`，并钉住 4xx 那笔**没有**业务码字段可回显）。另加
+`..._AlipayKeyedTransportBranchesCloseOrStayInFlight`（按 `HTTP 4xx` 关单、按
+`HTTP 5xx` 留飞，覆盖 `:1775` 与 `:1789`，并钉住 4xx 那笔**没有**业务码字段可回
+显）。**该用例名与这两条串在本轮被更正**：它们是服务层 channel 契约的形状，不是
+真实支付宝网关的报文，推论见 §二十七第五节。另加
 `reservationOpen` 探针（`pay_idempotency` 中 `response_snapshot IS NULL` 的行是否
 还在），在应答那一刻直接查——原来那条微信用例也补了同一探针；再加
 `reservationSettled` 作它的正向对照，防止探针因为查了个服务从不写入的 key 而永远返回
@@ -1541,3 +1543,172 @@ false。
   `"invalid amount for native payment"` 都比 body 短——收口时须逐处保留原串，
   不能顺手统一）。
 - 第十九轮遗留的"应答身份字段须与所请求一致"仍是后轮首位候选。
+
+## 二十七、评审项扩大范围：整个 PR（23 个提交）对支付宝的影响面对撞
+
+§二十六第四节只核了 `8313743` 一轮。用户随后把这条评审项的范围改为
+**"范围是 pr 的所有提交内容"**，本节按该范围重做。结论与第二十轮的方向相反，必须
+直说：**不是"无影响"，而是"有若干处改变支付宝可见行为，其中一处是本 PR 新引入的
+资金风险"**。
+
+### 一、界定方法与两条硬事实
+- `git diff --name-only master..HEAD | grep -i ali` 为空——支付宝通道实现
+  （`AlipayChannel.cc` 及其 sandbox client）在本 PR 内**零改动**。改动全落在两渠道
+  共用层：`CallbackService.cc` 3182 行、`PaymentService.cc` 2560、
+  `RefundService.cc` 849、`PayUtils.cc` 481、`PayHandlers.cc` 301、
+  `CallbackHandlers.cc` 70、`PluginGuard.h` 42（新增）、`PaymentChannel.h` 18、
+  `models/PayIdempotency.*`、`sql/005_pay_idempotency_owner_token.sql`、
+  `sql/006_ledger_payment_income_unique.sql`。
+- 覆盖事实（先划清"有没有测"，再谈方向）：`grep -rin alipay tests/` 去掉建表 DDL
+  的 `DEFAULT 'alipay'` 后剩 67 处，集中在三堆——`PayUtilsTest.cc:409-431`
+  （`validateTimeExpire` 的支付宝侧）、`RequestBodyShapeTest.cc`（handler 层形状/
+  金额/owner 的 400 与 1501，含 `:493` 的支付宝通知无客户端回 FAIL 一支）、
+  `QueryOrderListAndReconcileTest.cc`（只把 `alipay` 当数据写进行里，不走渠道分支）。
+  **真正把支付宝渠道分支跑起来的测例只有本文件 §二十六新增的两条**。
+  `syncOrderStatusFromAlipay`、支付宝退款分支、`channelResultError` 的 alipay 分支
+  在 create 路径上的效果、支付宝通知的 ACK 语义——四条最要紧的路径**零覆盖**。
+  也就是说"不影响支付宝"这个命题此前不可能靠测例证明，只能逐条拿
+  `git show master:` 对撞。
+
+### 二、确实改变支付宝可见行为的（逐条带 master 差分）
+1. **建单成功判定改为按渠道业务码**（`PaymentService.cc:247` `channelResultError`
+   的 alipay 分支 `:249-261`，调用点 `:920` 与 `:1796`）。master 的两条建单路径都
+   只看 `error.empty()`——`/api/pay/create` 从 `if (!error.empty())`（master
+   `PaymentService.cc:574`）直接进入 `// Success - update payment and order status`
+   （master `:813`），中间无任何业务码判断——于是支付宝 **200 + `code=40004`**
+   的错误体在 master 上被提升为 `PAYING`，记下一笔渠道从未受理的幽灵已付单。
+   方向：**更安全**。
+   可见差异：应答仍是 `code:1002`，但 `message` 变成
+   `"Alipay error: Alipay error: <sub_msg>"`——外层文案在 `:946-953` 又叠了一次渠道
+   名，前缀重复。**无测例覆盖**（create 路径至今零支付宝覆盖）。
+2. **QR 拒绝文案**：master QR 分支拼 `"Alipay error: " + msg`，有 `sub_msg` 时再
+   ` + " - " + sub_msg`；现在 `channelResultError` 以 `sub_msg` 优先、缺失才回落
+   `msg`，不再拼接。`alipay_code`/`alipay_sub_code` 的位置不变（仍在响应顶层，
+   `failQr` 的 `response = extra`）。已被本文件 `:461` 钉住。
+3. **QR 改为先落库再问渠道**（C5）。master 只在渠道成功后插 `pay_order`，**拒绝时
+   什么都不留**；现在先写 `order=CREATED` + `payment=INIT`，拒绝只闭支付行
+   （`markQrPaymentFailed` `:1695`，订单行按设计保持 `CREATED`，见 `:1687-1693`
+   注释）。支付宝可见后果：一笔被拒的支付宝 QR 订单，`GET /api/pay/order/{no}`
+   从 404 变成 200/`CREATED`；同 `order_no` 再建单从"新插一行订单"变成"复用订单行
+   + 追加支付行"。`:461` 与 `:538` 各钉了一半。
+4. **幂等请求哈希扩字段**（`:1341-1345` 新增 `user_id`/`currency`/`notify_url`/
+   `buyer_id`/`time_expire`）。master 只哈希 `order_no`+`amount`+`channel`+`subject`，
+   所以同一 key 换个回调地址或换个 owner 的重试会被当成 Replay、把第一个调用方的
+   码回给他。现在这类重试答 **1004 Conflict**。**支付宝可见**（同一路由两渠道共用），
+   方向正确但**无测例覆盖**这条差异。
+5. **owner 身份三处**：QR 路由 handler 从 `asInt()` 改 `asInt64()`
+   （`PayHandlers.cc:354` 前后），>2^31 的 user_id 不再回绕成别的 owner；
+   `user_id<=0` 在 handler（`:371`）与服务层（`:1304-1311`）各拒一次，堵住
+   `queryOrderList` 把 0 读成"不过滤"的那类孤儿订单；master QR 成功分支写的是
+   `request.get("user_id","1").asInt64()`——缺席时拿字符串 `"1"` 去 `asInt64()`
+   会抛 jsoncpp 异常，被外层 `catch` 成一条 500（此条系读码推得，未测，只对直接
+   走 Service API 的 SDK 调用者可达，HTTP 侧 handler 一直会填这个字段）。覆盖：
+   handler 那两处由 `RequestBodyShapeTest.cc:328`（owner 超 int32 不被误判为类型
+   错）与 `:344`（QR `user_id<=0` 拒）钉住；服务层 `:1304-1311` 那一次重复拒绝
+   没有独立测例。
+6. **请求体形状门**（`PayHandlers.cc:71` `validateBodyTypes` + `:111`
+   `respondBadRequest`，`mapErrorToHttpStatus` 新增 `case 400`：`:26`）。字段类型
+   不对（`{"amount":{}}`）在 master 会从 handler 抛出、被 trantor 重抛出
+   `app().run()`——一条匿名请求能打停整个网关；现在回 400。渠道无关，支付宝同享，
+   且它替换的是"进程死"而不是"正常应答"。方向：**更安全**。覆盖：
+   `RequestBodyShapeTest.cc:159/171/185/199/251/263/278`（两入口逐字段形状 400）、
+   `:294/:306`（QR 金额精度与负数，注释点名的正是"超额精度原样进了支付宝"）、
+   `:432/:450/:470`（无 plugin 回 1501 而不打停进程）。
+7. **`time_expire` 前置校验对支付宝生效**（`validateTimeExpire` 是本 PR 新函数，
+   master 无）。create 路径 `:610-620`、QR 路径 `:1426-1436` 都调它，严格 RFC-3339
+   与"不得在过去"两条**两渠道同判**；7 天窗只在微信
+   （`PayUtils.cc:769` 的 `channel == "wechat"`）。而 `time_expire` 对支付宝仍照旧
+   原样发给渠道（`:822-825`，master `:481` 同样），所以这条闸门给支付宝带来的是
+   "以前照发、现在先拒"。§二十六第三节 `PayPlugin_CreatePayment_TimeExpireGuard`
+   的正向对照（`:501`）与 `PayUtilsTest.cc:409-431`（`"alipay"` 名下的严格形状、
+   闰年/越界判定、`:431` 的"8 天对支付宝放行"）已共同钉住"支付宝受前两条管、
+   不受 7 天窗管"。这一条是本 PR 支付宝侧**覆盖最好**的一处。
+8. **`notify_url` 的 SSRF 门：调用点不是新的，谓词是新的**。此处更正我本轮先前的
+   口头声明——create 路径的 `validateNotifyUrl(request.notifyUrl, ...)` 在 master
+   `PaymentService.cc:303-306` 已存在，**不是本 PR 新增的支付宝可见拒绝**。变的是
+   实现（`PayUtils.cc:490-519`）：userinfo 改为按**最后一个** `@` 划 host、`#` 也
+   终止 host（挡住 `http://127.0.0.1#x.com`）、IPv6 从"私有名单"改成"必须全局单播"
+   白名单，并新增非规范数字写法识别（`127.1`、`2130706433`、`0x7f.1`、`010.1.1.1`）。
+   方向：**更难绕**；代价是写法非规范的公网 IPv6 字面量也可能被拒（遗留，见第五节）。
+9. **退款终态改为 CAS + 覆盖度求和**（`RefundService.cc:1553`
+   `updateRefundWithError` 由无条件 `setStatus("REFUND_FAIL")` 改为
+   `WHERE status IN ('REFUND_INIT','REFUNDING')`；`:1601` `updateRefundWithSuccess`
+   新增"订单只在仍是 `PAID` 时才动、且只有累计已退金额覆盖订单总额才记
+   `REFUNDED`"）。这是 R12/R13 的修复，**同一对函数服务两渠道**，所以支付宝的
+   **部分退款不再把整单记成已退**。方向：**更安全**；已知残留是支付宝那条 HTTP
+   应答仍固定回 `status:"REFUND_FAIL"`，与被 CAS 挡住的真实行状态可能不一致。
+   **无支付宝覆盖**。
+10. **收入金额闸门撞上了无条件 ACK——本 PR 新引入的支付宝资金风险**。
+    `reconcileAmountProblem`（`:55`，新函数）在两个对账读数点生效：微信查询门
+    `:2462`、支付宝 `:3008`。而支付宝通知的 handler
+    （`CallbackHandlers.cc:286-303`）**不看 sync 结果**，只要函数返回就回
+    `{"code":"SUCCESS"}`。于是：通知的 `total_amount` 与订单行金额不等（或缺失，
+    `:2946` 初值 -1 → `answerTotalFen<=0` 即拒）时，新代码拒绝结算（`callback("")`）
+    却仍然确认——支付宝据此**停止重投**，这笔真付了的钱既不记账、也没有第二条通知
+    来纠偏；master 的行为是直接按订单行金额结算（账记错但钱入账）。同一 handler
+    里"配置缺失/验签失败/plugin 缺失"三支都刻意**不确认**以换重投（见
+    `:200-208`、`:227-235`、`:266-282` 的注释），所以"用不确认来换重试"在此处已是
+    既有约定，第 10 条只是漏接了这一支。方向：**本 PR 让它从"记错账"变成"不记账
+    且渠道不再敲门"**，属于必须收口的可见风险。覆盖：
+    `RequestBodyShapeTest.cc:493` 只钉住了"无可验证客户端→回 FAIL 不确认"那一支，
+    "结算被拒却仍回 SUCCESS"这一支无人测。
+
+### 三、候选证伪：三条"看着会影响支付宝"的假设
+1. **`PaymentChannel.h:78` 新增虚函数 `closeOrder`** —— 带默认实现（回调
+   `"channel does not support closing orders"`），唯一调用点
+   `ReconciliationService.cc:231` 拿的是 `wechatChannel`，全仓再无 caller。
+   支付宝既不需实现也调不到。**[支付宝不可达]**。
+2. **`sql/005_pay_idempotency_owner_token.sql` 的 `owner_token`** ——
+   `IdempotencyService.cc` **不在 diff 内**，其
+   `checkAndSetStatus` 的预留 INSERT（`:98`）从不写该列；全仓 `owner_token` 只出现在
+   `CallbackService.cc:143`/`:765`/`:2735`（微信通知链的两阶段协议）。支付宝建单/退款
+   仍是单阶段（`updateResult` 直接落快照、`clearReservation` 删
+   `response_snapshot IS NULL`），**重试语义逐字节不变**。**[支付宝不变]**。
+3. **`sql/006_ledger_payment_income_unique.sql` 的
+   `uq_pay_ledger_payment_income`** —— 支付宝两处 PAYMENT 记账
+   （`:3078`、`:3248`）都排在既有 CAS 之后（`PaymentService.cc:3186-3192` 的
+   `UPDATE … AND status IN ('INIT', 'PROCESSING') RETURNING 1` 命中才记，另一处前面
+   有订单未 `PAID` 的判断），正常流程一笔 `payment_no` 至多一行收入账，索引不会新增
+   拒绝。
+   **[支付宝不变]**，但留下覆盖缺口：集成测试自建的 `pay_ledger` 不带这个索引，
+   索引本身零覆盖；真出现 CAS 回归时事务回滚而通知照旧 ACK。
+
+### 四、本轮对本节自身声明的两处更正
+- 我在本节开工前口头写过"`PaymentService.cc:585` 的 notify_url 门是一条支付宝可见
+  的新增拒绝"。**不成立**，master 同一处已在调用（见二·8），可见的只是谓词收紧。
+- §二十六第四节那条按 `HTTP 4xx/5xx` 分流形状的用例，原名
+  `..._AlipayTransportRefusalsCloseOrStayInFlight` **夸大了它证明的范围**：真实
+  `AlipayChannel` 报的是 JSON 信封（`AlipayChannel.cc:352-368`
+  的 `{"error":"No response from Alipay server"}`、
+  `{"error":"HTTP status code: 500"}`），不是 `WechatChannel.cc:434` 那种
+  `HTTP <status>: <detail>` 平铺串。用例已改名
+  `..._AlipayKeyedTransportBranchesCloseOrStayInFlight`，注释写清它是"服务层 channel
+  契约的形状"。锚点随本轮注释漂移：该用例 `:531→:538`（`:461` 未动）。
+  **由此得出一条真推论**：`attemptCertainlyNotCreated`（`:327`）靠字符串前缀判"确定
+  未创建"，支付宝的信封串一个前缀都不匹配，于是落到 `!wentThroughHttp`
+  （`:347-349`）被判为**确定未创建**——支付宝侧的超时（`No response from Alipay
+  server`）会被记成 `FAIL`。与 master 比不算退化（master 对所有 error 一律 FAIL），
+  但**本轮为微信立的"不确定不得关单"规则对支付宝并未生效**，根因是通道错误形状与
+  谓词形状不一致。
+
+### 五、验证记录与遗留
+- 本节全部结论来自 `git diff master..HEAD` 与 `git show master:<file>` 逐条对撞 +
+  现网代码行号实测（二·5 的 jsoncpp 抛异常一条与三·2 的"逐字节不变"一条已标注为
+  读码推得）；未做任何生产代码改动，故无锚点漂移除第四节所述测试文件外。
+- 本机：`/W4 /WX` 增量重建 + 套件连跑，见提交 `42f25d7`/`b3fffef` 之后的记录；
+  CI 对 `b3fffef` 的裁决已实测——`linux-build-and-test / build-test`、
+  `windows-build-and-test / build-test`、`macos-build / build-test` 三条必需检查
+  全绿，`clang-tidy`、`static-analysis`、`gitleaks`、两条 `sdk-smoke` 全绿；
+  唯一红是**非必需**的 `linux-coverage`：ctest `100% tests passed`，红在
+  `measure_coverage.py --ratchet` 的桶回退（`core 77.62% → 71.47%`，容差 0.5pp）。
+- **下一轮首位候选（支付宝侧，按风险排序）**：
+  ① 把 `CallbackHandlers.cc:286-303` 的支付宝 ACK 接上 sync 结果——结算被拒时回
+  `FAIL` 换重投，并为二·10 补测例（当前该路径零覆盖）；
+  ② 统一通道错误形状或在 `attemptCertainlyNotCreated` 认支付宝信封，让超时/5xx
+  真的"留飞"（见四·第二条推论）；
+  ③ 给 create 路径的 10000 门补支付宝测例，同时决定二·1 那个
+  `"Alipay error: Alipay error: …"` 双前缀是修文案还是钉文案。
+  本 PR 已推给 CI 的边界不再扩张：这三条都需要新测例与新论证，塞进本轮会重演
+  §二十六被 CI 打回的原因。
+- 其余支付宝遗留：`AlipayChannel` 的 closeTrade 至今无调用点（§十四只给了微信）、
+  支付宝出站应答验签缺位、notify_url 谓词收紧对非规范公网 IPv6 的误拒。
