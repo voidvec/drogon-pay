@@ -153,7 +153,6 @@ exit 0——单用例过滤走脚本的 `-r`（它直接驱动二进制，名字
 |----------|------|
 | `GET /healthz` | 存活检查（宿主，进程活着即 200） |
 | `GET /readyz` | 就绪检查（宿主，真打 DB/Redis） |
-| `GET /health` | **已废弃**，`/readyz` 的别名，带 `Deprecation: true` + `Sunset: 2026-08-28` 响应头；新探针一律用 `/healthz`/`/readyz` |
 | `GET /metrics` | Prometheus 指标（宿主，仅回环地址） |
 | `GET /api/pay/metrics/auth` | 支付统计（JSON） |
 | `GET /api/pay/metrics/auth.prom` | 支付统计（Prometheus 文本） |

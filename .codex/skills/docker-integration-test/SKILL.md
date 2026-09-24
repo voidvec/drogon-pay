@@ -36,7 +36,7 @@ description: 在 Docker Compose 环境中执行支付系统的完整集成测试
 - `POST /api/pay/refund` - 创建退款
 - `GET /api/pay/refund/query?refund_no=...` - 查询退款
 - `POST /api/pay/notify/{wechat|alipay}` - 支付回调（渠道签名，非 API Key）
-- `GET /healthz` / `GET /readyz` - 存活/就绪（`/health` 为已废弃别名）
+- `GET /healthz` / `GET /readyz` - 存活/就绪
 - `GET /metrics` - Prometheus 指标（仅回环地址）
 
 路径以 `examples/pay-server/openapi.yaml` 为准，`base_path` 可配置（默认
@@ -189,7 +189,7 @@ python .claude/skills/docker-integration-test/scripts/generate_report.py \
 |------|------|------|
 | `scripts/pay_e2e_test.py` | 入口 | 全链路 HTTP 用例 + 写 JSON 结果 |
 | `scripts/generate_report.py` | 入口 | 把 `test-results/*.json` 渲染成 HTML |
-| `scripts/run_docker_tests.sh` | **遗留、无引用** | 只做一次健康探测，且探的是已废弃别名 `/health`（现役是 `/healthz`）；没有任何文档或脚本调用它，也没有可执行位。要么改造成 `pay_e2e_test.py` 的前置门并补上引用，要么删除——别把它当入口跑 |
+| `scripts/run_docker_tests.sh` | **遗留、无引用** | 只做一次健康探测（`/healthz`）；没有任何文档或脚本调用它，也没有可执行位。要么改造成 `pay_e2e_test.py` 的前置门并补上引用，要么删除——别把它当入口跑 |
 
 报告包含：
 - 总体测试概览（通过率、总耗时）

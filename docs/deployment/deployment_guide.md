@@ -308,8 +308,6 @@ curl http://localhost:5566/readyz    # 就绪探针（探测 DB/Redis 连通性�
 }
 ```
 
-> `/health` 是 `/readyz` 的废弃别名（响应头含 `Deprecation: true`）。
-
 ---
 
 ## 📊 监控

@@ -158,22 +158,3 @@ void HealthCheckController::readyz(
         }
     });
 }
-
-void HealthCheckController::health(
-  const HttpRequestPtr &req,
-  std::function<void(const HttpResponsePtr &)> &&callback
-)
-{
-    if (req->method() == Options)
-    {
-        auto resp = HttpResponse::newHttpResponse();
-        callback(resp);
-        return;
-    }
-
-    readyz(req, [callback](const HttpResponsePtr &resp) {
-        resp->addHeader("Deprecation", "true");
-        resp->addHeader("Sunset", "2026-08-28");
-        callback(resp);
-    });
-}

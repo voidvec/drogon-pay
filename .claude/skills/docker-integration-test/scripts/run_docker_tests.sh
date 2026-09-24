@@ -55,7 +55,7 @@ import json
 import subprocess
 
 services = {
-    "payserver": "http://localhost:5566/health",
+    "payserver": "http://localhost:5566/healthz",
     "postgres": "localhost:5432",
     "redis": "localhost:6379",
 }

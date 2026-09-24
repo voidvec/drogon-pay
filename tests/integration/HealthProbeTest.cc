@@ -54,7 +54,10 @@ DROGON_TEST(HealthProbe_ReadinessEndpoint)
     });
 }
 
-DROGON_TEST(HealthProbe_CompatEndpoint_DeprecationHeader)
+// The `/health` alias outlived its `Sunset` header, so it is retired rather
+// than kept answering "successfully": an un-migrated probe has to see 404, not
+// a readiness answer that looks like its own endpoint still exists.
+DROGON_TEST(HealthProbe_RetiredCompatEndpoint_Answers404)
 {
     auto client = HttpClient::newHttpClient(pay::test_util::testBaseUrl());
     auto req = HttpRequest::newHttpRequest();
@@ -64,11 +67,6 @@ DROGON_TEST(HealthProbe_CompatEndpoint_DeprecationHeader)
     client->sendRequest(req, [TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
         REQUIRE(result == ReqResult::Ok);
         REQUIRE(resp != nullptr);
-
-        auto deprecation = resp->getHeader("Deprecation");
-        CHECK(deprecation == "true");
-
-        auto sunset = resp->getHeader("Sunset");
-        CHECK(!sunset.empty());
+        CHECK(resp->getStatusCode() == k404NotFound);
     });
 }

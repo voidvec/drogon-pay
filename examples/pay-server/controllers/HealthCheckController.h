@@ -11,7 +11,6 @@ class HealthCheckController : public drogon::HttpController<HealthCheckControlle
     METHOD_LIST_BEGIN
     ADD_METHOD_TO(HealthCheckController::healthz, "/healthz", Get, Options);
     ADD_METHOD_TO(HealthCheckController::readyz, "/readyz", Get, Options);
-    ADD_METHOD_TO(HealthCheckController::health, "/health", Get, Options);
     METHOD_LIST_END
 
     void healthz(
@@ -20,8 +19,6 @@ class HealthCheckController : public drogon::HttpController<HealthCheckControlle
     );
 
     void readyz(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback);
-
-    void health(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&callback);
 
   private:
     std::atomic<int> consecutiveFailures_{0};
