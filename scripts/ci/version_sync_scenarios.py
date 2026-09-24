@@ -46,7 +46,11 @@ def document(body: list[str], header: str = "info:") -> str:
 
 # Where a document marker sits, which `document()` cannot express: the same
 # three characters are a legal start of one document, the end of one, or the
-# start of a second that `safe_load` will never let this file be.
+# start of a second that `safe_load` will never let this file be. And how a
+# marker is spelled: only the bare three characters, space padding, and a
+# comment after the padding are a marker at all - a tab, a glued `#`, a word,
+# or a fourth dash is a scanner error the guard must not walk past. Every
+# expectation here was read off `yaml.safe_load` / `safe_load_all`.
 DOCUMENT_CASES: list[tuple[str, str, str | None]] = [
     ("leading ---", "---\nopenapi: 3.0.3\ninfo:\n  version: 1.1.0\n", VERSION),
     ("trailing ...", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...\n", VERSION),
@@ -54,6 +58,21 @@ DOCUMENT_CASES: list[tuple[str, str, str | None]] = [
     ("... then content", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...\nfoo: 1\n", None),
     ("--- then content", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n---\nfoo: 1\n", None),
     ("two leading ---", "---\nopenapi: 3.0.3\ninfo:\n  version: 1.1.0\n---\n", None),
+    # A comment rides a real marker: `--- # x` still opens a second document.
+    ("marker + comment splits", "openapi: 3.0.3\n--- # new contract\ninfo:\n  version: 1.1.0\n", None),
+    ("leading marker + comment", "--- # header\nopenapi: 3.0.3\ninfo:\n  version: 1.1.0\n", VERSION),
+    ("trailing ... + comment", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n... # close\n", VERSION),
+    # Markers glued to something: no parser reads these as a marker, or as
+    # anything else, so position does not save them.
+    ("marker + hash no space", "openapi: 3.0.3\n---#x\ninfo:\n  version: 1.1.0\n", None),
+    ("marker + tab padding", "openapi: 3.0.3\n---\t\ninfo:\n  version: 1.1.0\n", None),
+    ("marker + word after space", "openapi: 3.0.3\n--- x\ninfo:\n  version: 1.1.0\n", None),
+    ("marker + nbsp padding", "openapi: 3.0.3\n---\u00a0\ninfo:\n  version: 1.1.0\n", None),
+    ("marker + form feed", "openapi: 3.0.3\n---\x0c\ninfo:\n  version: 1.1.0\n", None),
+    ("four dashes", "openapi: 3.0.3\n----\ninfo:\n  version: 1.1.0\n", None),
+    ("dots + word", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n... x\n", None),
+    ("dots + hash no space", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...#x\n", None),
+    ("dotsfoo", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...foo\n", None),
 ]
 
 

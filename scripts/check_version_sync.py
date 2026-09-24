@@ -70,6 +70,12 @@ OPENAPI_VERSION_RE = re.compile(r"""^  version:(.*)$""")
 # than guessed past.
 INFO_HEADER_RE = re.compile(r"^info[ ]*:( +(?:#.*)?)?$")
 
+# A document marker's only legal forms: the three characters, then end of line,
+# then spaces, or spaces and a comment - and for a `---`/`...` that is glued to
+# anything else (a tab, a word, a `#`) there is no reading at all, because YAML
+# pads a marker with spaces and nothing else. Group 1 tells `---` from `...`.
+MARKER_RE = re.compile(r"^(---|\.\.\.)(?: +(?:#.*)?)?$")
+
 # What a line at the version's own indent has to look like to be the next key of
 # the block rather than junk folded into the scalar by a parser.
 SIBLING_KEY_RE = re.compile(r"^  [A-Za-z_][\w.\-]*:( |$)")
@@ -188,9 +194,10 @@ def openapi_info_version() -> str:
     What follows the value decides whether the read is single-line, which is the
     only thing a line reader may claim: a deeper-indented content line continues
     the scalar, an equal-indent line that is not a key is junk a parser folds in
-    or dies on, and an indented comment is neither. A document separator anywhere
-    in the file means there is more than one document, and `safe_load` refuses
-    that outright.
+    or dies on, and an indented comment is neither. Document markers are read by
+    position and spelling: only a column-0 line that is exactly `---` or `...`,
+    optionally space-padded and comment-suffixed, is a marker at all, and one of
+    those splits the document when content sits on the wrong side of it.
     """
     # `split("\\n")`, not `splitlines()`: the latter also breaks on \\x0c, \\x1c
     # and \\u2028, none of which is a line break to YAML, so splitting there can
@@ -202,16 +209,30 @@ def openapi_info_version() -> str:
     # not anything follows. `...` closes one, so it only hurts when something
     # does. Leading `---` and trailing `...` are legal ways to write a single
     # document, and refusing them would be the same mistake in the other
-    # direction: a gate that rejects valid input gets weakened.
+    # direction: a gate that rejects valid input gets weakened. And only the
+    # exact spelling is a marker: YAML pads a marker with spaces and allows a
+    # comment after them, but a tab (`---\t`), a glued `#`, junk appended
+    # (`--- x`, `----`, `...foo`) or an invisible non-space is not a marker and
+    # not a key either - a scanner dies on it, so a column-0 line that starts
+    # like a marker but does not end like one is refused wherever it stands.
     content = [i for i, line in enumerate(lines)
                if line.strip() and not line.strip().startswith("#")]
-    splits = [
-        i for i, line in enumerate(lines)
-        if line.rstrip(" \t") == "---" and any(j < i for j in content)
-    ] + [
-        i for i, line in enumerate(lines)
-        if line.rstrip(" \t") == "..." and any(j > i for j in content)
-    ]
+    splits = []
+    for i, line in enumerate(lines):
+        if not (line.startswith("---") or line.startswith("...")):
+            continue
+        marker = MARKER_RE.match(line)
+        if not marker:
+            raise SyncError(
+                f"{OPENAPI_YAML}: line {i + 1} starts like a document marker "
+                "but is glued to something - a tab, a `#`, a word - which no "
+                "YAML scanner reads as a marker or as anything else."
+            )
+        if (marker.group(1) == "---" and any(j < i for j in content)) or \
+           (marker.group(1) == "..." and any(j > i for j in content)):
+            # `---` with content above opens a second document; `...` with
+            # content below ends one and strands the rest.
+            splits.append(i)
     if splits:
         raise SyncError(
             f"{OPENAPI_YAML}: line {min(splits) + 1} separates documents, so this "
