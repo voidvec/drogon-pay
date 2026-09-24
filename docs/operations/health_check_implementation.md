@@ -56,8 +56,11 @@ exposed: `/healthz` (liveness) and `/readyz` (readiness).
 ```
 
 `failed` is an array that may contain `"db"`, `"redis"`, and `"timeout"`
-(the readiness probe has a 1-second deadline). Readiness also applies a
-consecutive-failure threshold before flipping to "not_ready".
+(the readiness probe has a 1-second deadline, so a dependency that hangs without
+erroring reports `"timeout"` rather than its own name). Readiness is debounced:
+an instance starts not-ready, so a dependency failure before the first success
+answers 503 immediately, while one that has already reported `ready` keeps doing
+so until `FAILURE_THRESHOLD` (3) consecutive probes fail.
 
 **Endpoint:** `GET /health` — retired, answers 404
 
@@ -78,8 +81,9 @@ the status and the absence of registration.
    - Redis: runs `PING`; only probed when a Redis client is configured
      (when `redis_client` is omitted from config, Redis is not checked)
    - A 1-second deadline records `"timeout"` if probes do not complete
-   - HTTP 200 `"ready"` when no failures, otherwise HTTP 503 `"not_ready"`
-     with the `failed` list
+   - HTTP 200 `"ready"` when it currently believes itself ready, HTTP 503
+     `"not_ready"` with the `failed` list otherwise — subject to the debounce
+     described above, so a failure is not automatically a 503
 
 ### Building the Project
 

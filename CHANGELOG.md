@@ -287,16 +287,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **The `/health` alias of `/readyz` is gone.** Its own `Sunset` response
-  header said `2026-08-28`, and the callers that still used it had already
-  moved to `/healthz` / `/readyz` earlier in this cycle (see Fixed), so the
-  deprecation window closed with nothing left inside it. Probes must name
-  `/readyz` now; `GET /health` answers 404, which is what tells an
-  un-migrated probe its endpoint stopped existing rather than quietly
-  continuing to succeed — `HealthProbe_RetiredCompatEndpoint_Answers404`
-  pins it.
-  `examples/pay-server/openapi.yaml` dropped the path and its preflight with
-  the code, so the route-parity gate holds the contract on both sides.
+- **The `/health` alias of `/readyz` is gone.** The `Deprecation: true` and
+  `Sunset: 2026-08-28` headers were added on 2026-05-28 (373d235), 92 days ahead
+  of the date they named, and the route itself is older than that — the alias
+  predates the headers it carried. So the window the deprecation promised closed
+  before this commit, and the callers still using it had already moved to
+  `/healthz` / `/readyz` earlier in this cycle (see Fixed). Probes must name
+  `/readyz` now, and `GET /health` answers 404 — which is what tells an
+  un-migrated probe its endpoint stopped existing, rather than letting it go on
+  succeeding against an answer it did not ask for.
+  `HealthProbe_RetiredCompatEndpoint_Answers404` pins the 404, the absence of the
+  `Deprecation` header, and the absence of the registration itself;
+  `examples/pay-server/openapi.yaml` dropped the path and its preflight with the
+  code, so the route-parity gate holds the contract on both sides.
 
 ### Fixed
 
@@ -336,6 +339,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the three scalars are quoted. Verified with `yaml.safe_load` on the whole
   document, which reports 14 paths / 26 operations, matching what the route gate
   counts by regex.
+
+- **The version gate could read a version out of a file nobody could load.**
+  Making the contract a declaration site meant teaching `check_version_sync.py`
+  to read one line of YAML without a YAML parser, and that read had four shapes
+  where a scanner and a consumer's parser resolve to different text: `version:`
+  padded with a tab (PyYAML stops on the line; the guard saw `1.1.0`), a plain
+  scalar continued by a deeper-indented next line (the parser reads
+  `1.1.0 9.9.9`; the guard read the first line), the same continuation across a
+  blank line (the parser folds it to `1.1.0\n9.9.9`), and a trailing
+  non-breaking space (not whitespace to YAML, padding to `.strip()`). Each was
+  reproduced against `yaml.safe_load` before being fixed, and each is a false
+  pass — the failure mode this repo treats as worse than a false red, which the
+  same review found twice: `version: "1.1.0" # ship it` was refused with a
+  message claiming the trailing text was the problem when the value had already
+  closed its quote, and the first cut of the continuation guard refused a
+  deeper-indented **comment** line, which a parser treats as nothing at all. The
+  reader now accepts only what a parser agrees to, and refuses every other shape
+  it cannot resolve the same way — anchor, alias, tag, block scalar,
+  continuation, escape inside double quotes, unclosed quote, doubled `''`, tab
+  or non-ASCII padding — saying which.
+  `scripts/ci/version_sync_scenarios.py` pins that list as a decision table
+  (a `static-analysis` step; the script prints its own case count rather than
+  letting prose age), replaying each spelling against a synthetic document, and
+  asserts the one fact the table alone could fake: the value read out of the
+  repo's own contract is a member of the agreeing set. Two of its cases were
+  checked backwards — replayed against the pre-fix reader, which accepted
+  `1.1.0\n9.9.9` and refused the indented comment — so the table is known to
+  catch the bugs it was written for.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local

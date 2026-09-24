@@ -146,7 +146,10 @@ curl http://localhost:5566/readyz    # 就绪探针（探测 DB/Redis 连通性�
 ```
 
 > 说明：`/health` 曾是 `/readyz` 的废弃别名，其 `Sunset` 头写的日期已过，别名已退役，
-> 现在返回 404；就绪失败时 `/readyz` 返回 `{"status":"not_ready","failed":["db"]}`。
+> 现在返回 404。就绪失败时 `/readyz` 返回 `{"status":"not_ready","failed":["db"]}`，
+> 但有防抖：从未成功过的实例第一次探测就会返回它，而已经 ready 过的实例要连续失败 3 次
+> 才翻转，前 2 次仍返回 200 `ready`。另外，DB 挂起（不报错也不响应）记的是 `"timeout"`
+> 而不是 `"db"`。
 
 **API测试：**
 ```bash
@@ -375,8 +378,9 @@ redis-cli PING
 #### 数据库连接失败
 
 **症状：**
-- 日志显示 "Database connection failed"
-- /readyz返回 `{"status":"not_ready","failed":["db"]}`
+- /readyz 返回 503 `{"status":"not_ready","failed":["db"]}`（从未成功过的实例第一次探测即如此；已 ready 过的要连续失败 3 次才翻转）
+- 连接是挂起而非报错时，`failed` 里是 `"timeout"` 而不是 `"db"`
+- 应用侧不会为探测失败写日志：`readyz` 的失败回调只把 `"db"` 记进 `failed`，所以别在日志里找 "Database connection failed"，这串字符在代码里不存在
 
 **诊断：**
 
