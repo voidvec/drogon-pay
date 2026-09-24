@@ -56,8 +56,10 @@ PACKAGE_JSON = "examples/pay-admin/package.json"
 OPENAPI_YAML = "examples/pay-server/openapi.yaml"
 
 # Two-space indent, so a `version:` scalar nested deeper in a path item cannot
-# pass for the contract's own declaration.
-OPENAPI_VERSION_RE = re.compile(r"""^  version:\s*["']?(\d+\.\d+\.\d+)["']?\s*$""")
+# pass for the contract's own declaration. The value is captured whole and
+# validated separately, so an unparseable scalar fails loudly instead of
+# looking like a missing line.
+OPENAPI_VERSION_RE = re.compile(r"""^  version:(.*)$""")
 
 # Distinguishes "flag absent" from `--tag ""`, which must fail rather than fall
 # back to the default mode and report success.
@@ -74,30 +76,66 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def semver_scalar(scalar: str) -> str:
+    """Validate a contract scalar that has to read as a bare X.Y.Z version.
+
+    YAML ends any plain scalar at " #", and a quoted one may carry a comment
+    after the closing quote, so both spellings are read here rather than
+    rejected: refusing `"1.1.0" # ship it` would fail the gate on a line every
+    consumer's parser reads correctly.
+    """
+    body = scalar.split(" #", 1)[0].rstrip()
+    quote = body[:1]
+    if quote in ("'", '"'):
+        if len(body) < 3 or body[-1:] != quote:
+            raise SyncError(
+                f"{OPENAPI_YAML}: `version: {scalar}` opens a quote it never "
+                "closes - no consumer's YAML parser reads a version from that"
+            )
+        value = body[1:-1]
+    else:
+        value = body
+
+    if not SEMVER_RE.match(value):
+        raise SyncError(
+            f"{OPENAPI_YAML}: `version: {scalar}` inside `info:` does not read "
+            "as X.Y.Z"
+        )
+    return value
+
+
 def openapi_info_version() -> str:
     """Read the contract's own `info: version:`, refusing an ambiguous read.
 
-    `info:` is located as a top-level key and the scan stops at the next one,
-    because the document has `version`-shaped scalars elsewhere and a checker
-    that matched the first `version:` it found anywhere would read whichever
-    block happened to come first in the file.
+    `info:` has to appear exactly once as a top-level key. Taking the first
+    occurrence and ignoring the rest is the bypass the `findall` rule exists to
+    close for every other site: a second block would state one version to this
+    checker and another to a YAML parser. The scan of the first block stops at
+    the next top-level key, because the document carries `version`-shaped
+    scalars deeper in `paths:` and `components:`.
     """
     lines = read(REPO_ROOT / OPENAPI_YAML).splitlines()
-    try:
-        start = next(i for i, line in enumerate(lines) if line.rstrip() == "info:")
-    except StopIteration:
+    starts = [i for i, line in enumerate(lines) if line.rstrip() == "info:"]
+    if not starts:
         raise SyncError(
             f"{OPENAPI_YAML}: no top-level `info:` block - the checker's idea of "
             "the contract's shape and the file have drifted apart"
         )
+    if len(starts) > 1:
+        raise SyncError(
+            f"{OPENAPI_YAML}: {len(starts)} top-level `info:` blocks at lines "
+            f"{', '.join(str(i + 1) for i in starts)}. This check would read the "
+            "first and leave the rest unchecked, which is a version no gate "
+            "compares."
+        )
 
     found: list[str] = []
-    for line in lines[start + 1:]:
+    for line in lines[starts[0] + 1:]:
         if line.strip() and not line.startswith("  "):
             break
         match = OPENAPI_VERSION_RE.match(line)
         if match:
-            found.append(match.group(1))
+            found.append(match.group(1).strip())
 
     if len(found) != 1:
         raise SyncError(
@@ -106,7 +144,7 @@ def openapi_info_version() -> str:
             "how this site gets a false pass: the check would read the first and "
             "the published contract would mean the other."
         )
-    return found[0]
+    return semver_scalar(found[0])
 
 
 def declared_versions() -> dict[str, str]:
@@ -148,9 +186,8 @@ def changelog_has_section(version: str) -> bool:
     return bool(header.search(read(REPO_ROOT / "CHANGELOG.md")))
 
 
-def agreed_version() -> str:
+def agreed_version(versions: dict[str, str]) -> str:
     """Print every site and return the one version they state, or raise."""
-    versions = declared_versions()
     print("Declared versions:")
     for site, version in sorted(versions.items()):
         print(f"  {version:<10} {site}")
@@ -177,13 +214,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        declared = agreed_version()
+        versions = declared_versions()
+        declared = agreed_version(versions)
 
         if args.tag is NO_TAG:
-            print(
-                f"Version sync passed ({declared} in "
-                f"{len(declared_versions())} places)."
-            )
+            print(f"Version sync passed ({declared} in {len(versions)} places).")
             return 0
 
         if not isinstance(args.tag, str) or not args.tag.startswith("v") \
