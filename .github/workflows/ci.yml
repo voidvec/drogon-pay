@@ -103,11 +103,19 @@ jobs:
       - name: Migration hygiene guard
         run: python3 scripts/check_migrations.py
 
-      # Version is declared three times (CMakeLists / conanfile / pay-admin);
-      # catching the drift here means a tagged release never discovers that a
-      # PR could have fixed it.
+      # Version is declared four times (CMakeLists / conanfile / pay-admin /
+      # the openapi contract); catching the drift here means a tagged release
+      # never discovers that a PR could have fixed it.
       - name: Version sync guard
         run: python3 scripts/check_version_sync.py
+
+      # The contract's version is read line by line because this gate is
+      # stdlib-only, so a scanner stands in for a YAML parser. That table pins
+      # which spellings each side agrees on -- anchors, tags, block scalars,
+      # continuation lines, tabs used as padding -- because a shape the two read
+      # differently is a version gate green on a number nobody publishes.
+      - name: Version sync decision table
+        run: python3 scripts/ci/version_sync_scenarios.py
 
       # The tag gate is release policy written in bash, so nothing in the C++
       # suite can cover it. This replays the workflow's own `run:` bytes against
