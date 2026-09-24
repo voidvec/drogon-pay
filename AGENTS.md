@@ -112,10 +112,13 @@ Rules in [TECH_SPECS.md](TECH_SPECS.md) "迁移工程化"; new files via
 
 ### Versioning
 
-The version is declared three times and never derived: `project(drogon-pay
-VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level
-`"version"` in `examples/pay-admin/package.json`. `scripts/check_version_sync.py`
-enforces it: the FAST gate runs it with no arguments, which requires the three
+The version is declared four times and never derived: `project(drogon-pay
+VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, the top-level
+`"version"` in `examples/pay-admin/package.json`, and `info: version:` in
+`examples/pay-server/openapi.yaml` — the last one because the contract publishes a
+version to consumers, and a document no gate reads is how it stated a release that
+had never shipped. `scripts/check_version_sync.py`
+enforces it: the FAST gate runs it with no arguments, which requires the four
 declarations to agree, and the `version-check` job that opens
 `.github/workflows/release.yml` re-runs it with `--tag "$GITHUB_REF_NAME"`, which
 also requires the tag to equal them and `CHANGELOG.md` to carry a `## [x.y.z]`
@@ -137,7 +140,7 @@ pull request into master
 (`scripts/ci/tag_gate_scenarios.py` drives the workflow's own `run:` bytes against
 a stand-in API), so re-run it before editing the gate. Never
 hand-write a version into a deploy/config comment: those strings were the drift
-source and have been deleted. Bumping = three declarations + a new CHANGELOG
+source and have been deleted. Bumping = four declarations + a new CHANGELOG
 section, then tag.
 
 ## Critical Constraints (always enforce)

@@ -1,12 +1,12 @@
 ---
 name: release
-description: 发布 drogon-pay：归档 CHANGELOG、同步三处版本号声明、打 tag；GitHub Release 由 CI 自动创建
+description: 发布 drogon-pay：归档 CHANGELOG、同步四处版本号声明、打 tag；GitHub Release 由 CI 自动创建
 disable-model-invocation: true
 ---
 
 # Release 发布技能
 
-把发布做成**可验证**的动作：三处版本号声明同步、`CHANGELOG.md` 有对应版本段，
+把发布做成**可验证**的动作：四处版本号声明同步、`CHANGELOG.md` 有对应版本段，
 tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub Release。
 
 ## 使用时机
@@ -15,17 +15,18 @@ tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub
 
 ## 版本号存在哪里
 
-版本只**声明**、不派生，且只允许三处（SemVer `MAJOR.MINOR.PATCH`）：
+版本只**声明**、不派生，且只允许四处（SemVer `MAJOR.MINOR.PATCH`）：
 
 | 位置 | 字段 |
 |------|------|
 | `CMakeLists.txt`（仓库根） | `project(drogon-pay VERSION x.y.z …)` |
 | `conanfile.py` | `version = "x.y.z"` |
 | `examples/pay-admin/package.json` | 顶层 `"version"` |
+| `examples/pay-server/openapi.yaml` | `info:` 下的 `version:` |
 
 `libs/drogon-pay/CMakeLists.txt` 以 `${PROJECT_VERSION}` 引用，不要在那里另写一个数字。
-`scripts/check_version_sync.py` 是这件事的门禁：不带参数断言三处一致（`static-analysis`
-每个 PR 跑一次）；`--tag vX.Y.Z` 额外要求 tag 等于三处声明，且 `CHANGELOG.md` 已有
+`scripts/check_version_sync.py` 是这件事的门禁：不带参数断言四处一致（`static-analysis`
+每个 PR 跑一次）；`--tag vX.Y.Z` 额外要求 tag 等于四处声明，且 `CHANGELOG.md` 已有
 `## [x.y.z]` 段。
 
 检查器**不看文档**，所以还有一类人肉同步点：`README.md`、`README.zh-CN.md`、
@@ -58,9 +59,9 @@ git log --oneline -1 origin/master     # 发布内容必须已经在 master 上
 
 顺序很重要：版本段必须先于 tag 存在，`version-check` 才有东西可校验。
 
-### 3. 同步三处版本号
+### 3. 同步四处版本号
 
-同一个提交里改上表三处。**不要**在配置、部署或告警文件的注释里复述版本号——
+同一个提交里改上表四处。**不要**在配置、部署或告警文件的注释里复述版本号——
 那六处注释正是这套检查器存在的原因。
 
 ### 4. 本地预演发布门
