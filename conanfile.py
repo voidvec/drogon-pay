@@ -21,7 +21,7 @@ from conan.tools.files import copy, rmdir
 
 class DrogonPayConan(ConanFile):
     name = "drogon-pay"
-    version = "1.0.0"
+    version = "1.1.0"
     license = "MIT"
     url = "https://github.com/lucaswang420/drogon-pay"
     description = "A reusable payment plugin for the Drogon framework"

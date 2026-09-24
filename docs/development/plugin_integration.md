@@ -4,7 +4,7 @@
 通过 **Conan 依赖 + `find_package(DrogonPay)` + config.json 插件块** 即可获得完整
 的支付能力（创建/查询/退款/回调/对账/幂等），无需拷贝任何业务代码。
 
-- 库目标：`DrogonPay::DrogonPay`（CMake 包名 `DrogonPay`，Conan 包 `drogon-pay/1.0.0`）
+- 库目标：`DrogonPay::DrogonPay`（CMake 包名 `DrogonPay`，Conan 包 `drogon-pay/1.1.0`）
 - 公共 API 仅 4 个头文件：`drogon_pay/PayPlugin.h`、`drogon_pay/PaymentChannel.h`、
   `drogon_pay/ChannelRegistry.h`、`drogon_pay/PayErrorCategory.h`
 - 参考宿主：[examples/pay-server](../../examples/pay-server/)（完整宿主）与
@@ -24,7 +24,7 @@
 
 ```python
 def requirements(self):
-    self.requires("drogon-pay/1.0.0")
+    self.requires("drogon-pay/1.1.0")
     # drogon/1.9.13、openssl、jsoncpp 会作为传递依赖自动带入
 ```
 

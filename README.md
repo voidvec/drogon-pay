@@ -28,7 +28,7 @@ config.json plugins: [PayPlugin] ──▶ channel assembly → service wiring �
 
 ## Features
 
-- **Plugin as a library**: `drogon-pay/1.0.0` Conan package (`static-library`),
+- **Plugin as a library**: `drogon-pay/1.1.0` Conan package (`static-library`),
   CMake target `DrogonPay::DrogonPay`, public API is just 4 headers
 - **Channel SPI**: `drogon_pay::PaymentChannel` abstract interface +
   `ChannelRegistry` with startup-time registration/freeze; unknown channels fail
@@ -51,7 +51,7 @@ config.json plugins: [PayPlugin] ──▶ channel assembly → service wiring �
 ```python
 # conanfile.py
 def requirements(self):
-    self.requires("drogon-pay/1.0.0")
+    self.requires("drogon-pay/1.1.0")
 ```
 
 ```cmake
