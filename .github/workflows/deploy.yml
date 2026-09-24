@@ -197,7 +197,7 @@ jobs:
         run: |
           # Perform health checks
           for i in {1..30}; do
-            if curl -f https://api.example.com/health; then
+            if curl -f https://api.example.com/readyz; then
               echo "Health check passed"
               exit 0
             fi
