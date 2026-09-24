@@ -126,10 +126,11 @@ section. The contract site is read **line by line** — the FAST gate is
 stdlib-only, so it cannot import a YAML parser — which makes every spelling a
 scanner and a parser could disagree about a hole in the gate;
 `scripts/ci/version_sync_scenarios.py` pins those shapes as a decision table
-(anchor, tag, alias, block scalar, continuation line, tab-as-padding, unclosed
-quote, doubled `''` escape, trailing comment…; the script prints its own case
-count, because a number pasted into prose is the drift this repo deletes
-elsewhere) that runs beside the guard on
+(anchor, tag, alias, block scalar, continuation, junk at the value's own indent,
+a second document, tab or non-ASCII padding *and* indentation, a form feed in the
+value, a leading zero, unclosed quote, doubled `''`, trailing comment…; the
+script prints its own case count, because a number pasted into prose is the
+drift this repo deletes elsewhere) that runs beside the guard on
 every pull request, and asserts one fact the table alone could fake: the value the
 repo's own contract reads is a member of the agreeing set. A tag is never merged, so the ruleset's required checks do not cover
 it: `.github/workflows/_tag-gate.yml` — called by release.yml's `ci-gate` and by

@@ -37,10 +37,10 @@ spec.loader.exec_module(cvs)
 VERSION = "1.1.0"
 
 
-def document(body: list[str]) -> str:
+def document(body: list[str], header: str = "info:") -> str:
     """A contract whose `info:` block holds exactly these raw lines."""
     return "\n".join(
-        ["openapi: 3.0.3", "info:", *body, "paths: {}", "components: {}"]
+        ["openapi: 3.0.3", header, *body, "paths: {}", "components: {}"]
     )
 
 
@@ -55,53 +55,73 @@ def with_reader(text: str):
     cvs.read = fake_read  # type: ignore[assignment]
 
 
-# label, info-block lines, expected value or None for "must refuse"
-CASES: list[tuple[str, list[str], str | None]] = [
+# label, block header, info-block lines, expected value or None for "must refuse"
+Case = tuple[str, str, list[str], str | None]
+HEADER = "info:"
+CASES: list[Case] = [
     # The spellings a release may actually use.
-    ("plain", ["  version: 1.1.0"], VERSION),
-    ("double quoted", ['  version: "1.1.0"'], VERSION),
-    ("single quoted", ["  version: '1.1.0'"], VERSION),
-    ("trailing padding", ["  version: 1.1.0   "], VERSION),
-    ("plain + comment", ["  version: 1.1.0 # bumped with the tag"], VERSION),
-    ("quoted + comment", ['  version: "1.1.0" # bumped'], VERSION),
-    ("quoted + hash no space", ['  version: "1.1.0"#bumped'], VERSION),
-    ("sibling key after", ["  version: 1.1.0", "  title: pay"], VERSION),
-    ("version is the last key", ["  title: pay", "  version: 1.1.0"], VERSION),
+    ("plain", HEADER, ["  version: 1.1.0"], VERSION),
+    ("double quoted", HEADER, ['  version: "1.1.0"'], VERSION),
+    ("single quoted", HEADER, ["  version: '1.1.0'"], VERSION),
+    ("trailing padding", HEADER, ["  version: 1.1.0   "], VERSION),
+    ("plain + comment", HEADER, ["  version: 1.1.0 # bumped with the tag"], VERSION),
+    ("quoted + comment", HEADER, ['  version: "1.1.0" # bumped'], VERSION),
+    ("quoted + hash no space", HEADER, ['  version: "1.1.0"#bumped'], VERSION),
+    ("sibling key after", HEADER, ["  version: 1.1.0", "  title: pay"], VERSION),
+    ("nested block after", HEADER,
+     ["  version: 1.1.0", "  contact:", "    name: pay"], VERSION),
+    ("blank then sibling key", HEADER,
+     ["  version: 1.1.0", "", "  title: pay"], VERSION),
+    ("version is the last key", HEADER, ["  title: pay", "  version: 1.1.0"], VERSION),
+    # The header itself: padding a parser ignores is padding this reader ignores
+    # too, and padding YAML does not accept is not a header at all.
+    ("header + trailing comment", "info: # the contract", ["  version: 1.1.0"], VERSION),
+    ("header + space before colon", "info :", ["  version: 1.1.0"], VERSION),
+    ("header padded with a tab", "info:\t", ["  version: 1.1.0"], None),
+    ("header padded with nbsp", "info:\u00a0", ["  version: 1.1.0"], None),
     # A comment is not content: a parser never folds it into the scalar, so the
     # scanner must not read the indented line below as a continuation either.
-    ("deeper indented comment", ["  version: 1.1.0", "    # note", "  title: pay"], VERSION),
+    ("deeper indented comment", HEADER,
+     ["  version: 1.1.0", "    # note", "  title: pay"], VERSION),
     # Shapes a YAML parser resolves into something the line does not show.
-    ("anchor", ["  version: &v 1.1.0"], None),
-    ("tag", ["  version: !!str 1.1.0"], None),
-    ("alias", ["  version: *v"], None),
-    ("folded block scalar", ["  version: >", "    1.1.0"], None),
-    ("literal block scalar", ["  version: |", "    1.1.0"], None),
-    ("block scalar header only", ["  version: >"], None),
-    ("plain continuation", ["  version: 1.1.0", "    9.9.9"], None),
-    ("blank line then deeper text", ["  version: 1.1.0", "", "    9.9.9"], None),
-    ("empty value with nested block", ["  version:", "    a: 1"], None),
-    ("tab after colon", ["  version:\t1.1.0"], None),
-    ("tab in value", ["  version: 1.1\t0"], None),
-    ("non-breaking space", ["  version: 1.1.0\u00a0"], None),
-    ("escape in double quotes", ['  version: "1.1.0\\n"'], None),
+    ("anchor", HEADER, ["  version: &v 1.1.0"], None),
+    ("tag", HEADER, ["  version: !!str 1.1.0"], None),
+    ("alias", HEADER, ["  version: *v"], None),
+    ("folded block scalar", HEADER, ["  version: >", "    1.1.0"], None),
+    ("literal block scalar", HEADER, ["  version: |", "    1.1.0"], None),
+    ("block scalar header only", HEADER, ["  version: >"], None),
+    ("plain continuation", HEADER, ["  version: 1.1.0", "    9.9.9"], None),
+    ("blank line then deeper text", HEADER, ["  version: 1.1.0", "", "    9.9.9"], None),
+    ("equal-indent junk", HEADER, ["  version: 1.1.0", "  9.9.9"], None),
+    ("equal-indent list item", HEADER, ["  version: 1.1.0", "  - x"], None),
+    ("tab-indented follower", HEADER, ["  version: 1.1.0", "\t9.9.9"], None),
+    ("form feed in value", HEADER, ["  version: 1.1.0\x0c9.9.9"], None),
+    ("line separator in value", HEADER, ["  version: 1.1.0\u20289.9.9"], None),
+    ("second document", HEADER, ["  version: 1.1.0", "---", "foo: 1"], None),
+    ("empty value with nested block", HEADER, ["  version:", "    a: 1"], None),
+    ("tab after colon", HEADER, ["  version:\t1.1.0"], None),
+    ("tab in value", HEADER, ["  version: 1.1\t0"], None),
+    ("non-breaking space", HEADER, ["  version: 1.1.0\u00a0"], None),
+    ("escape in double quotes", HEADER, ['  version: "1.1.0\\n"'], None),
     # The reads that would be ambiguous even if each line is well-formed.
-    ("two version lines", ["  version: 1.1.0", "  version: 9.9.9"], None),
-    ("unbalanced quote", ['  version: "1.1.0'], None),
-    ("doubled quote escape", ["  version: '1.1''0'"], None),
-    ("text after closing quote", ['  version: "1.1.0" junk'], None),
-    ("no value", ["  version:"], None),
-    ("flow mapping", ["  version: {a: 1}"], None),
-    ("not semver", ["  version: 1.1"], None),
-    ("prerelease suffix", ["  version: 1.1.0-rc1"], None),
-    ("missing block", ["  title: pay"], None),
+    ("two version lines", HEADER, ["  version: 1.1.0", "  version: 9.9.9"], None),
+    ("unbalanced quote", HEADER, ['  version: "1.1.0'], None),
+    ("doubled quote escape", HEADER, ["  version: '1.1''0'"], None),
+    ("text after closing quote", HEADER, ['  version: "1.1.0" junk'], None),
+    ("no value", HEADER, ["  version:"], None),
+    ("flow mapping", HEADER, ["  version: {a: 1}"], None),
+    ("not semver", HEADER, ["  version: 1.1"], None),
+    ("leading zero", HEADER, ["  version: 01.1.0"], None),
+    ("prerelease suffix", HEADER, ["  version: 1.1.0-rc1"], None),
+    ("missing block", HEADER, ["  title: pay"], None),
 ]
 
 
 def run_cases() -> list[str]:
     failures: list[str] = []
     real_read = cvs.read
-    for label, body, expected in CASES:
-        text = document(body)
+    for label, header, body, expected in CASES:
+        text = document(body, header)
         try:
             with_reader(text)
             got = cvs.openapi_info_version()

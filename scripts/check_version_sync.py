@@ -37,7 +37,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# No leading zeros: `01.1.0` is not a SemVer version, and neither is a tag
+# spelled that way, however well the four sites agree on it.
+SEMVER_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
 
 # The trailing (?![\d.]) turns `VERSION 1.0.0.1` into a "pattern and file have
 # drifted apart" failure instead of a match that reads 1.0.0 out of four parts.
@@ -60,6 +62,17 @@ OPENAPI_YAML = "examples/pay-server/openapi.yaml"
 # validated separately, so an unparseable scalar fails loudly instead of
 # looking like a missing line.
 OPENAPI_VERSION_RE = re.compile(r"""^  version:(.*)$""")
+
+# The block header this reader anchors on. Spaces and a trailing comment are
+# padding a parser ignores, so `info :`, `info:` and `info: # contract` all open
+# the same block; a tab or a non-ASCII space after the key is not padding to
+# YAML at all, so those spellings are not a header here and are refused rather
+# than guessed past.
+INFO_HEADER_RE = re.compile(r"^info[ ]*:( +(?:#.*)?)?$")
+
+# What a line at the version's own indent has to look like to be the next key of
+# the block rather than junk folded into the scalar by a parser.
+SIBLING_KEY_RE = re.compile(r"^  [A-Za-z_][\w.\-]*:( |$)")
 
 # Distinguishes "flag absent" from `--tag ""`, which must fail rather than fall
 # back to the default mode and report success.
@@ -141,24 +154,66 @@ def semver_scalar(scalar: str) -> str:
     return value
 
 
+def _leading_ws(line: str) -> str:
+    i = 0
+    while i < len(line) and line[i].isspace():
+        i += 1
+    return line[:i]
+
+
+def _next_content(lines: list[str], start: int) -> int:
+    """Index of the first line at or after `start` that a parser reads as content.
+
+    Blank lines are skipped, and so are comment-only lines: YAML strips a comment
+    before it ever reaches a scalar, so an indented comment does not continue a
+    value, while an indented blank line does not end one either.
+    """
+    for i in range(start, len(lines)):
+        stripped = lines[i].strip()
+        if stripped and not stripped.startswith("#"):
+            return i
+    return -1
+
+
 def openapi_info_version() -> str:
     """Read the contract's own `info: version:`, refusing an ambiguous read.
 
     `info:` has to appear exactly once as a top-level key. Taking the first
     occurrence and ignoring the rest is the bypass the `findall` rule exists to
     close for every other site: a second block would state one version to this
-    checker and another to a YAML parser. The scan of the first block stops at
-    the next top-level key, because the document carries `version`-shaped
-    scalars deeper in `paths:` and `components:`. A deeper-indented line after
-    the value is a continuation and is refused; a deeper-indented comment is
-    nothing to a parser, so it must not be mistaken for one.
+    checker and another to a YAML parser. The scan of the block stops at the next
+    top-level key, because the document carries `version`-shaped scalars deeper in
+    `paths:` and `components:`.
+
+    What follows the value decides whether the read is single-line, which is the
+    only thing a line reader may claim: a deeper-indented content line continues
+    the scalar, an equal-indent line that is not a key is junk a parser folds in
+    or dies on, and an indented comment is neither. A document separator anywhere
+    in the file means there is more than one document, and `safe_load` refuses
+    that outright.
     """
-    lines = read(REPO_ROOT / OPENAPI_YAML).splitlines()
-    starts = [i for i, line in enumerate(lines) if line.rstrip() == "info:"]
+    # `split("\\n")`, not `splitlines()`: the latter also breaks on \\x0c, \\x1c
+    # and \\u2028, none of which is a line break to YAML, so splitting there can
+    # hand this reader a clean first line from a value no parser ever saw.
+    lines = read(REPO_ROOT / OPENAPI_YAML).split("\n")
+
+    separators = [i for i, line in enumerate(lines)
+                  if line.rstrip(" \t") in ("---", "...")]
+    if separators:
+        raise SyncError(
+            f"{OPENAPI_YAML}: a document marker at line "
+            f"{', '.join(str(i + 1) for i in separators)}. `safe_load` reads one "
+            "document and stops at that line, so a version on either side of it is "
+            "a version no consumer receives."
+        )
+
+    starts = [i for i, line in enumerate(lines) if INFO_HEADER_RE.match(line)]
     if not starts:
         raise SyncError(
-            f"{OPENAPI_YAML}: no top-level `info:` block - the checker's idea of "
-            "the contract's shape and the file have drifted apart"
+            f"{OPENAPI_YAML}: no `info:` block header this check recognises - it "
+            "reads a top-level `info:` with spaces or a comment after it, and the "
+            "file has neither, so the checker's idea of the contract and the "
+            "document have drifted apart"
         )
     if len(starts) > 1:
         raise SyncError(
@@ -176,27 +231,26 @@ def openapi_info_version() -> str:
         if not match:
             continue
         raw = match.group(1)
-        # A plain scalar continues while a following, more-indented line carries
-        # content; a comment line never continues one, and a blank one does not
-        # end the possibility either (a parser folds it in as a newline). So the
-        # scan skips comments and blanks to the next line that means something.
-        continued = ""
-        continued_at = offset
-        for peek, following in enumerate(lines[offset + 1:], offset + 1):
-            stripped = following.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            continued = following
-            continued_at = peek
-            break
-        if (raw.strip(" ") and continued
-                and len(continued) - len(continued.lstrip(" ")) > 2):
-            raise SyncError(
-                f"{OPENAPI_YAML}: the `version:` value at line {offset + 1} "
-                f"continues onto line {continued_at + 1}, so a YAML parser reads "
-                f"`{raw.strip(' ')} {continued.strip(' ')}` and this check would "
-                "read one line of it"
-            )
+        nxt = _next_content(lines, offset + 1)
+        if nxt >= 0:
+            following = lines[nxt]
+            pad = _leading_ws(following)
+            if pad and any(ch != " " for ch in pad):
+                raise SyncError(
+                    f"{OPENAPI_YAML}: line {nxt + 1} is indented with "
+                    f"{set(pad)!r} - YAML accepts only spaces as indentation, so a "
+                    "consumer's parser stops on this file while a lenient read "
+                    "would go on to the version line"
+                )
+            if len(pad) > 2 or (len(pad) == 2 and not SIBLING_KEY_RE.match(following)):
+                what = ("the value" if not raw.strip(" ") else
+                        f"`{raw.strip(' ')}`")
+                raise SyncError(
+                    f"{OPENAPI_YAML}: after {what} at line {offset + 1}, line "
+                    f"{nxt + 1} sits at indent {len(pad)}, so a YAML parser either "
+                    "folds it into this scalar or rejects the file - either way "
+                    "the version is not the one line this check can read"
+                )
         found.append(raw)
 
     if len(found) != 1:
