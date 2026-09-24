@@ -688,51 +688,6 @@ paths:
         "200":
           description: Empty preflight answer
 
-  /health:
-    get:
-      tags: [host]
-      operationId: healthDeprecated
-      summary: Readiness probe (deprecated alias of /readyz)
-      deprecated: true
-      description: |
-        Same behaviour as `/readyz` plus `Deprecation: true` and
-        `Sunset: 2026-08-28` response headers. Kept for hosts that have not
-        migrated their probes.
-      security: []
-      responses:
-        "200":
-          description: Ready
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [ready]
-        "503":
-          description: Not ready
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [not_ready]
-                  failed:
-                    type: array
-                    items:
-                      type: string
-    options:
-      tags: [host]
-      operationId: healthDeprecatedPreflight
-      summary: CORS preflight
-      security: []
-      responses:
-        "200":
-          description: Empty preflight answer
-
   /metrics:
     get:
       tags: [host]

@@ -273,6 +273,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `secrets-scan.yml` keeps its inherited grants on purpose: gitleaks posts a
   commit status, and narrowing it without a run to observe is how a security
   gate goes quiet.
+- **`openapi.yaml`'s `info.version` is now a version declaration, not a fifth
+  truth.** It used to sit outside `check_version_sync.py`, which let the
+  published contract state a version no release had shipped — the file said
+  `1.0.0` while the tree was preparing `1.1.0`. `AGENTS.md` claims the version
+  is "declared three times", so the fix is to make the contract a fourth
+  enforced site rather than to keep the claim true by documenting a hole:
+  reading it is anchored on the `info:` block and demands exactly one
+  `version:` line, so a second one or a renamed block fails the gate instead of
+  quietly passing on whichever line matched first. Bumping a release now touches
+  four places, and `release.yml`'s `version-check` covers the contract for free
+  because it re-runs the same script.
+
+### Removed
+
+- **The `/health` alias of `/readyz` is gone.** Its own `Sunset` response
+  header said `2026-08-28`, and the callers that still used it had already
+  moved to `/healthz` / `/readyz` earlier in this cycle (see Fixed), so the
+  deprecation window closed with nothing left inside it. Probes must name
+  `/readyz` now; `GET /health` answers 404, which is what tells an
+  un-migrated probe its endpoint stopped existing rather than quietly keeping
+  to succeed — `HealthProbe_RetiredCompatEndpoint_Answers404` pins it.
+  `examples/pay-server/openapi.yaml` dropped the path and its preflight with
+  the code, so the route-parity gate holds the contract on both sides.
 
 ### Fixed
 
@@ -458,9 +481,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deploy/ops/restart_service.sh` and `deploy/ops/restore_db.sh` gated a
   rollout on it, and `docker-integration-test` probed it too; all three now use
   `/readyz`, and `CLAUDE.md`'s endpoint table spells out the difference
-  (`/healthz` = process alive, `/readyz` = dependencies reachable). Removing
-  the alias itself is a breaking change and belongs to a version bump, so it
-  stays served for now.
+  (`/healthz` = process alive, `/readyz` = dependencies reachable). Retiring
+  the alias itself is a breaking change, so it waited for this version bump —
+  see Removed.
 - **A Debug build was said to be impossible.** `docs/deployment/deployment_guide.md`
   warned that building in Debug "causes link errors". Each preset directory
   carries its own Conan dependency tree, so Debug links Debug dependencies — and
@@ -473,7 +496,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/app/config.json` and nothing else. It now says to exercise the image over
   HTTP and run the suite on the host, and names the script that actually
   produces the report it references. `run_docker_tests.sh` is documented as the
-  orphan it is: unreferenced, probing the deprecated `/health`, no exec bit.
+  orphan it is: unreferenced, no exec bit, and its `/health` probe was the last
+  caller left in the repository (now `/healthz`).
 - **A test could have read the dev server's counters.** `tests/main.cc`
   rewrote each `listeners[]` entry to the isolated test port but left
   `custom_config.pay.metrics_base_url` at the copied config's `5566`, and
@@ -482,8 +506,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numbers while believing its own. The base URL is rewritten to the test port
   alongside the listeners.
 - **Version facts were described as one list, not three kinds.**
-  `check_version_sync.py` compares three declarations (`CMakeLists.txt`,
-  `conanfile.py`, `pay-admin/package.json`); the six `drogon-pay/1.0.0`
+  `check_version_sync.py` compares the version declarations
+  (`CMakeLists.txt`, `conanfile.py`, `pay-admin/package.json`, and
+  `pay-server/openapi.yaml` once this release pulled the contract in); the six
+  `drogon-pay/<version>`
   references in the READMEs and `plugin_integration.md` are *published* package
   versions that only move with a release, and documentation version stamps are
   now banned outright. `TECH_SPECS.md` 「版本号一致性」 tabulates those three

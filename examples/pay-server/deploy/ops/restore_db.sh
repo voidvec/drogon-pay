@@ -110,8 +110,7 @@ log "$SERVICE_NAME service started"
 sleep 5
 
 # Health check
-# /readyz rather than the deprecated /health alias (its Sunset header already
-# reads 2026-08-28) — after a restore we want the DB-backed probe.
+# /readyz — the DB-backed probe; the retired `/health` alias answers 404 now.
 log "Performing health check..."
 if curl -f -s http://localhost:5566/readyz > /dev/null; then
     log "Health check passed"
