@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Assert the project's version has one source of truth and three agreeing copies.
+"""Assert the project's version has one source of truth and four agreeing copies.
 
 There is no Version.cmake on purpose: the root `project(VERSION ...)` is the
-single source, and the other two files just have to agree with it.
+single source, and the other three files just have to agree with it.
 
   CMakeLists.txt                     project(drogon-pay VERSION X.Y.Z ...)
   conanfile.py                       version = "X.Y.Z"
   examples/pay-admin/package.json    "version": "X.Y.Z"
+  examples/pay-server/openapi.yaml   info: version: X.Y.Z
   CHANGELOG.md                       ## [X.Y.Z] (required only at release)
 
-Default mode (CI FAST gate) checks the three declarations agree. A version bump
+The contract counts as a declaration because it publishes a version to
+consumers: while it sat outside this check it stated a release nobody had
+shipped, and no gate could see that.
+
+Default mode (CI FAST gate) checks the four declarations agree. A version bump
 in a pull request passes that mode before its tag exists; the tag itself is
 checked by `.github/workflows/release.yml`, which runs this script with
 `--tag "$GITHUB_REF_NAME"` and additionally demands a CHANGELOG section, so a
@@ -48,6 +53,11 @@ SOURCES = {
 }
 
 PACKAGE_JSON = "examples/pay-admin/package.json"
+OPENAPI_YAML = "examples/pay-server/openapi.yaml"
+
+# Two-space indent, so a `version:` scalar nested deeper in a path item cannot
+# pass for the contract's own declaration.
+OPENAPI_VERSION_RE = re.compile(r"""^  version:\s*["']?(\d+\.\d+\.\d+)["']?\s*$""")
 
 # Distinguishes "flag absent" from `--tag ""`, which must fail rather than fall
 # back to the default mode and report success.
@@ -62,6 +72,41 @@ def read(path: Path) -> str:
     if not path.is_file():
         raise SyncError(f"{path.relative_to(REPO_ROOT)} is missing")
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def openapi_info_version() -> str:
+    """Read the contract's own `info: version:`, refusing an ambiguous read.
+
+    `info:` is located as a top-level key and the scan stops at the next one,
+    because the document has `version`-shaped scalars elsewhere and a checker
+    that matched the first `version:` it found anywhere would read whichever
+    block happened to come first in the file.
+    """
+    lines = read(REPO_ROOT / OPENAPI_YAML).splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.rstrip() == "info:")
+    except StopIteration:
+        raise SyncError(
+            f"{OPENAPI_YAML}: no top-level `info:` block - the checker's idea of "
+            "the contract's shape and the file have drifted apart"
+        )
+
+    found: list[str] = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith("  "):
+            break
+        match = OPENAPI_VERSION_RE.match(line)
+        if match:
+            found.append(match.group(1))
+
+    if len(found) != 1:
+        raise SyncError(
+            f"{OPENAPI_YAML}: expected exactly one `info: version: X.Y.Z` line, "
+            f"found {len(found)} ({', '.join(found) or 'none'}). A second one is "
+            "how this site gets a false pass: the check would read the first and "
+            "the published contract would mean the other."
+        )
+    return found[0]
 
 
 def declared_versions() -> dict[str, str]:
@@ -94,6 +139,7 @@ def declared_versions() -> dict[str, str]:
             "missing or non-semver field is how this check gets a false pass)"
         )
     found[PACKAGE_JSON] = version
+    found[OPENAPI_YAML] = openapi_info_version()
     return found
 
 
@@ -114,7 +160,8 @@ def agreed_version() -> str:
         listing = ", ".join(f"{v} in {s}" for s, v in sorted(versions.items()))
         raise SyncError(
             f"the declarations disagree ({listing}). There is no Version.cmake; "
-            f"bump CMakeLists.txt, conanfile.py and {PACKAGE_JSON} together."
+            f"bump CMakeLists.txt, conanfile.py, {PACKAGE_JSON} and "
+            f"{OPENAPI_YAML} together."
         )
     return distinct.pop()
 
@@ -133,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         declared = agreed_version()
 
         if args.tag is NO_TAG:
-            print(f"Version sync passed ({declared} in {len(SOURCES) + 1} places).")
+            print(
+                f"Version sync passed ({declared} in "
+                f"{len(declared_versions())} places)."
+            )
             return 0
 
         if not isinstance(args.tag, str) or not args.tag.startswith("v") \
@@ -143,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         if tagged != declared:
             raise SyncError(
                 f"tag says {tagged}, the tree says {declared}. Either bump the "
-                "three declarations and re-tag, or push the tag that matches "
+                "four declarations and re-tag, or push the tag that matches "
                 "this commit."
             )
         if not changelog_has_section(tagged):
