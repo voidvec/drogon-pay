@@ -842,7 +842,7 @@ components:
   schemas:
     Amount:
       type: string
-      pattern: "^\d+(\.\d{1,2})?$"
+      pattern: '^\d+(\.\d{1,2})?$'
       example: "9.99"
       description: |
         Decimal money in **yuan**, up to two fractional digits, stored verbatim
@@ -1114,10 +1114,10 @@ components:
               type: object
             wechat_query_error:
               type: string
-              description: Present with `code: 1` when the WeChat query failed.
+              description: 'Present with `code: 1` when the WeChat query failed.'
             alipay_query_error:
               type: string
-              description: Present with `code: 1` when the Alipay query failed.
+              description: 'Present with `code: 1` when the Alipay query failed.'
 
     CreateRefundRequest:
       type: object
