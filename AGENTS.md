@@ -122,7 +122,16 @@ enforces it: the FAST gate runs it with no arguments, which requires the four
 declarations to agree, and the `version-check` job that opens
 `.github/workflows/release.yml` re-runs it with `--tag "$GITHUB_REF_NAME"`, which
 also requires the tag to equal them and `CHANGELOG.md` to carry a `## [x.y.z]`
-section. A tag is never merged, so the ruleset's required checks do not cover
+section. The contract site is read **line by line** — the FAST gate is
+stdlib-only, so it cannot import a YAML parser — which makes every spelling a
+scanner and a parser could disagree about a hole in the gate;
+`scripts/ci/version_sync_scenarios.py` pins those shapes as a decision table
+(anchor, tag, alias, block scalar, continuation line, tab-as-padding, unclosed
+quote, doubled `''` escape, trailing comment…; the script prints its own case
+count, because a number pasted into prose is the drift this repo deletes
+elsewhere) that runs beside the guard on
+every pull request, and asserts one fact the table alone could fake: the value the
+repo's own contract reads is a member of the agreeing set. A tag is never merged, so the ruleset's required checks do not cover
 it: `.github/workflows/_tag-gate.yml` — called by release.yml's `ci-gate` and by
 deploy.yml's `tag-gate`, the two workflows that trigger on a `v*` push — refuses to
 build unless the tagged commit is already on `master` **and** the merge pipeline

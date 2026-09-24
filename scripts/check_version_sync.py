@@ -77,24 +77,61 @@ def read(path: Path) -> str:
 
 
 def semver_scalar(scalar: str) -> str:
-    """Validate a contract scalar that has to read as a bare X.Y.Z version.
+    """Read the contract's version scalar, or refuse a shape this cannot read.
 
-    YAML ends any plain scalar at " #", and a quoted one may carry a comment
-    after the closing quote, so both spellings are read here rather than
-    rejected: refusing `"1.1.0" # ship it` would fail the gate on a line every
-    consumer's parser reads correctly.
+    The gate reads one line of one file, so it accepts a single-line plain or
+    quoted scalar with an optional trailing comment, and refuses anything a
+    consumer's YAML parser resolves into different text: an anchor, an alias, a
+    tag, a block scalar, an escape sequence, a tab or a non-breaking space used
+    as padding. Refusing is not the failure mode here - guessing is, because a
+    lenient read turns a file nobody can load into a passing version check.
     """
-    body = scalar.split(" #", 1)[0].rstrip()
-    quote = body[:1]
-    if quote in ("'", '"'):
-        if len(body) < 3 or body[-1:] != quote:
+    if any(ch.isspace() and ch != " " for ch in scalar):
+        raise SyncError(
+            f"{OPENAPI_YAML}: `version: {scalar}` holds a tab or a non-ASCII "
+            "space - YAML does not accept either as padding, so a consumer's "
+            "parser stops on this file while a lenient read sees a version"
+        )
+    text = scalar.strip(" ")
+    if not text:
+        raise SyncError(f"{OPENAPI_YAML}: `version:` states no value")
+    if text[0] in "&*!":
+        kind = {"&": "anchor", "*": "alias", "!": "tag"}[text[0]]
+        raise SyncError(
+            f"{OPENAPI_YAML}: `version: {text}` resolves through a YAML {kind}, "
+            "and this check reads a line rather than a document - it cannot say "
+            "what the reference points at"
+        )
+    if text[0] in "|>":
+        raise SyncError(
+            f"{OPENAPI_YAML}: `version: {text}` is a block scalar, so the value "
+            "lives on the following lines and not on the declaration site"
+        )
+
+    quote = text[0]
+    if quote in "'\"":
+        end = text.find(quote, 1)
+        if end == -1:
             raise SyncError(
-                f"{OPENAPI_YAML}: `version: {scalar}` opens a quote it never "
+                f"{OPENAPI_YAML}: `version: {text}` opens a quote it never "
                 "closes - no consumer's YAML parser reads a version from that"
             )
-        value = body[1:-1]
+        value = text[1:end]
+        rest = text[end + 1:].strip(" ")
+        if rest and not rest.startswith("#"):
+            raise SyncError(
+                f"{OPENAPI_YAML}: `version: {text}` has text after its closing "
+                "quote - a YAML parser rejects that, and a doubled '' escape is "
+                "not something this check reads"
+            )
+        if quote == '"' and "\\" in value:
+            raise SyncError(
+                f"{OPENAPI_YAML}: `version: {text}` carries a backslash escape "
+                "inside double quotes, which a YAML parser resolves to "
+                "characters this line does not show"
+            )
     else:
-        value = body
+        value = text.split(" #", 1)[0].rstrip(" ")
 
     if not SEMVER_RE.match(value):
         raise SyncError(
@@ -112,7 +149,9 @@ def openapi_info_version() -> str:
     close for every other site: a second block would state one version to this
     checker and another to a YAML parser. The scan of the first block stops at
     the next top-level key, because the document carries `version`-shaped
-    scalars deeper in `paths:` and `components:`.
+    scalars deeper in `paths:` and `components:`. A deeper-indented line after
+    the value is a continuation and is refused; a deeper-indented comment is
+    nothing to a parser, so it must not be mistaken for one.
     """
     lines = read(REPO_ROOT / OPENAPI_YAML).splitlines()
     starts = [i for i, line in enumerate(lines) if line.rstrip() == "info:"]
@@ -130,19 +169,43 @@ def openapi_info_version() -> str:
         )
 
     found: list[str] = []
-    for line in lines[starts[0] + 1:]:
+    for offset, line in enumerate(lines[starts[0] + 1:], starts[0] + 1):
         if line.strip() and not line.startswith("  "):
             break
         match = OPENAPI_VERSION_RE.match(line)
-        if match:
-            found.append(match.group(1).strip())
+        if not match:
+            continue
+        raw = match.group(1)
+        # A plain scalar continues while a following, more-indented line carries
+        # content; a comment line never continues one, and a blank one does not
+        # end the possibility either (a parser folds it in as a newline). So the
+        # scan skips comments and blanks to the next line that means something.
+        continued = ""
+        continued_at = offset
+        for peek, following in enumerate(lines[offset + 1:], offset + 1):
+            stripped = following.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            continued = following
+            continued_at = peek
+            break
+        if (raw.strip(" ") and continued
+                and len(continued) - len(continued.lstrip(" ")) > 2):
+            raise SyncError(
+                f"{OPENAPI_YAML}: the `version:` value at line {offset + 1} "
+                f"continues onto line {continued_at + 1}, so a YAML parser reads "
+                f"`{raw.strip(' ')} {continued.strip(' ')}` and this check would "
+                "read one line of it"
+            )
+        found.append(raw)
 
     if len(found) != 1:
         raise SyncError(
             f"{OPENAPI_YAML}: expected exactly one `info: version: X.Y.Z` line, "
-            f"found {len(found)} ({', '.join(found) or 'none'}). A second one is "
-            "how this site gets a false pass: the check would read the first and "
-            "the published contract would mean the other."
+            f"found {len(found)} "
+            f"({', '.join(v.strip(' ') for v in found) or 'none'}). A second one "
+            "is how this site gets a false pass: the check would read the first "
+            "and the published contract would mean the other."
         )
     return semver_scalar(found[0])
 

@@ -124,12 +124,15 @@ bytes. The practical rules (see `TECH_SPECS.md` "迁移工程化" and the
 
 ## Releasing
 
-The version lives in three places and nowhere else: `project(drogon-pay VERSION …)`
-in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level `"version"`
-in `examples/pay-admin/package.json`. `scripts/check_version_sync.py` keeps them
-honest, and `static-analysis` runs it on every pull request.
+The version lives in four places and nowhere else: `project(drogon-pay VERSION …)`
+in `CMakeLists.txt`, `version = …` in `conanfile.py`, the top-level `"version"`
+in `examples/pay-admin/package.json`, and `info: version:` in
+`examples/pay-server/openapi.yaml` — the last one because the contract publishes a
+version to consumers, and a document no gate reads will state a release that never
+shipped. `scripts/check_version_sync.py` keeps them honest, and `static-analysis`
+runs it on every pull request.
 
-To release: move `[Unreleased]` into a dated `## [x.y.z]` section, bump the three
+To release: move `[Unreleased]` into a dated `## [x.y.z]` section, bump the four
 declarations in the same commit, then `git tag v1.2.3 && git push --tags`.
 Do not restate the version in config or deploy comments; that is how it drifted before
 the checker existed.
