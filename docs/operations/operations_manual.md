@@ -145,8 +145,8 @@ curl http://localhost:5566/readyz    # 就绪探针（探测 DB/Redis 连通性�
 }
 ```
 
-> 说明：`/health` 是 `/readyz` 的废弃别名（响应头含 `Deprecation: true`）；
-> 就绪失败时返回 `{"status":"not_ready","failed":["db"]}`。
+> 说明：`/health` 曾是 `/readyz` 的废弃别名，其 `Sunset` 头写的日期已过，别名已退役，
+> 现在返回 404；就绪失败时 `/readyz` 返回 `{"status":"not_ready","failed":["db"]}`。
 
 **API测试：**
 ```bash
@@ -376,7 +376,7 @@ redis-cli PING
 
 **症状：**
 - 日志显示 "Database connection failed"
-- /health返回 "database": "error"
+- /readyz返回 `{"status":"not_ready","failed":["db"]}`
 
 **诊断：**
 
@@ -595,7 +595,7 @@ sudo systemctl start payplugin
 4. **验证服务**
 ```bash
 # /readyz 会真的打一次 DB/Redis；/healthz 只证明进程活着。
-# 不要再用 /health：它是已废弃别名，Sunset 头写的 2026-08-28 已经过期。
+# 不要用 /health：那是 /readyz 的旧别名，已退役并返回 404。
 curl -f http://localhost:5566/readyz
 ```
 
@@ -868,7 +868,7 @@ std::string db_name = "pay_production_shard_" + std::to_string(shard_id);
 
 ### 关键指标监控
 
-- **服务可用性**: /health端点检查
+- **服务可用性**: /readyz端点检查
 - **响应时间**: P50/P95/P99延迟
 - **错误率**: 5xx错误率
 - **吞吐量**: QPS

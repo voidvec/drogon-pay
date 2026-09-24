@@ -276,9 +276,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`openapi.yaml`'s `info.version` is now a version declaration, not a fifth
   truth.** It used to sit outside `check_version_sync.py`, which let the
   published contract state a version no release had shipped — the file said
-  `1.0.0` while the tree was preparing `1.1.0`. `AGENTS.md` claims the version
-  is "declared three times", so the fix is to make the contract a fourth
-  enforced site rather than to keep the claim true by documenting a hole:
+  `1.0.0` while the tree was preparing `1.1.0`. `AGENTS.md` had claimed the
+  version is "declared three times", so the fix is to make the contract a fourth
+  enforced site rather than to keep that claim true by documenting a hole:
   reading it is anchored on the `info:` block and demands exactly one
   `version:` line, so a second one or a renamed block fails the gate instead of
   quietly passing on whichever line matched first. Bumping a release now touches
@@ -292,8 +292,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moved to `/healthz` / `/readyz` earlier in this cycle (see Fixed), so the
   deprecation window closed with nothing left inside it. Probes must name
   `/readyz` now; `GET /health` answers 404, which is what tells an
-  un-migrated probe its endpoint stopped existing rather than quietly keeping
-  to succeed — `HealthProbe_RetiredCompatEndpoint_Answers404` pins it.
+  un-migrated probe its endpoint stopped existing rather than quietly
+  continuing to succeed — `HealthProbe_RetiredCompatEndpoint_Answers404`
+  pins it.
   `examples/pay-server/openapi.yaml` dropped the path and its preflight with
   the code, so the route-parity gate holds the contract on both sides.
 
@@ -321,6 +322,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository those legs then stopped on their own missing-credential conditions,
   which is why no `v*` tag has actually rolled production that way — the absence
   of an incident is a secret gap, not a gate).
+
+- **The published contract could not be parsed by a YAML parser.** Three scalars
+  in `examples/pay-server/openapi.yaml` broke the spec: `Amount.pattern` was
+  double-quoted while carrying `\d` escapes (a double-quoted YAML scalar may not
+  hold an unknown escape, so the load failed at that line), and two
+  `description:` lines read ``Present with `code: 1` when …``, where a plain
+  scalar may not contain a colon followed by a space. Nothing noticed because
+  both guards over that file scan it line by line — `check_openapi_routes.py` and
+  `check_version_sync.py` are stdlib-only by design, so neither runs a real
+  parser — which is exactly the gap this release pulled the contract into as a
+  version declaration site: the file now has to be read by consumers' tooling, and
+  the three scalars are quoted. Verified with `yaml.safe_load` on the whole
+  document, which reports 14 paths / 26 operations, matching what the route gate
+  counts by regex.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
@@ -476,14 +491,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary's directory, since that is the `WORKING_DIRECTORY` ctest uses and the
   only place `config.json` resolves.
 - **Health checks polled an endpoint whose sunset date had passed.**
-  `/health` is a deprecated alias of `/readyz` and answers with
+  `/health` was a deprecated alias of `/readyz`, answering with
   `Deprecation: true` plus `Sunset: 2026-08-28`, a date already behind us.
   `deploy/ops/restart_service.sh` and `deploy/ops/restore_db.sh` gated a
-  rollout on it, and `docker-integration-test` probed it too; all three now use
-  `/readyz`, and `CLAUDE.md`'s endpoint table spells out the difference
-  (`/healthz` = process alive, `/readyz` = dependencies reachable). Retiring
-  the alias itself is a breaking change, so it waited for this version bump —
-  see Removed.
+  rollout on it, and `docker-integration-test` probed it too; each now names the
+  probe it actually wants — `/readyz` where the rollout must wait for the
+  database, `/healthz` for container liveness — and `CLAUDE.md`'s endpoint table
+  spells out the difference (`/healthz` = process alive, `/readyz` =
+  dependencies reachable). The runbooks that told an operator which endpoint to
+  poll after a restart (`docs/operations/health_check_implementation.md`,
+  `docs/operations/operations_manual.md`) still described the alias as live, and
+  `deploy.yml`'s ECS health step probed it, so all three were corrected with the
+  retirement. Retiring the alias itself is a breaking change, so it waited for
+  this version bump — see Removed.
 - **A Debug build was said to be impossible.** `docs/deployment/deployment_guide.md`
   warned that building in Debug "causes link errors". Each preset directory
   carries its own Conan dependency tree, so Debug links Debug dependencies — and
