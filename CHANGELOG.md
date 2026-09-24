@@ -364,8 +364,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this entry added a claim of its own that did not survive the next round: it
   said `version: "1.1.0" # ship it` had been refused, with a space before the
   `#`, and that shape was already handled — the one that failed had no space.
-  08b457b also introduced one false red while closing the rest, rejecting a
-  deeper-indented **comment** line, which a parser treats as nothing at all.
+  08b457b's own message records a false red its first cut introduced and fixed
+  before committing: rejecting a deeper-indented **comment** line, which a
+  parser treats as nothing at all.
 
   The reader now accepts only what a parser agrees to — spaces as padding, an
   optional trailing comment, a single-line plain or quoted scalar, sibling keys
@@ -384,12 +385,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replays them against a synthetic document, and asserts the one fact the table
   could otherwise fake: the value read out of the repository's own contract is a
   member of the agreeing set. The counts above are not remembered, they are
-  reproducible: replay the table's cases against `08b457b^:scripts/check_version_sync.py`
-  and against `yaml.safe_load`, and the old reader's verdict differs from the
-  table on exactly twenty shapes — thirteen accepts, plus the four marker
-  positions listed a paragraph up (a reader from before the marker rule walked
-  past a second document too), and three refuses of the legal spellings named
-  above.
+  reproducible: replay the table against `08b457b^:scripts/check_version_sync.py`
+  and the pre-hardening reader's verdicts differ from the table on two classes
+  only — it reads a version out of every refused case whose shape its scanner
+  could not see through (the thirteen false passes above, and ever since the
+  marker family, which grew the count and is why the script prints its own
+  tally rather than this entry keeping it), and it refuses the three legal
+  spellings named above while reading the rest as the table does.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
