@@ -29,7 +29,7 @@ tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub
 `## [x.y.z]` 段。
 
 检查器**不看文档**，所以还有一类人肉同步点：`README.md`、`README.zh-CN.md`、
-`docs/development/plugin_integration.md` 里那 6 处 `drogon-pay/1.0.0` 是**已发布包的
+`docs/development/plugin_integration.md` 里那 6 处 `drogon-pay/<上一个已发布版本>` 是**已发布包的
 引用示例**（消费者 `self.requires(...)` 抄的就是它）。它们指的是上一个已 tag 的版本，
 所以下一次 `release.yml` 发布成功后，必须在同一个发布 PR 里把它们改成新版本号——
 漏掉的话文档会让人 `requires` 一个根本还没发布的包。
