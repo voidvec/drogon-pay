@@ -197,14 +197,26 @@ def openapi_info_version() -> str:
     # hand this reader a clean first line from a value no parser ever saw.
     lines = read(REPO_ROOT / OPENAPI_YAML).split("\n")
 
-    separators = [i for i, line in enumerate(lines)
-                  if line.rstrip(" \t") in ("---", "...")]
-    if separators:
+    # Where a document marker sits decides whether it splits anything. `---`
+    # opens a document, so one with content above it starts a second - whether or
+    # not anything follows. `...` closes one, so it only hurts when something
+    # does. Leading `---` and trailing `...` are legal ways to write a single
+    # document, and refusing them would be the same mistake in the other
+    # direction: a gate that rejects valid input gets weakened.
+    content = [i for i, line in enumerate(lines)
+               if line.strip() and not line.strip().startswith("#")]
+    splits = [
+        i for i, line in enumerate(lines)
+        if line.rstrip(" \t") == "---" and any(j < i for j in content)
+    ] + [
+        i for i, line in enumerate(lines)
+        if line.rstrip(" \t") == "..." and any(j > i for j in content)
+    ]
+    if splits:
         raise SyncError(
-            f"{OPENAPI_YAML}: a document marker at line "
-            f"{', '.join(str(i + 1) for i in separators)}. `safe_load` reads one "
-            "document and stops at that line, so a version on either side of it is "
-            "a version no consumer receives."
+            f"{OPENAPI_YAML}: line {min(splits) + 1} separates documents, so this "
+            "is more than one YAML document and `safe_load` stops there - a "
+            "version on either side of it is a version no consumer receives."
         )
 
     starts = [i for i, line in enumerate(lines) if INFO_HEADER_RE.match(line)]

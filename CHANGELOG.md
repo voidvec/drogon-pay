@@ -351,36 +351,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the value, junk or a list item at the value's own indent, a form feed or
   a U+2028 inside the scalar (`str.splitlines()` breaks on both, and neither is a
   line break to YAML), and a second document after a `---`. In **four** more the
-  file parsed to other text: `1.1.0 9.9.9` and `1.1.0
-9.9.9` from a plain scalar
+  file parsed to other text: `1.1.0 9.9.9` and `1.1.0\n9.9.9` from a plain scalar
   the next line continues (directly, or across a blank), `1.1.0 ` where the
   padding is not whitespace to YAML, and `01.1.0`, which is not a SemVer version
   however consistently four files declare it.
 
   The remaining **three** were refusals of legal files — a worse trade than it
   looks, because the fix people reach for when a gate rejects valid input is to
-  weaken the gate: `info :` and `info: # contract` read as \"no `info:` block\",
-  and `version: \"1.1.0\"#bumped` as an unclosed quote, when a quoted scalar in
+  weaken the gate: `info :` and `info: # contract` read as "no `info:` block",
+  and `version: "1.1.0"#bumped` as an unclosed quote, when a quoted scalar in
   fact ends at its closing quote and a comment may follow it. The first cut of
   this entry added a claim of its own that did not survive the next round: it
-  said `version: \"1.1.0\" # ship it` had been refused, with a space before the
+  said `version: "1.1.0" # ship it` had been refused, with a space before the
   `#`, and that shape was already handled — the one that failed had no space.
   08b457b also introduced one false red while closing the rest, rejecting a
   deeper-indented **comment** line, which a parser treats as nothing at all.
 
   The reader now accepts only what a parser agrees to — spaces as padding, an
-  optional trailing comment, a single-line plain or quoted scalar, and sibling
-  keys whose end it can see — and refuses anchors, aliases, tags, block scalars,
-  every continuation shape, non-space indentation, document markers, escapes
+  optional trailing comment, a single-line plain or quoted scalar, sibling keys
+  whose end it can see, a leading `---` and a trailing `...` — and refuses
+  anchors, aliases, tags, block scalars, every continuation shape, non-space
+  indentation, markers that split a second document off this one, escapes
   inside double quotes, unclosed quotes, doubled quotes, and leading zeros, by
-  name. `scripts/ci/version_sync_scenarios.py` pins each spelling as a case (a
+  name. Getting that rule right cost one more false red of the same class: the
+  first marker rule refused `---` and `...` wherever they stood, rejecting
+  documents a parser reads without complaint, until position — content above a
+  `---`, content below a `...` — replaced the blanket ban, with the six marker
+  spellings pinned as cases so the distinction cannot drift back.
+
+  `scripts/ci/version_sync_scenarios.py` pins each spelling as a case (a
   `static-analysis` step; it prints its own count so no prose has to age),
   replays them against a synthetic document, and asserts the one fact the table
   could otherwise fake: the value read out of the repository's own contract is a
   member of the agreeing set. The counts above are not remembered, they are
   reproducible: replay the table's cases against `08b457b^:scripts/check_version_sync.py`
-  and against `yaml.safe_load`, and the verdicts differ on exactly those thirteen
-  accepts and three rejects.
+  and against `yaml.safe_load`, and the old reader's verdict differs from the
+  table on exactly twenty shapes — thirteen accepts, plus the four marker
+  positions listed a paragraph up (a reader from before the marker rule walked
+  past a second document too), and three refuses of the legal spellings named
+  above.
 
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local

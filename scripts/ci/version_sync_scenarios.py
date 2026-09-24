@@ -44,6 +44,19 @@ def document(body: list[str], header: str = "info:") -> str:
     )
 
 
+# Where a document marker sits, which `document()` cannot express: the same
+# three characters are a legal start of one document, the end of one, or the
+# start of a second that `safe_load` will never let this file be.
+DOCUMENT_CASES: list[tuple[str, str, str | None]] = [
+    ("leading ---", "---\nopenapi: 3.0.3\ninfo:\n  version: 1.1.0\n", VERSION),
+    ("trailing ...", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...\n", VERSION),
+    ("bare trailing ---", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n---\n", None),
+    ("... then content", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n...\nfoo: 1\n", None),
+    ("--- then content", "openapi: 3.0.3\ninfo:\n  version: 1.1.0\n---\nfoo: 1\n", None),
+    ("two leading ---", "---\nopenapi: 3.0.3\ninfo:\n  version: 1.1.0\n---\n", None),
+]
+
+
 def with_reader(text: str):
     """Patch the module's file read so the scanner sees `text`."""
 
@@ -117,36 +130,40 @@ CASES: list[Case] = [
 ]
 
 
+def assert_verdict(label: str, text: str, expected: str | None) -> str | None:
+    """Run one document through the reader and check it against the table."""
+    real_read = cvs.read
+    try:
+        with_reader(text)
+        got = cvs.openapi_info_version()
+        error = None
+    except cvs.SyncError as exc:
+        got = None
+        error = str(exc)
+    finally:
+        cvs.read = real_read  # type: ignore[assignment]
+
+    if expected is None:
+        if got is None:
+            print(f"PASS  refuses {label}")
+            return None
+        print(f"FAIL  accepts  {label} -> {got!r}")
+        return f"{label}: accepted {got!r}, must refuse"
+    if got == expected:
+        print(f"PASS  reads    {label} -> {got}")
+        return None
+    print(f"FAIL  {label}: expected {expected!r}, got {got!r}")
+    return f"{label}: expected {expected!r}, got {got!r} ({error or 'no error'})"
+
+
 def run_cases() -> list[str]:
     failures: list[str] = []
-    real_read = cvs.read
     for label, header, body, expected in CASES:
-        text = document(body, header)
-        try:
-            with_reader(text)
-            got = cvs.openapi_info_version()
-            error = None
-        except cvs.SyncError as exc:
-            got = None
-            error = str(exc)
-        finally:
-            cvs.read = real_read  # type: ignore[assignment]
-
-        if expected is None:
-            if got is None:
-                print(f"PASS  refuses {label}")
-            else:
-                failures.append(f"{label}: accepted {got!r}, must refuse")
-                print(f"FAIL  accepts  {label} -> {got!r}")
-        else:
-            if got == expected:
-                print(f"PASS  reads    {label} -> {got}")
-            else:
-                failures.append(
-                    f"{label}: expected {expected!r}, got "
-                    f"{got!r} ({error or 'no error'})"
-                )
-                print(f"FAIL  {label}: expected {expected!r}, got {got!r}")
+        failure = assert_verdict(label, document(body, header), expected)
+        failures += [failure] if failure else []
+    for label, text, expected in DOCUMENT_CASES:
+        failure = assert_verdict(label, text, expected)
+        failures += [failure] if failure else []
     return failures
 
 
@@ -177,7 +194,7 @@ def check_real_contract() -> list[str]:
 
 def main() -> int:
     failures = run_cases() + check_real_contract()
-    total = len(CASES) + 1
+    total = len(CASES) + len(DOCUMENT_CASES) + 1
     print(f"\n{'FAILED' if failures else 'all passed'}: {total - len(failures)}/{total}")
     for line in failures:
         print(f"  - {line}")
