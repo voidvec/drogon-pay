@@ -1,12 +1,12 @@
 ---
 name: release
-description: 发布 drogon-pay：归档 CHANGELOG、同步三处版本号声明、打 tag；GitHub Release 由 CI 自动创建
+description: 发布 drogon-pay：归档 CHANGELOG、同步四处版本号声明、打 tag；GitHub Release 由 CI 自动创建
 disable-model-invocation: true
 ---
 
 # Release 发布技能
 
-把发布做成**可验证**的动作：三处版本号声明同步、`CHANGELOG.md` 有对应版本段，
+把发布做成**可验证**的动作：四处版本号声明同步、`CHANGELOG.md` 有对应版本段，
 tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub Release。
 
 ## 使用时机
@@ -15,21 +15,28 @@ tag 推出后由 `.github/workflows/release.yml` 完成消费者验证与 GitHub
 
 ## 版本号存在哪里
 
-版本只**声明**、不派生，且只允许三处（SemVer `MAJOR.MINOR.PATCH`）：
+版本只**声明**、不派生，且只允许四处（SemVer `MAJOR.MINOR.PATCH`）：
 
 | 位置 | 字段 |
 |------|------|
 | `CMakeLists.txt`（仓库根） | `project(drogon-pay VERSION x.y.z …)` |
 | `conanfile.py` | `version = "x.y.z"` |
 | `examples/pay-admin/package.json` | 顶层 `"version"` |
+| `examples/pay-server/openapi.yaml` | `info:` 下的 `version:` |
 
 `libs/drogon-pay/CMakeLists.txt` 以 `${PROJECT_VERSION}` 引用，不要在那里另写一个数字。
-`scripts/check_version_sync.py` 是这件事的门禁：不带参数断言三处一致（`static-analysis`
-每个 PR 跑一次）；`--tag vX.Y.Z` 额外要求 tag 等于三处声明，且 `CHANGELOG.md` 已有
-`## [x.y.z]` 段。
+`scripts/check_version_sync.py` 是这件事的门禁：不带参数断言四处一致（`static-analysis`
+每个 PR 跑一次）；`--tag vX.Y.Z` 额外要求 tag 等于四处声明，且 `CHANGELOG.md` 已有
+`## [x.y.z]` 段。契约那一处是**逐行**读出来的——FAST 门只依赖 stdlib，不能 import YAML
+解析器——所以"扫描器与解析器可能各读出一个版本"的每一种写法都是这个门的漏洞。
+`scripts/ci/version_sync_scenarios.py` 把这张判定表钉成一条条可执行的场景（锚点/标签/别名/块标量/续行/与值
+同级的杂项/第二份文档/tab 或非 ASCII 既当空白又当缩进/前导零/未闭合引号/单引号翻倍转义/
+行尾注释/缩进更深的注释行……，条数由脚本自己打印，不要抄进文档），与守卫同在 FAST 每次跑；它还额外
+断言一件否则可以空转的事：仓库自己的契约读出的值，确实在那四处一致的集合里。改
+`check_version_sync.py` 读取逻辑，就要同时改这张表。
 
 检查器**不看文档**，所以还有一类人肉同步点：`README.md`、`README.zh-CN.md`、
-`docs/development/plugin_integration.md` 里那 6 处 `drogon-pay/1.0.0` 是**已发布包的
+`docs/development/plugin_integration.md` 里那 6 处 `drogon-pay/<上一个已发布版本>` 是**已发布包的
 引用示例**（消费者 `self.requires(...)` 抄的就是它）。它们指的是上一个已 tag 的版本，
 所以下一次 `release.yml` 发布成功后，必须在同一个发布 PR 里把它们改成新版本号——
 漏掉的话文档会让人 `requires` 一个根本还没发布的包。
@@ -58,9 +65,9 @@ git log --oneline -1 origin/master     # 发布内容必须已经在 master 上
 
 顺序很重要：版本段必须先于 tag 存在，`version-check` 才有东西可校验。
 
-### 3. 同步三处版本号
+### 3. 同步四处版本号
 
-同一个提交里改上表三处。**不要**在配置、部署或告警文件的注释里复述版本号——
+同一个提交里改上表四处。**不要**在配置、部署或告警文件的注释里复述版本号——
 那六处注释正是这套检查器存在的原因。
 
 ### 4. 本地预演发布门
@@ -68,9 +75,10 @@ git log --oneline -1 origin/master     # 发布内容必须已经在 master 上
 ```bash
 python3 scripts/check_version_sync.py
 python3 scripts/check_version_sync.py --tag v1.1.0
+python3 scripts/ci/version_sync_scenarios.py
 ```
 
-两条都必须 exit 0，否则不要往下走。
+三条都必须 exit 0，否则不要往下走。
 
 ### 5. 走 PR，不要在功能分支上打 tag
 
@@ -165,7 +173,7 @@ git tag -d v1.1.0
 
 - [ ] `master` 三平台 MAIN 门全绿
 - [ ] tag 打在 CI 已跑完的 master commit 上（`ci-gate` 会校验，不等它也要过它）
-- [ ] `check_version_sync.py --tag v<version>` 本地通过
+- [ ] `check_version_sync.py --tag v<version>` 本地通过，`scripts/ci/version_sync_scenarios.py` 全表通过
 - [ ] `CHANGELOG.md` 已有该版本段且日期正确
 - [ ] release.yml 的 `sdk-smoke`（Linux + Windows）通过
 - [ ] GitHub Release 已创建、正文来自 CHANGELOG 版本段

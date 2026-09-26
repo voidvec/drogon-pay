@@ -59,268 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row" down the error callback, so the rule now states that it is only for
   unique keys and points at `orderBy(col, DESC).limit(1).findBy(...)` for
   "the newest of several" — the shape two callback lookups had to be moved to.
-- **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
-  gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
-  rejects backticked paths that don't exist in governance docs, bans
-  gtest vocabulary outside archived history, refuses migration versions the
-  `sql/` chain does not have, and (rule 5) requires a file held by both
-  `.claude/` and `.codex/` to be byte-identical — see Fixed.
-- **`scripts/clang_format.py`**: single pinned clang-format major (22) for
-  CI, the agent PostToolUse hook and pre-commit — previously three
-  consumers used three different versions (CI 22 / pre-commit 17 / bare
-  PATH `clang-format`), which produced spurious formatting drift.
-- **`DROGON_PAY_WERROR` build option** (`cmake/Warnings.cmake`,
-  `pay_apply_warnings()`): opt-in hard warning bar (/W4 /WX on MSVC,
-  -Wall -Wextra -Werror elsewhere) applied to first-party targets only
-  (library, example host, tests) and PRIVATE so consumers are unaffected.
-  All three CI platforms configure with it ON. The drogon_ctl-generated
-  ORM models were split into a `drogon_pay_models` OBJECT library that
-  keeps the advisory profile — generated code must not be hand-edited to
-  satisfy the gate.
-- **clang-tidy two-tier gate** (`scripts/clang_tidy_gate.py`, new CI job
-  `clang-tidy` on Linux): `.clang-tidy` stays advisory while a promoted
-  subset of bugprone/performance checks runs with `--warnings-as-errors`
-  as a hard gate over first-party, non-model translation units. The
-  promote list only grows (0-finding checks first; `--report` prints hit
-  counts for the next candidates), and unknown check names fail the gate
-  instead of being silently dropped by clang-tidy.
-- **Test suites split into `tests/unit/` (pure logic) and
-  `tests/integration/` (HTTP/DB/Redis surface)**, guarded by
-  `scripts/check_test_layout.py` (CI `static-analysis` step): `*Test.cc`
-  naming, single `DROGON_TEST_MAIN` (`tests/main.cc`), no DROGON_TEST
-  outside `tests/`, explicit CMake registration. HTTP e2e smoke scripts
-  moved to `examples/pay-server/scripts/`. `tests/run_all_tests.ps1` and
-  `ultra_simple.ps1` were retired — ctest now runs the binary directly on
-  all three platforms. A full `DROGON_PAY_WERROR=ON` rebuild also exposed
-  (and fixed) pre-existing gate breaks in the test target: one unused
-  variable, missing `/utf-8`, and OpenSSL 3.0 deprecation warnings from
-  the test RSA fixtures (now suppressed target-wide).
-- **Line-coverage pipeline** (`cmake/Coverage.cmake` +
-  `DROGON_PAY_COVERAGE` + `linux-coverage` preset +
-  `scripts/measure_coverage.py` + `.github/workflows/coverage.yml`):
-  Debug+gcov instrumented build (GCC/Clang only, models excluded), ctest
-  run against service containers, then per-directory buckets
-  (handlers/services/channels/utils/core + host-*) gated by a ratchet
-  baseline (`scripts/coverage_baseline.json`, 0.5pp tolerance, small-bucket
-  exemption, line-collapse detection, SEED on first run). The
-  `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
-  verbal percentage. A SEED run writes its baseline into the runner's working
-  copy and loses it there, so the file this ships with is the first green
-  `coverage.yml` run's measured numbers copied into a reviewed commit (overall
-  40.21%, 3012/7490 lines, 2026-09-19) — without it every run re-SEEDs and the
-  ratchet has no floor to hold.
-- **Drift guard rules 6 and 7** (`scripts/check_docs_drift.py`), which turn
-  this round of documentation fixes into something that cannot silently rot
-  again. Rule 6 (`no-version-stamps`) rejects a `**版本：**` /
-  `**Last updated:**` line in any live governance document: a stamp is a
-  second copy of a fact CI already checks elsewhere, so 18 of them went away
-  (four header/footer pairs in each of the four operations and deployment
-  guides, plus the `CLAUDE.md` / `TECH_SPECS.md` footers, which now defer to
-  `git log`). Verified by pointing the rule at `git show HEAD:` of the four
-  stamped documents (it reports exactly the 16 deleted guide lines) and at the
-  cleaned tree (it reports nothing). Rule 7 (`twin-scripts`) requires the five
-  entry points (`build`/`test`/`setup_database`/`deploy`/`check_config`) to
-  exist as a `.sh` + `.bat` pair, refuses an undeclared orphan script in
-  `examples/pay-server/scripts/` (declare it single-platform with a reason and
-  a `TECH_SPECS.md` row instead), drops a stale declaration whose file is gone,
-  and fails when a `.sh` is indexed `100644` because a clone could not `./` it.
-  Each of the three failure modes was exercised against a temporary scripts
-  directory that is then removed.
-- **Single-entry CI pipeline** (`.github/workflows/ci.yml` + reusable
-  `_build-test.yml` / `_sdk-smoke.yml`): FAST (`static-analysis`, parallel
-  `clang-tidy`) → MAIN (`build-test` matrix over linux/windows/macos) →
-  RELEASE (`sdk-smoke` matrix over linux/windows), chained by `needs`, with
-  `concurrency` cancelling superseded runs. The three required checks keep the
-  names the legacy files used, but not as bare contexts: a job calling a
-  reusable workflow reports `<caller job name> / <name the called workflow gives
-  its own job>`, so the ruleset now requires `linux-build-and-test / build-test`,
-  `windows-build-and-test / build-test` and `macos-build / build-test`, whose
-  first half comes from `matrix.check_name` and second half from the unnamed
-  `jobs: build-test:` in `_build-test.yml`. Actions are pinned to
-  full commit SHAs. The pre-Conan build-Drogon-from-source jobs moved to
-  dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
-  `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` ran beside the new
-  pipeline for exactly one verification cycle and are deleted in this stack: the
-  same commit carried both chains to green (`ci.yml` FAST → MAIN → both
-  sdk-smoke legs, plus all four legacy checks), and the new RELEASE gate
-  smoke-tests `conan create` on Linux as well as Windows at PR time, which the
-  Windows-only job it replaces never did.
-- **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
-  per-platform workflow it replaces hardcoded only `001` and `002`, and its
-  Postgres readiness loop fell through to a green step when the probe never
-  succeeded. Readiness now probes `SELECT 1`, hard-fails on timeout and dumps
-  the container log.
-- **OpenAPI 3.0 contract** (`examples/pay-server/openapi.yaml`): all 11 plugin
-  routes and 4 host routes documented with request/response schemas, the
-  business-code → HTTP-status mapping, scope requirements and the two
-  channel-facing notify bodies (marked as channel conventions, not this
-  service's contract). `docs/api/pay-api-examples.md` gains the two endpoints
-  it never documented (`/api/pay/orders`, `/api/pay/reconcile/summary`) plus
-  the Alipay callback.
-- **OpenAPI route gate** (`scripts/check_openapi_routes.py`, two
-  `static-analysis` steps): parses the `registerHandler`/`ADD_METHOD_TO`
-  call sites — including `basePath_ + "/x"` concatenation, the `qrPath`
-  variable and the ternary that pins `/api/qrpay/create` — and diffs the
-  resulting `METHOD /path` set against the spec paths in both directions,
-  then checks the auth posture of each pair (`authed()` routes may not be
-  documented as public, `OPTIONS` must be). A contract that merely omits a
-  route fails; so does an `EXCLUSIONS` entry without a reason and a `$ref`
-  with no definition. Stdlib-only, because the FAST gate must not depend on
-  PyYAML being present on the runner. The `openapi-update` skill was
-  rewritten around this gate (both mirrors).
-- **Migration executor** (`scripts/migrate_db.py`, stdlib-only, shells out to
-  `psql`): the only code that knows which files exist. It discovers
-  `sql/NNN_*.sql`, applies what is missing in version order, commits each
-  migration together with its `schema_migrations` row (version / filename /
-  sha256 / applied_at) inside one transaction, refuses to run when an applied
-  version's bytes changed, warns when recorded tables were dropped out-of-band,
-  and adds `--status` / `--dry-run` / `--baseline` (adopt a database an
-  `initdb.d` mount already provisioned, rejected unless the tables are really
-  there) / `--reset-schema --confirm-drop <db>`. `--reset-schema` accepts a
-  loopback host only: `setup_database.{sh,bat}` fills in `--confirm-drop` for
-  the operator, so the repeated name is not a human decision and a remote host
-  is where staging and production live. Creating or dropping the
-  *database* stayed out of it on purpose — the app role has no `CREATEDB`, so a
-  failed `DROP DATABASE` cannot be undone by the same connection; the executor
-  only probes `pg_database` and prints the superuser command.
-- **Migration hygiene guard** (`scripts/check_migrations.py`, CI
-  `static-analysis` step): naming, an unbroken version chain, idempotence and
-  non-destruction, plus a sha256 pin of history in
-  `scripts/migrations_baseline.json`. Content rules apply only to migrations
-  that are not yet baselined — `001`–`004` predate the guard and are pinned as
-  they are, while a new file must pass. `--write-missing` pins new versions,
-  never rewrites an existing entry, and refuses a candidate that breaks the
-  content rules (pinning is a permanent exemption, so it cannot double as a
-  waiver).
-- **`examples/pay-server/scripts/setup_database.sh`**, the POSIX twin of
-  `setup_database.bat`, and the `.bat` lost its embedded default password: both
-  now reset the schema, replay the chain through the executor and read
-  credentials from the environment or `examples/pay-server/.env`.
-- **`examples/pay-server/scripts/build.sh` and `test.sh`**, the POSIX twins of
-  `build.bat` / `test.bat`. Same flags (`-debug` / `-release`; `-l`,
-  `-r <pattern>`, `-v`, `-o` on the test side), same exit codes, and they
-  resolve `uname` to the matching preset instead of asking the reader to paste a
-  four-line conan+cmake incantation. New `linux-debug` and `macos-debug` CMake
-  presets back the `-debug` flag on Unix — previously only Windows had a debug
-  preset, so the documented `-debug` was a Windows-only option. `test.bat` also
-  dropped its `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS=123456` block: no test
-  reads those names (the suite loads `.env` through `ConfigLoader`), so it was a
-  plausible-looking plaintext credential that did nothing. Every tracked
-  `examples/pay-server/**/*.sh` is now mode 100755 — the docs (and these scripts'
-  own headers) have always shown a bare `examples/pay-server/scripts/setup_database.sh`
-  invocation, which a 0644 checkout rejects.
-- **Version sync guard** (`scripts/check_version_sync.py`): the version is
-  declared in `CMakeLists.txt`, `conanfile.py` and `examples/pay-admin/package.json`,
-  and nothing else may restate it. Bare mode asserts the three agree; `--tag
-  vX.Y.Z` additionally requires the tag to equal them and `CHANGELOG.md` to
-  already carry that section. Six `# Version: 1.0.0` comment lines in
-  `examples/pay-server/deploy/` were deleted as the drift they had already
-  caused.
-- **Release gate waits for the pipeline that certifies the tag**
-  (`.github/workflows/_tag-gate.yml`, called by release.yml's `ci-gate` job
-  between `version-check` and `sdk-smoke`, and by deploy.yml's `tag-gate` before
-  it pushes an image — see the Fixed entry for why one file serves both).
-  Branch protection cannot cover a tag: the ruleset's required contexts gate
-  merges, and `git tag v1.1.0 <commit> && git push --tags` is not a merge, so any
-  commit could be released without ever having gone through the pipeline —
-  v1.0.0 was, with `windows-build-and-test` reported as `failure` on that very
-  commit. The job resolves the tag to its commit (the API dereferences
-  annotated tags, whose own object SHA carries no check runs), refuses anything
-  that `compare/master...<sha>` does not place inside master's history — which
-  also excludes a tag on an unmerged branch commit, whose PR checks may look
-  green — and then polls `commits/<sha>/check-runs` for the five contexts the
-  merge pipeline reports (three `* / build-test`, two `* / sdk-smoke`, FAST
-  excluded because MAIN `needs` it). A non-success conclusion fails immediately,
-  a check that has not finished (or not yet appeared) polls for
-  `DEADLINE_MINUTES: 120` minutes and then fails with the names that never
-  arrived — measured end to end, one green pass of the merge pipeline takes 32
-  minutes, so the window has to clear that with room left for a cold Conan cache,
-  and `timeout-minutes: 135` sits above it deliberately so the script's own
-  "which context is missing" message beats a bare runner cancel. When a name was
-  reported more than once (a re-run, a second dispatch over the same commit) the
-  verdict comes from the highest check-run id, so a re-run supersedes its own
-  predecessor; requiring every sibling to be green would let one stale
-  `cancelled` lock the release with nothing able to clear it. An empty check-run
-  listing is *not* the "nothing is coming" signal — this same workflow reports
-  check runs against the tagged commit, so the listing is never empty — and the
-  five contexts only appear once FAST has finished, a quarter of an hour in. The
-  evidence that a pipeline reached this commit at all is ci.yml's own entry jobs,
-  so `ENTRY_CHECKS: static-analysis,clang-tidy` is polled for and fifteen minutes
-  without them (`EARLY_BAIL_SECONDS: 900`, a window wide enough to survive runner
-  queueing) exits with the reason instead of waiting two hours. That bail is a
-  backstop, not a merge test: those two names are reported on `pull_request` runs
-  too, and only the containment check above says the commit is on `master`. The tag
-  name is shape-checked against semver before it reaches an API path, the three
-  timing knobs are rejected unless they are numbers *and before anything does
-  arithmetic with them*, every context name is rejected unless it is made of the
-  characters the real five use (one containing a backslash could never match, since
-  `awk -v` unescapes it, and the release would stall for two hours over it), and
-  the list is rejected unless it holds exactly five entries — a truncated `env:`
-  block would otherwise leave nothing pending and print "green" having inspected
-  nothing. `scripts/ci/tag_gate_scenarios.py` replays that table by extracting the
-  workflow's own `run:` bytes and driving them against a stand-in `gh` (23 cases:
-  the entry bail in both directions, a listing that is pending on the first poll
-  and green on the second, and each of the three API reads failing, so a transport
-  error is never read as a verdict), and with `--live` against the real read-only
-  API. The `static-analysis` job of `ci.yml` runs the stubbed mode on every pull
-  request into master, so a verdict that drifts fails a pull request instead of a
-  release. Replayed
-  live it reproduces the incident it exists
-  for: pointed at the v1.0.0 tag it dereferences the annotated tag to its
-  commit, accepts that the commit is inside master, and — judged by the check
-  names that commit's own pipeline reported, since the five current contexts
-  postdate it — refuses with `windows-build-and-test: failure`. `sdk-smoke`
-  still re-runs afterwards:
-  "green on master" and "installs the way a consumer builds it" are claims about
-  different artifacts.
-
-### Changed
-
-- **Log levels standardized to the six-tier Drogon taxonomy**
-  (TRACE/DEBUG/INFO/WARN/ERROR/FATAL); see `TECH_SPECS.md` 「日志分级规范」.
-  - `LOG_INFO` is now reserved for lifecycle/milestone events; per-request
-    flow steps moved to `LOG_DEBUG`.
-  - Fire-and-forget helper failures (ledger insert/lookup, idempotency
-    snapshot write) moved from `LOG_ERROR` to `LOG_WARN` — these degrade
-    audit/replay but do not fail the request.
-  - Startup-exit paths (config load, env-var validation) moved from
-    `LOG_ERROR` to `LOG_FATAL`.
-  - **Ops impact:** if you alert on `LOG_ERROR` count via log aggregation
-    (ELK/Loki), these fire-and-forget failures will no longer trigger that
-    alert. Built-in Prometheus metric alerts (`HighErrorRate` in
-    `docs/deployment/monitoring_setup.md`) are unaffected. For idempotency-
-    snapshot failures (which affect retry correctness), the
-    `clearReservation` path remains `LOG_ERROR` and is the recommended
-    alert anchor. See `docs/development/logging_standards.md`.
-
-- **The `v*` release pipeline is now a gate, not a formality.** `release.yml`
-  opens with a `version-check` job (five minutes, no compiler) that fails a tag
-  whose version is not what the tree declares or whose `CHANGELOG.md` section was
-  never written, replaces its Windows-only `conan create` step with the same
-  `_sdk-smoke.yml` the RELEASE gate of `ci.yml` uses — so the tag path exercises
-  the plugin routes on Linux and Windows instead of only building on one — and
-  `publish` now depends on that. The hand-run `gh release create` recipe is gone
-  with it: `/release` describes the tag-and-watch-CI flow instead of telling you
-  to `git log > CHANGELOG.md`, which would have thrown away the changelog and
-  left the release body blank. The workflow asks for `contents: read` and grants
-  `write` to `publish` alone, and its changelog extraction fails the job when it
-  yields nothing instead of publishing a release with a blank body.
-- **`build-test` waits for `clang-tidy`, not only `static-analysis`.** MAIN
-  depended on one FAST job, so the promoted tidy batch was advisory in
-  practice: red on a check nothing depends on still merges. The `needs` edge
-  makes it a blocker regardless of which contexts the branch ruleset requires.
-- **Every workflow now states what its token may do, and no workflow runs an
-  action that is not frozen.** `ci.yml`, `_build-test.yml`, `_sdk-smoke.yml`,
-  `coverage.yml` and `deploy.yml` declare `permissions: contents: read` at
-  workflow level instead of inheriting the repository default, and the
-  remaining floating refs (`coverage.yml`, `deploy.yml`, `secrets-scan.yml`)
-  are pinned to full commit SHAs with their tag in a comment — the same rule
-  the `ci.yml` pipeline already followed. Each SHA was resolved through the
-  tag ref API and cross-checked against the pins already in use, so the two
-  spellings of `actions/checkout` in this repository name one commit.
-  `secrets-scan.yml` keeps its inherited grants on purpose: gitleaks posts a
-  commit status, and narrowing it without a run to observe is how a security
-  gate goes quiet.
 
 ### Fixed
 
@@ -482,29 +220,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (§二十五 of the audit doc). A clock-skew window on answers is deliberately
   not added — the guide requires none, matching the inbound conclusion of
   round 15.
-
-- **A tag no pipeline had ever run could deploy production.** `deploy.yml`
-  triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
-  and `deploy-production` legs depended only on `preflight` — which checks whether
-  secrets exist, not whether the commit is sound — so `git tag v9.9.9 <commit>
-  && git push --tags` would push a semver image and roll the ECS service for any
-  commit at all, including one the tests never ran, wherever those credentials are
-  configured. A red release did not stop it:
-  `jobs.*.needs` cannot cross workflows, so the two tag consumers shared no gate.
-  The check now lives once, in `.github/workflows/_tag-gate.yml`, and both call it
-  — `release.yml` as `ci-gate`, `deploy.yml` as `tag-gate`, which `build-and-push`
-  `needs`. `deploy.yml` is also dispatchable from a branch, and there is no tag to
-  certify there (its production leg already keys off a tag ref), so a non-tag ref
-  passes the gate through instead of failing a manual deploy that has nothing to
-  check. Two limits of the fix are worth stating: Actions runs the workflow
-  definition *stored in the tagged commit*, so a tag aimed at a commit older than
-  this change is still built by the ungated file and the hole closes going
-  forward rather than retroactively; and a `v*` tag outside `v` + three numeric
-  segments is now refused by the shape check, where such a tag previously reached
-  the image-push and ECS-roll legs with nothing saying otherwise (in this
-  repository those legs then stopped on their own missing-credential conditions,
-  which is why no `v*` tag has actually rolled production that way — the absence
-  of an incident is a secret gap, not a gate).
 
 - **`time_expire` had no HTTP entry point, which made the whole order-expiry
   chain dead code (audit round 18)**: no handler ever assigned
@@ -1042,6 +757,438 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   choose the cipher parameters. WeChat fixes it at 12 bytes, so any other
   length is now rejected, and the final tag write no longer lands one past the
   end of the plaintext buffer.
+
+- **One settled refund booked the whole order as `REFUNDED`.** WeChat accepts
+  up to fifty partial refunds per order and `trade_state=REFUND` answers for a
+  partly refunded trade too, but both settlement sites — the refund-success
+  path in `libs/drogon-pay/src/services/RefundService.cc` and the refund
+  notification path in `libs/drogon-pay/src/services/CallbackService.cc` —
+  wrote `pay_order.status = 'REFUNDED'` on any refund that reached
+  `REFUND_SUCCESS`. Returning 3.00 of a 10.00 order told every consumer keying
+  on `REFUNDED` that the money was back while 7.00 was still with the
+  merchant. Both sites now gate on `pay::utils::refundsCoverOrderAmount`: the
+  order flips only when the sum of its `REFUND_SUCCESS` refund rows covers
+  `pay_order.amount` (the callback-path read runs inside the notification's own
+  transaction, so it sees the row that settlement just wrote), and an amount
+  nobody measured leaves the order as it is. `PayUtils_RefundsCoverOrderAmount`
+  pins the predicate; the pairs `PayPlugin_Refund_PartialRefundKeepsOrderPaid`
+  / `PayPlugin_Refund_CumulativeRefundsSettleOrder` and the matching pair in
+  `tests/integration/WechatCallbackIntegrationTest.cc` pin both sites through
+  real settlement flows — a partial refund leaves the order `PAID` while its
+  refund row still reads `REFUND_SUCCESS`, and refunds that do cover the total
+  flip it (a positive control, so the gate cannot pass by never writing). The
+  two remaining `REFUNDED`-adjacent landings named in the audit — the
+  `trade_state=REFUND` sync paths — are deliberately left to the next batch.
+- **A `REFUND` answer from the query or the transaction notification booked
+  `REFUNDED` ungated.** The previous batch closed the two refund settlement
+  sites but left the doors the audit had named: the trade notification maps
+  `trade_state=REFUND` straight onto `pay_order.status`, and so does the order
+  query sync in `libs/drogon-pay/src/services/PaymentService.cc` — yet
+  `REFUND` only says the trade entered refunding, which one settled partial
+  refund of an order is enough to produce. A dropped refund notification plus
+  one query therefore still recorded 3.00 back on a 10.00 order as the whole
+  order returned. All three remaining write points now pass the claim through
+  `pay::utils::resolveRefundedOrderStatus` against the same settled-refund sum
+  (read inside each path's own transaction, queued ahead of the write): an
+  uncovered `REFUNDED` lands as `PAID` — which is what a REFUND trade has
+  nonetheless proven — and a covered one stands. `syncRefundStatusFromWechat`
+  in `libs/drogon-pay/src/services/RefundService.cc` also gained the settlement
+  its name promises: when a queried refund has settled and the refunds on the
+  order together cover its total, the order is moved to `REFUNDED` under the
+  same PAID-guarded CAS, recovering the concurrent case where two settlements
+  each counted without the other. `PayUtils_ResolveRefundedOrderStatus` pins
+  the predicate; `PayPlugin_QueryOrder_WechatRefundSettlesOrderOnlyWhenCovered`
+  and `PayPlugin_WechatCallback_TransactionRefundStateCoveredSettlesOrder` pin
+  both new doors with their positive controls, and the round-11/round-12
+  cases flipped to the ledger-backed expectation. What a single channel answer
+  can still never prove — that the refund it mentions exists at all — remains
+  guarded only by the amount check, as before.
+## [1.1.0] - 2026-09-24
+
+### Added
+
+- **Docs/AI-config drift guard** (`scripts/check_docs_drift.py`, CI hard
+  gate): keeps the `AGENTS.md` asset inventory in sync with `.claude/`,
+  rejects backticked paths that don't exist in governance docs, bans
+  gtest vocabulary outside archived history, refuses migration versions the
+  `sql/` chain does not have, and (rule 5) requires a file held by both
+  `.claude/` and `.codex/` to be byte-identical — see Fixed.
+- **`scripts/clang_format.py`**: single pinned clang-format major (22) for
+  CI, the agent PostToolUse hook and pre-commit — previously three
+  consumers used three different versions (CI 22 / pre-commit 17 / bare
+  PATH `clang-format`), which produced spurious formatting drift.
+- **`DROGON_PAY_WERROR` build option** (`cmake/Warnings.cmake`,
+  `pay_apply_warnings()`): opt-in hard warning bar (/W4 /WX on MSVC,
+  -Wall -Wextra -Werror elsewhere) applied to first-party targets only
+  (library, example host, tests) and PRIVATE so consumers are unaffected.
+  All three CI platforms configure with it ON. The drogon_ctl-generated
+  ORM models were split into a `drogon_pay_models` OBJECT library that
+  keeps the advisory profile — generated code must not be hand-edited to
+  satisfy the gate.
+- **clang-tidy two-tier gate** (`scripts/clang_tidy_gate.py`, new CI job
+  `clang-tidy` on Linux): `.clang-tidy` stays advisory while a promoted
+  subset of bugprone/performance checks runs with `--warnings-as-errors`
+  as a hard gate over first-party, non-model translation units. The
+  promote list only grows (0-finding checks first; `--report` prints hit
+  counts for the next candidates), and unknown check names fail the gate
+  instead of being silently dropped by clang-tidy.
+- **Test suites split into `tests/unit/` (pure logic) and
+  `tests/integration/` (HTTP/DB/Redis surface)**, guarded by
+  `scripts/check_test_layout.py` (CI `static-analysis` step): `*Test.cc`
+  naming, single `DROGON_TEST_MAIN` (`tests/main.cc`), no DROGON_TEST
+  outside `tests/`, explicit CMake registration. HTTP e2e smoke scripts
+  moved to `examples/pay-server/scripts/`. `tests/run_all_tests.ps1` and
+  `ultra_simple.ps1` were retired — ctest now runs the binary directly on
+  all three platforms. A full `DROGON_PAY_WERROR=ON` rebuild also exposed
+  (and fixed) pre-existing gate breaks in the test target: one unused
+  variable, missing `/utf-8`, and OpenSSL 3.0 deprecation warnings from
+  the test RSA fixtures (now suppressed target-wide).
+- **Line-coverage pipeline** (`cmake/Coverage.cmake` +
+  `DROGON_PAY_COVERAGE` + `linux-coverage` preset +
+  `scripts/measure_coverage.py` + `.github/workflows/coverage.yml`):
+  Debug+gcov instrumented build (GCC/Clang only, models excluded), ctest
+  run against service containers, then per-directory buckets
+  (handlers/services/channels/utils/core + host-*) gated by a ratchet
+  baseline (`scripts/coverage_baseline.json`, 0.5pp tolerance, small-bucket
+  exemption, line-collapse detection, SEED on first run). The
+  `TECH_SPECS.md` coverage claim is now backed by the gate instead of a
+  verbal percentage. A SEED run writes its baseline into the runner's working
+  copy and loses it there, so the file this ships with is the first green
+  `coverage.yml` run's measured numbers copied into a reviewed commit (overall
+  40.21%, 3012/7490 lines, 2026-09-19) — without it every run re-SEEDs and the
+  ratchet has no floor to hold.
+- **Drift guard rules 6 and 7** (`scripts/check_docs_drift.py`), which turn
+  this round of documentation fixes into something that cannot silently rot
+  again. Rule 6 (`no-version-stamps`) rejects a `**版本：**` /
+  `**Last updated:**` line in any live governance document: a stamp is a
+  second copy of a fact CI already checks elsewhere, so 18 of them went away
+  (four header/footer pairs in each of the four operations and deployment
+  guides, plus the `CLAUDE.md` / `TECH_SPECS.md` footers, which now defer to
+  `git log`). Verified by pointing the rule at `git show HEAD:` of the four
+  stamped documents (it reports exactly the 16 deleted guide lines) and at the
+  cleaned tree (it reports nothing). Rule 7 (`twin-scripts`) requires the five
+  entry points (`build`/`test`/`setup_database`/`deploy`/`check_config`) to
+  exist as a `.sh` + `.bat` pair, refuses an undeclared orphan script in
+  `examples/pay-server/scripts/` (declare it single-platform with a reason and
+  a `TECH_SPECS.md` row instead), drops a stale declaration whose file is gone,
+  and fails when a `.sh` is indexed `100644` because a clone could not `./` it.
+  Each of the three failure modes was exercised against a temporary scripts
+  directory that is then removed.
+- **Single-entry CI pipeline** (`.github/workflows/ci.yml` + reusable
+  `_build-test.yml` / `_sdk-smoke.yml`): FAST (`static-analysis`, parallel
+  `clang-tidy`) → MAIN (`build-test` matrix over linux/windows/macos) →
+  RELEASE (`sdk-smoke` matrix over linux/windows), chained by `needs`, with
+  `concurrency` cancelling superseded runs. The three required checks keep the
+  names the legacy files used, but not as bare contexts: a job calling a
+  reusable workflow reports `<caller job name> / <name the called workflow gives
+  its own job>`, so the ruleset now requires `linux-build-and-test / build-test`,
+  `windows-build-and-test / build-test` and `macos-build / build-test`, whose
+  first half comes from `matrix.check_name` and second half from the unnamed
+  `jobs: build-test:` in `_build-test.yml`. Actions are pinned to
+  full commit SHAs. The pre-Conan build-Drogon-from-source jobs moved to
+  dispatch-only `legacy-source-build.yml`. The old `ci-linux.yml` /
+  `ci-windows.yml` / `ci-macos.yml` / `conan-create.yml` ran beside the new
+  pipeline for exactly one verification cycle and are deleted in this stack: the
+  same commit carried both chains to green (`ci.yml` FAST → MAIN → both
+  sdk-smoke legs, plus all four legacy checks), and the new RELEASE gate
+  smoke-tests `conan create` on Linux as well as Windows at PR time, which the
+  Windows-only job it replaces never did.
+- **Linux CI applies the whole migration chain** (`sql/001`–`004`): the
+  per-platform workflow it replaces hardcoded only `001` and `002`, and its
+  Postgres readiness loop fell through to a green step when the probe never
+  succeeded. Readiness now probes `SELECT 1`, hard-fails on timeout and dumps
+  the container log.
+- **OpenAPI 3.0 contract** (`examples/pay-server/openapi.yaml`): all 11 plugin
+  routes and 4 host routes documented with request/response schemas, the
+  business-code → HTTP-status mapping, scope requirements and the two
+  channel-facing notify bodies (marked as channel conventions, not this
+  service's contract). `docs/api/pay-api-examples.md` gains the two endpoints
+  it never documented (`/api/pay/orders`, `/api/pay/reconcile/summary`) plus
+  the Alipay callback.
+- **OpenAPI route gate** (`scripts/check_openapi_routes.py`, two
+  `static-analysis` steps): parses the `registerHandler`/`ADD_METHOD_TO`
+  call sites — including `basePath_ + "/x"` concatenation, the `qrPath`
+  variable and the ternary that pins `/api/qrpay/create` — and diffs the
+  resulting `METHOD /path` set against the spec paths in both directions,
+  then checks the auth posture of each pair (`authed()` routes may not be
+  documented as public, `OPTIONS` must be). A contract that merely omits a
+  route fails; so does an `EXCLUSIONS` entry without a reason and a `$ref`
+  with no definition. Stdlib-only, because the FAST gate must not depend on
+  PyYAML being present on the runner. The `openapi-update` skill was
+  rewritten around this gate (both mirrors).
+- **Migration executor** (`scripts/migrate_db.py`, stdlib-only, shells out to
+  `psql`): the only code that knows which files exist. It discovers
+  `sql/NNN_*.sql`, applies what is missing in version order, commits each
+  migration together with its `schema_migrations` row (version / filename /
+  sha256 / applied_at) inside one transaction, refuses to run when an applied
+  version's bytes changed, warns when recorded tables were dropped out-of-band,
+  and adds `--status` / `--dry-run` / `--baseline` (adopt a database an
+  `initdb.d` mount already provisioned, rejected unless the tables are really
+  there) / `--reset-schema --confirm-drop <db>`. `--reset-schema` accepts a
+  loopback host only: `setup_database.{sh,bat}` fills in `--confirm-drop` for
+  the operator, so the repeated name is not a human decision and a remote host
+  is where staging and production live. Creating or dropping the
+  *database* stayed out of it on purpose — the app role has no `CREATEDB`, so a
+  failed `DROP DATABASE` cannot be undone by the same connection; the executor
+  only probes `pg_database` and prints the superuser command.
+- **Migration hygiene guard** (`scripts/check_migrations.py`, CI
+  `static-analysis` step): naming, an unbroken version chain, idempotence and
+  non-destruction, plus a sha256 pin of history in
+  `scripts/migrations_baseline.json`. Content rules apply only to migrations
+  that are not yet baselined — `001`–`004` predate the guard and are pinned as
+  they are, while a new file must pass. `--write-missing` pins new versions,
+  never rewrites an existing entry, and refuses a candidate that breaks the
+  content rules (pinning is a permanent exemption, so it cannot double as a
+  waiver).
+- **`examples/pay-server/scripts/setup_database.sh`**, the POSIX twin of
+  `setup_database.bat`, and the `.bat` lost its embedded default password: both
+  now reset the schema, replay the chain through the executor and read
+  credentials from the environment or `examples/pay-server/.env`.
+- **`examples/pay-server/scripts/build.sh` and `test.sh`**, the POSIX twins of
+  `build.bat` / `test.bat`. Same flags (`-debug` / `-release`; `-l`,
+  `-r <pattern>`, `-v`, `-o` on the test side), same exit codes, and they
+  resolve `uname` to the matching preset instead of asking the reader to paste a
+  four-line conan+cmake incantation. New `linux-debug` and `macos-debug` CMake
+  presets back the `-debug` flag on Unix — previously only Windows had a debug
+  preset, so the documented `-debug` was a Windows-only option. `test.bat` also
+  dropped its `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS=123456` block: no test
+  reads those names (the suite loads `.env` through `ConfigLoader`), so it was a
+  plausible-looking plaintext credential that did nothing. Every tracked
+  `examples/pay-server/**/*.sh` is now mode 100755 — the docs (and these scripts'
+  own headers) have always shown a bare `examples/pay-server/scripts/setup_database.sh`
+  invocation, which a 0644 checkout rejects.
+- **Version sync guard** (`scripts/check_version_sync.py`): the version is
+  declared in `CMakeLists.txt`, `conanfile.py` and `examples/pay-admin/package.json`,
+  and nothing else may restate it. Bare mode asserts the three agree; `--tag
+  vX.Y.Z` additionally requires the tag to equal them and `CHANGELOG.md` to
+  already carry that section. Six `# Version: 1.0.0` comment lines in
+  `examples/pay-server/deploy/` were deleted as the drift they had already
+  caused.
+- **Release gate waits for the pipeline that certifies the tag**
+  (`.github/workflows/_tag-gate.yml`, called by release.yml's `ci-gate` job
+  between `version-check` and `sdk-smoke`, and by deploy.yml's `tag-gate` before
+  it pushes an image — see the Fixed entry for why one file serves both).
+  Branch protection cannot cover a tag: the ruleset's required contexts gate
+  merges, and `git tag v1.1.0 <commit> && git push --tags` is not a merge, so any
+  commit could be released without ever having gone through the pipeline —
+  v1.0.0 was, with `windows-build-and-test` reported as `failure` on that very
+  commit. The job resolves the tag to its commit (the API dereferences
+  annotated tags, whose own object SHA carries no check runs), refuses anything
+  that `compare/master...<sha>` does not place inside master's history — which
+  also excludes a tag on an unmerged branch commit, whose PR checks may look
+  green — and then polls `commits/<sha>/check-runs` for the five contexts the
+  merge pipeline reports (three `* / build-test`, two `* / sdk-smoke`, FAST
+  excluded because MAIN `needs` it). A non-success conclusion fails immediately,
+  a check that has not finished (or not yet appeared) polls for
+  `DEADLINE_MINUTES: 120` minutes and then fails with the names that never
+  arrived — measured end to end, one green pass of the merge pipeline takes 32
+  minutes, so the window has to clear that with room left for a cold Conan cache,
+  and `timeout-minutes: 135` sits above it deliberately so the script's own
+  "which context is missing" message beats a bare runner cancel. When a name was
+  reported more than once (a re-run, a second dispatch over the same commit) the
+  verdict comes from the highest check-run id, so a re-run supersedes its own
+  predecessor; requiring every sibling to be green would let one stale
+  `cancelled` lock the release with nothing able to clear it. An empty check-run
+  listing is *not* the "nothing is coming" signal — this same workflow reports
+  check runs against the tagged commit, so the listing is never empty — and the
+  five contexts only appear once FAST has finished, a quarter of an hour in. The
+  evidence that a pipeline reached this commit at all is ci.yml's own entry jobs,
+  so `ENTRY_CHECKS: static-analysis,clang-tidy` is polled for and fifteen minutes
+  without them (`EARLY_BAIL_SECONDS: 900`, a window wide enough to survive runner
+  queueing) exits with the reason instead of waiting two hours. That bail is a
+  backstop, not a merge test: those two names are reported on `pull_request` runs
+  too, and only the containment check above says the commit is on `master`. The tag
+  name is shape-checked against semver before it reaches an API path, the three
+  timing knobs are rejected unless they are numbers *and before anything does
+  arithmetic with them*, every context name is rejected unless it is made of the
+  characters the real five use (one containing a backslash could never match, since
+  `awk -v` unescapes it, and the release would stall for two hours over it), and
+  the list is rejected unless it holds exactly five entries — a truncated `env:`
+  block would otherwise leave nothing pending and print "green" having inspected
+  nothing. `scripts/ci/tag_gate_scenarios.py` replays that table by extracting the
+  workflow's own `run:` bytes and driving them against a stand-in `gh` (23 cases:
+  the entry bail in both directions, a listing that is pending on the first poll
+  and green on the second, and each of the three API reads failing, so a transport
+  error is never read as a verdict), and with `--live` against the real read-only
+  API. The `static-analysis` job of `ci.yml` runs the stubbed mode on every pull
+  request into master, so a verdict that drifts fails a pull request instead of a
+  release. Replayed
+  live it reproduces the incident it exists
+  for: pointed at the v1.0.0 tag it dereferences the annotated tag to its
+  commit, accepts that the commit is inside master, and — judged by the check
+  names that commit's own pipeline reported, since the five current contexts
+  postdate it — refuses with `windows-build-and-test: failure`. `sdk-smoke`
+  still re-runs afterwards:
+  "green on master" and "installs the way a consumer builds it" are claims about
+  different artifacts.
+
+### Changed
+
+- **Log levels standardized to the six-tier Drogon taxonomy**
+  (TRACE/DEBUG/INFO/WARN/ERROR/FATAL); see `TECH_SPECS.md` 「日志分级规范」.
+  - `LOG_INFO` is now reserved for lifecycle/milestone events; per-request
+    flow steps moved to `LOG_DEBUG`.
+  - Fire-and-forget helper failures (ledger insert/lookup, idempotency
+    snapshot write) moved from `LOG_ERROR` to `LOG_WARN` — these degrade
+    audit/replay but do not fail the request.
+  - Startup-exit paths (config load, env-var validation) moved from
+    `LOG_ERROR` to `LOG_FATAL`.
+  - **Ops impact:** if you alert on `LOG_ERROR` count via log aggregation
+    (ELK/Loki), these fire-and-forget failures will no longer trigger that
+    alert. Built-in Prometheus metric alerts (`HighErrorRate` in
+    `docs/deployment/monitoring_setup.md`) are unaffected. For idempotency-
+    snapshot failures (which affect retry correctness), the
+    `clearReservation` path remains `LOG_ERROR` and is the recommended
+    alert anchor. See `docs/development/logging_standards.md`.
+
+- **The `v*` release pipeline is now a gate, not a formality.** `release.yml`
+  opens with a `version-check` job (five minutes, no compiler) that fails a tag
+  whose version is not what the tree declares or whose `CHANGELOG.md` section was
+  never written, replaces its Windows-only `conan create` step with the same
+  `_sdk-smoke.yml` the RELEASE gate of `ci.yml` uses — so the tag path exercises
+  the plugin routes on Linux and Windows instead of only building on one — and
+  `publish` now depends on that. The hand-run `gh release create` recipe is gone
+  with it: `/release` describes the tag-and-watch-CI flow instead of telling you
+  to `git log > CHANGELOG.md`, which would have thrown away the changelog and
+  left the release body blank. The workflow asks for `contents: read` and grants
+  `write` to `publish` alone, and its changelog extraction fails the job when it
+  yields nothing instead of publishing a release with a blank body.
+- **`build-test` waits for `clang-tidy`, not only `static-analysis`.** MAIN
+  depended on one FAST job, so the promoted tidy batch was advisory in
+  practice: red on a check nothing depends on still merges. The `needs` edge
+  makes it a blocker regardless of which contexts the branch ruleset requires.
+- **Every workflow now states what its token may do, and no workflow runs an
+  action that is not frozen.** `ci.yml`, `_build-test.yml`, `_sdk-smoke.yml`,
+  `coverage.yml` and `deploy.yml` declare `permissions: contents: read` at
+  workflow level instead of inheriting the repository default, and the
+  remaining floating refs (`coverage.yml`, `deploy.yml`, `secrets-scan.yml`)
+  are pinned to full commit SHAs with their tag in a comment — the same rule
+  the `ci.yml` pipeline already followed. Each SHA was resolved through the
+  tag ref API and cross-checked against the pins already in use, so the two
+  spellings of `actions/checkout` in this repository name one commit.
+  `secrets-scan.yml` keeps its inherited grants on purpose: gitleaks posts a
+  commit status, and narrowing it without a run to observe is how a security
+  gate goes quiet.
+- **`openapi.yaml`'s `info.version` is now a version declaration, not a fifth
+  truth.** It used to sit outside `check_version_sync.py`, which let the
+  published contract state a version no release had shipped — the file said
+  `1.0.0` while the tree was preparing `1.1.0`. `AGENTS.md` had claimed the
+  version is "declared three times", so the fix is to make the contract a fourth
+  enforced site rather than to keep that claim true by documenting a hole:
+  reading it is anchored on the `info:` block and demands exactly one
+  `version:` line, so a second one or a renamed block fails the gate instead of
+  quietly passing on whichever line matched first. Bumping a release now touches
+  four places, and `release.yml`'s `version-check` covers the contract for free
+  because it re-runs the same script.
+
+### Removed
+
+- **The `/health` alias of `/readyz` is gone.** The `Deprecation: true` and
+  `Sunset: 2026-08-28` headers were added on 2026-05-28 (373d235) — the same
+  commit that turned `/health` into an alias of `/readyz`, so the deprecation
+  started the moment the alias did, and it named a date 92 days out, which is
+  what `.kiro/specs/production-readiness-upgrade/requirements.md:131` requires
+  ("弃用窗口不少于 90 天"). The window closed before this commit. The callers that
+  still used it had already moved to `/healthz` / `/readyz` earlier in this cycle
+  (see Fixed). Probes must name `/readyz` now, and `GET /health` answers 404 —
+  which is what tells an un-migrated probe its endpoint stopped existing, rather
+  than letting it go on succeeding against an answer it did not ask for.
+  `HealthProbe_RetiredCompatEndpoint_Answers404` pins the 404, the absence of the
+  `Deprecation` header, and the absence of the registration itself;
+  `examples/pay-server/openapi.yaml` dropped the path and its preflight with the
+  code, so the route-parity gate holds the contract on both sides.
+
+### Fixed
+
+- **A tag no pipeline had ever run could deploy production.** `deploy.yml`
+  triggers on the same `push: tags: v*` as `release.yml`, and its `build-and-push`
+  and `deploy-production` legs depended only on `preflight` — which checks whether
+  secrets exist, not whether the commit is sound — so `git tag v9.9.9 <commit>
+  && git push --tags` would push a semver image and roll the ECS service for any
+  commit at all, including one the tests never ran, wherever those credentials are
+  configured. A red release did not stop it:
+  `jobs.*.needs` cannot cross workflows, so the two tag consumers shared no gate.
+  The check now lives once, in `.github/workflows/_tag-gate.yml`, and both call it
+  — `release.yml` as `ci-gate`, `deploy.yml` as `tag-gate`, which `build-and-push`
+  `needs`. `deploy.yml` is also dispatchable from a branch, and there is no tag to
+  certify there (its production leg already keys off a tag ref), so a non-tag ref
+  passes the gate through instead of failing a manual deploy that has nothing to
+  check. Two limits of the fix are worth stating: Actions runs the workflow
+  definition *stored in the tagged commit*, so a tag aimed at a commit older than
+  this change is still built by the ungated file and the hole closes going
+  forward rather than retroactively; and a `v*` tag outside `v` + three numeric
+  segments is now refused by the shape check, where such a tag previously reached
+  the image-push and ECS-roll legs with nothing saying otherwise (in this
+  repository those legs then stopped on their own missing-credential conditions,
+  which is why no `v*` tag has actually rolled production that way — the absence
+  of an incident is a secret gap, not a gate).
+
+- **The published contract could not be parsed by a YAML parser.** Three scalars
+  in `examples/pay-server/openapi.yaml` broke the spec: `Amount.pattern` was
+  double-quoted while carrying `\d` escapes (a double-quoted YAML scalar may not
+  hold an unknown escape, so the load failed at that line), and two
+  `description:` lines read ``Present with `code: 1` when …``, where a plain
+  scalar may not contain a colon followed by a space. Nothing noticed because
+  both guards over that file scan it line by line — `check_openapi_routes.py` and
+  `check_version_sync.py` are stdlib-only by design, so neither runs a real
+  parser — which is exactly the gap this release pulled the contract into as a
+  version declaration site: the file now has to be read by consumers' tooling, and
+  the three scalars are quoted. Verified with `yaml.safe_load` on the whole
+  document, which reports 14 paths / 26 operations, matching what the route gate
+  counts by regex.
+
+- **The version gate read a version out of documents that state none.** Making
+  the contract a declaration site meant teaching `check_version_sync.py` to read
+  one line of YAML without a YAML parser, and that line reader disagreed with
+  `yaml.safe_load` on sixteen shapes. Thirteen of them were false passes, which
+  is the class this repo ranks worst: in **nine** the guard returned `1.1.0` for
+  a file a consumer's parser refuses outright — a tab or a non-breaking space
+  padding the `info:` header, the same after `version:`, a tab-indented line
+  under the value, junk or a list item at the value's own indent, a form feed or
+  a U+2028 inside the scalar (`str.splitlines()` breaks on both, and neither is a
+  line break to YAML), and a second document after a `---`. In **four** more the
+  file parsed to other text: `1.1.0 9.9.9` and `1.1.0\n9.9.9` from a plain scalar
+  the next line continues (directly, or across a blank), `1.1.0 ` where the
+  padding is not whitespace to YAML, and `01.1.0`, which is not a SemVer version
+  however consistently four files declare it.
+
+  The remaining **three** were refusals of legal files — a worse trade than it
+  looks, because the fix people reach for when a gate rejects valid input is to
+  weaken the gate: `info :` and `info: # contract` read as "no `info:` block",
+  and `version: "1.1.0"#bumped` as an unclosed quote, when a quoted scalar in
+  fact ends at its closing quote and a comment may follow it. The first cut of
+  this entry added a claim of its own that did not survive the next round: it
+  said `version: "1.1.0" # ship it` had been refused, with a space before the
+  `#`, and that shape was already handled — the one that failed had no space.
+  08b457b's own message records a false red its first cut introduced and fixed
+  before committing: rejecting a deeper-indented **comment** line, which a
+  parser treats as nothing at all.
+
+  The reader now accepts only what a parser agrees to — spaces as padding, an
+  optional trailing comment, a single-line plain or quoted scalar, sibling keys
+  whose end it can see, a leading `---` and a trailing `...` — and refuses
+  anchors, aliases, tags, block scalars, every continuation shape, non-space
+  indentation, markers that split a second document off this one, escapes
+  inside double quotes, unclosed quotes, doubled quotes, and leading zeros, by
+  name. Getting that rule right cost one more false red of the same class: the
+  first marker rule refused `---` and `...` wherever they stood, rejecting
+  documents a parser reads without complaint, until position — content above a
+  `---`, content below a `...` — replaced the blanket ban, with the six marker
+  spellings pinned as cases so the distinction cannot drift back.
+
+  `scripts/ci/version_sync_scenarios.py` pins each spelling as a case (a
+  `static-analysis` step; it prints its own count so no prose has to age),
+  replays them against a synthetic document, and asserts the one fact the table
+  could otherwise fake: the value read out of the repository's own contract is a
+  member of the agreeing set. The counts above are not remembered, they are
+  reproducible: replay the table against `08b457b^:scripts/check_version_sync.py`
+  and the pre-hardening reader's verdicts differ from the table on two classes
+  only — it reads a version out of every refused case whose shape its scanner
+  could not see through (the thirteen false passes above, and ever since the
+  marker family, which grew the count and is why the script prints its own
+  tally rather than this entry keeping it), and it refuses the three legal
+  spellings named above while reading the rest as the table does.
+
 - **Two dead idempotency helpers survived the service refactor until GCC
   pointed at them.** `storeIdempotencySnapshot` existed as a file-local
   function in both `PaymentService.cc` and `RefundService.cc`, with no caller
@@ -1196,14 +1343,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary's directory, since that is the `WORKING_DIRECTORY` ctest uses and the
   only place `config.json` resolves.
 - **Health checks polled an endpoint whose sunset date had passed.**
-  `/health` is a deprecated alias of `/readyz` and answers with
+  `/health` was a deprecated alias of `/readyz`, answering with
   `Deprecation: true` plus `Sunset: 2026-08-28`, a date already behind us.
   `deploy/ops/restart_service.sh` and `deploy/ops/restore_db.sh` gated a
-  rollout on it, and `docker-integration-test` probed it too; all three now use
-  `/readyz`, and `CLAUDE.md`'s endpoint table spells out the difference
-  (`/healthz` = process alive, `/readyz` = dependencies reachable). Removing
-  the alias itself is a breaking change and belongs to a version bump, so it
-  stays served for now.
+  rollout on it, and `docker-integration-test` probed it too; each now names the
+  probe it actually wants — `/readyz` where the rollout must wait for the
+  database, `/healthz` for container liveness — and `CLAUDE.md`'s endpoint table
+  spells out the difference (`/healthz` = process alive, `/readyz` =
+  dependencies reachable). The runbooks that told an operator which endpoint to
+  poll after a restart (`docs/operations/health_check_implementation.md`,
+  `docs/operations/operations_manual.md`) still described the alias as live, and
+  `deploy.yml`'s ECS health step probed it, so all three were corrected with the
+  retirement. Retiring the alias itself is a breaking change, so it waited for
+  this version bump — see Removed.
 - **A Debug build was said to be impossible.** `docs/deployment/deployment_guide.md`
   warned that building in Debug "causes link errors". Each preset directory
   carries its own Conan dependency tree, so Debug links Debug dependencies — and
@@ -1216,7 +1368,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/app/config.json` and nothing else. It now says to exercise the image over
   HTTP and run the suite on the host, and names the script that actually
   produces the report it references. `run_docker_tests.sh` is documented as the
-  orphan it is: unreferenced, probing the deprecated `/health`, no exec bit.
+  orphan it is: unreferenced, no exec bit, and its `/health` probe was the last
+  caller left in the repository (now `/healthz`).
 - **A test could have read the dev server's counters.** `tests/main.cc`
   rewrote each `listeners[]` entry to the isolated test port but left
   `custom_config.pay.metrics_base_url` at the copied config's `5566`, and
@@ -1225,8 +1378,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numbers while believing its own. The base URL is rewritten to the test port
   alongside the listeners.
 - **Version facts were described as one list, not three kinds.**
-  `check_version_sync.py` compares three declarations (`CMakeLists.txt`,
-  `conanfile.py`, `pay-admin/package.json`); the six `drogon-pay/1.0.0`
+  `check_version_sync.py` compares the version declarations
+  (`CMakeLists.txt`, `conanfile.py`, `pay-admin/package.json`, and
+  `pay-server/openapi.yaml` once this release pulled the contract in); the six
+  `drogon-pay/<version>`
   references in the READMEs and `plugin_integration.md` are *published* package
   versions that only move with a release, and documentation version stamps are
   now banned outright. `TECH_SPECS.md` 「版本号一致性」 tabulates those three
@@ -1340,51 +1495,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `libs/drogon-pay/src/services/` actually does (per-construction-site
   `try/catch`, failure reported through the call site's own callback shape,
   `OnceCallback::call` where a service wrapped it).
-- **One settled refund booked the whole order as `REFUNDED`.** WeChat accepts
-  up to fifty partial refunds per order and `trade_state=REFUND` answers for a
-  partly refunded trade too, but both settlement sites — the refund-success
-  path in `libs/drogon-pay/src/services/RefundService.cc` and the refund
-  notification path in `libs/drogon-pay/src/services/CallbackService.cc` —
-  wrote `pay_order.status = 'REFUNDED'` on any refund that reached
-  `REFUND_SUCCESS`. Returning 3.00 of a 10.00 order told every consumer keying
-  on `REFUNDED` that the money was back while 7.00 was still with the
-  merchant. Both sites now gate on `pay::utils::refundsCoverOrderAmount`: the
-  order flips only when the sum of its `REFUND_SUCCESS` refund rows covers
-  `pay_order.amount` (the callback-path read runs inside the notification's own
-  transaction, so it sees the row that settlement just wrote), and an amount
-  nobody measured leaves the order as it is. `PayUtils_RefundsCoverOrderAmount`
-  pins the predicate; the pairs `PayPlugin_Refund_PartialRefundKeepsOrderPaid`
-  / `PayPlugin_Refund_CumulativeRefundsSettleOrder` and the matching pair in
-  `tests/integration/WechatCallbackIntegrationTest.cc` pin both sites through
-  real settlement flows — a partial refund leaves the order `PAID` while its
-  refund row still reads `REFUND_SUCCESS`, and refunds that do cover the total
-  flip it (a positive control, so the gate cannot pass by never writing). The
-  two remaining `REFUNDED`-adjacent landings named in the audit — the
-  `trade_state=REFUND` sync paths — are deliberately left to the next batch.
-- **A `REFUND` answer from the query or the transaction notification booked
-  `REFUNDED` ungated.** The previous batch closed the two refund settlement
-  sites but left the doors the audit had named: the trade notification maps
-  `trade_state=REFUND` straight onto `pay_order.status`, and so does the order
-  query sync in `libs/drogon-pay/src/services/PaymentService.cc` — yet
-  `REFUND` only says the trade entered refunding, which one settled partial
-  refund of an order is enough to produce. A dropped refund notification plus
-  one query therefore still recorded 3.00 back on a 10.00 order as the whole
-  order returned. All three remaining write points now pass the claim through
-  `pay::utils::resolveRefundedOrderStatus` against the same settled-refund sum
-  (read inside each path's own transaction, queued ahead of the write): an
-  uncovered `REFUNDED` lands as `PAID` — which is what a REFUND trade has
-  nonetheless proven — and a covered one stands. `syncRefundStatusFromWechat`
-  in `libs/drogon-pay/src/services/RefundService.cc` also gained the settlement
-  its name promises: when a queried refund has settled and the refunds on the
-  order together cover its total, the order is moved to `REFUNDED` under the
-  same PAID-guarded CAS, recovering the concurrent case where two settlements
-  each counted without the other. `PayUtils_ResolveRefundedOrderStatus` pins
-  the predicate; `PayPlugin_QueryOrder_WechatRefundSettlesOrderOnlyWhenCovered`
-  and `PayPlugin_WechatCallback_TransactionRefundStateCoveredSettlesOrder` pin
-  both new doors with their positive controls, and the round-11/round-12
-  cases flipped to the ledger-backed expectation. What a single channel answer
-  can still never prove — that the refund it mentions exists at all — remains
-  guarded only by the amount check, as before.
 
 ## [1.0.0] - 2026-07-31
 
@@ -1454,5 +1564,6 @@ First release of `drogon-pay` as a reusable Drogon plugin library. The former
 - Duplicated inline CORS implementation in `main.cc` (single
   `SecurityHeaders.h` implementation, host-side).
 
-[Unreleased]: https://github.com/lucaswang420/drogon-pay/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/lucaswang420/drogon-pay/releases/tag/v1.0.0
+[Unreleased]: https://github.com/voidvec/drogon-pay/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/voidvec/drogon-pay/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/voidvec/drogon-pay/releases/tag/v1.0.0

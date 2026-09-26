@@ -2,9 +2,8 @@
 
 ## Overview
 Health check endpoints are implemented in the example host (`examples/pay-server`)
-to monitor service status and connectivity to dependencies. Three routes are
-exposed: `/healthz` (liveness), `/readyz` (readiness), and `/health`
-(deprecated alias of `/readyz`).
+to monitor service status and connectivity to dependencies. Two routes are
+exposed: `/healthz` (liveness) and `/readyz` (readiness).
 
 ## Implementation Details
 
@@ -12,7 +11,7 @@ exposed: `/healthz` (liveness), `/readyz` (readiness), and `/health`
 1. **examples/pay-server/controllers/HealthCheckController.h**
    - Header file for the health check controller
    - Defines the HealthCheckController class
-   - Registers the `/healthz`, `/readyz`, and `/health` routes for GET and OPTIONS methods
+   - Registers the `/healthz` and `/readyz` routes for GET and OPTIONS methods
 
 2. **examples/pay-server/controllers/HealthCheckController.cc**
    - Implementation of the health check logic
@@ -57,13 +56,19 @@ exposed: `/healthz` (liveness), `/readyz` (readiness), and `/health`
 ```
 
 `failed` is an array that may contain `"db"`, `"redis"`, and `"timeout"`
-(the readiness probe has a 1-second deadline). Readiness also applies a
-consecutive-failure threshold before flipping to "not_ready".
+(the readiness probe has a 1-second deadline, so a dependency that hangs without
+erroring reports `"timeout"` rather than its own name). Readiness is debounced:
+an instance starts not-ready, so a dependency failure before the first success
+answers 503 immediately, while one that has already reported `ready` keeps doing
+so until `FAILURE_THRESHOLD` (3) consecutive probes fail.
 
-**Endpoint:** `GET /health` — deprecated alias of `/readyz`
+**Endpoint:** `GET /health` — retired, answers 404
 
-Returns the same body and status as `/readyz`, with additional
-`Deprecation: true` and `Sunset: 2026-08-28` headers.
+The route was an alias of `/readyz` whose own `Sunset` header named `2026-08-28`.
+The window closed with every caller already migrated, so the alias is gone rather
+than still answering "successfully": a 404 is what tells an un-migrated probe its
+endpoint stopped existing. `HealthProbe_RetiredCompatEndpoint_Answers404` pins both
+the status and the absence of registration.
 
 ### Health Check Logic
 
@@ -76,8 +81,9 @@ Returns the same body and status as `/readyz`, with additional
    - Redis: runs `PING`; only probed when a Redis client is configured
      (when `redis_client` is omitted from config, Redis is not checked)
    - A 1-second deadline records `"timeout"` if probes do not complete
-   - HTTP 200 `"ready"` when no failures, otherwise HTTP 503 `"not_ready"`
-     with the `failed` list
+   - HTTP 200 `"ready"` when it currently believes itself ready, HTTP 503
+     `"not_ready"` with the `failed` list otherwise — subject to the debounce
+     described above, so a failure is not automatically a 503
 
 ### Building the Project
 
@@ -155,8 +161,8 @@ controllers:
 - Redis is treated as an optional service — when no `redis_client` is
   configured it is not probed at all
 - The endpoints automatically handle OPTIONS preflight requests for CORS
-- `/health` is kept only as a deprecated alias of `/readyz`
-  (`Deprecation: true`, `Sunset: 2026-08-28`)
+- `/health` is retired: not registered at all, so it answers 404 instead of
+  proxying `/readyz`
 
 ### Build Status
 

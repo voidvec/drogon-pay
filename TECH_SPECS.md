@@ -381,23 +381,24 @@ python3 scripts/measure_coverage.py --dir build/linux-coverage --ratchet   # 棘
 
 ### [MUST] 版本号一致性
 
-版本号只**声明**、不派生，**声明源只有三处**：`CMakeLists.txt` 的
+版本号只**声明**、不派生，**声明源只有四处**：`CMakeLists.txt` 的
 `project(drogon-pay VERSION x.y.z …)`、`conanfile.py` 的 `version = "x.y.z"`、
-`examples/pay-admin/package.json` 的顶层 `"version"`。`check_version_sync.py`
-只读这三处；文档里出现的版本号一律不受它管辖，因此把它们另立两类并各自动作：
+`examples/pay-admin/package.json` 的顶层 `"version"`、
+`examples/pay-server/openapi.yaml` 的 `info: version:`。`check_version_sync.py`
+只读这四处；文档里出现的版本号一律不受它管辖，因此把它们另立两类并各自动作：
 
 | 类别 | 位置 | 处理 |
 |------|------|------|
-| 声明源 | 上面三处 | 同一提交里一起改；三处不一致门禁就红 |
-| 已发布包引用 | `README.md`、`README.zh-CN.md`、`docs/development/plugin_integration.md` 里的 6 处 `drogon-pay/1.0.0` | 指的是**已发布**的那一版（`## [1.0.0] - 2026-07-31` 已打 tag），不是开发中的下一版；下一次发布 PR 必须同步改这三份文件，`check_version_sync.py` 挡不住它 |
+| 声明源 | 上面四处 | 同一提交里一起改；任一处不一致门禁就红 |
+| 已发布包引用 | `README.md`、`README.zh-CN.md`、`docs/development/plugin_integration.md` 里的 6 处 `drogon-pay/<已发布版本>` | 指的是**已 tag** 的那一版，不是开发中的下一版；下一次发布 PR 必须同步改这三份文件，`check_version_sync.py` 挡不住它 |
 | 禁止复述 | 其余一切：配置/部署/告警文件的注释、文档页眉页脚的"版本/最后更新"戳 | 不得出现版本号或手工日期。历史 6 处 `# Version: 1.0.0` 注释已删；`docs/deployment/*`、`docs/operations/*` 四份文档的 16 行版本/日期戳（每份头尾各 4 行）也已删，git 才是真相，`check_docs_drift.py` 的 `no-version-stamps` 规则挡住回潮 |
 
 | 规范项 | 要求 |
 |--------|------|
-| 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言三处一致 |
-| 打 tag | `release.yml` 的 `version-check` job 以 `--tag "$GITHUB_REF_NAME"` 再跑一次：tag 必须等于三处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段，缺段硬失败（先于任何构建，不浪费一个 Conan 编译周期） |
+| 常规 PR | `python3 scripts/check_version_sync.py`（CI `static-analysis` 步骤）断言四处一致。契约那一处是**逐行**读出来的——FAST 门只依赖 stdlib，不能 import YAML 解析器——所以扫描器与解析器可能各读出一个版本的每一种写法都是这个门的漏洞：`scripts/ci/version_sync_scenarios.py` 把"哪些写法读成版本、哪些必须拒"钉成一张判定表（锚点/标签/别名/块标量/块标量只有头/续行/空行后续行/与值同级的杂项或列表项/第二份文档/tab 或非 ASCII 既当空白又当缩进/值里的 form feed/前导零/未闭合引号/单引号翻倍转义/行尾注释/缩进更深的注释行——条数由脚本自己打印，别抄进文档），与守卫同步在 FAST 每次都跑，并额外断言一件否则可以空转的事：仓库自己的契约读出的值，确实在那四处一致的集合里 |
+| 打 tag | `release.yml` 的 `version-check` job 以 `--tag "$GITHUB_REF_NAME"` 再跑一次：tag 必须等于四处声明，且 `CHANGELOG.md` 已有对应 `## [x.y.z]` 段，缺段硬失败（先于任何构建，不浪费一个 Conan 编译周期） |
 | tag 也要过 CI | `.github/workflows/_tag-gate.yml`（`on: workflow_call`，被 release.yml 的 `ci-gate` 与 deploy.yml 的 `tag-gate` 调用——两个会因 `v*` push 跑起来的工作流共用一份定义，不再各写一份）：tag 不是被合并进来的，分支 ruleset 的必需检查管不到它，所以该门禁先用 `compare/master...<sha>` 确认该 commit 已在 master 历史上（顺手排掉"未合并分支上的 commit 也带着绿色 PR 检查"这条路），再轮询合并流水线在该 commit 上报的五个 context（三条 `* / build-test` + 两条 `* / sdk-smoke`，FAST 不列是因为 MAIN `needs` 它）。该端点会累计一个 commit 上的历次上报，所以同一名字（重跑、对同一 SHA 再 dispatch）取 id 最大的那一次作为结论，其非 `success` 立即失败；还没出现的 context 计入"未完成"继续等，`DEADLINE_MINUTES: 120` 到限才失败（实测一轮链是 32 分钟，上限必须容得下冷缓存，`timeout-minutes: 135` 又必须大于它，否则作业被 runner 掐掉就只剩"超时"而没有"哪个 context 没绿"）。"清单为空"不能作为"流水线没跑过"的判据——release/deploy 自己也会在被 tag 的 commit 上报 check run，清单永不为空；真正的证据是 ci.yml 的入口作业，即 `ENTRY_CHECKS: static-analysis,clang-tidy`——它们的 check run 在 run 创建时就存在（不必等到有 runner 领任务），十五分钟（`EARLY_BAIL_SECONDS: 900`，窗口要容得下排队）还没出现就说明没有任何 ci.yml run 摸到过这条 commit（多 commit push 只在 tip 触发 CI，master 的内部提交就是这种），此时直接失败并说明原因；这两个名字在 `pull_request` 事件里同样会出现，所以早退只是"别白等两小时"的兜底，不能替代上面的包含性检查。名单被截断或清空、`ENTRY_CHECKS` 为空或含非法字符、单个 context 名带上下不文的字符（会被 `awk -v` 反转义而永远匹配不上）、时长旋钮不是数字时同样直接失败，且旋钮校验排在任何算术之前——宁可拦住发布，也不给出一个没检查过任何事的"全绿"。非 tag 触发（deploy.yml 的 `workflow_dispatch`）没有 tag 可证明，原样放行。`scripts/ci/tag_gate_scenarios.py` 把这张判定表钉在 CI 上：FAST 门每次进 master 的 PR 都会自动跑一遍（从工作流文件里现场抽取 `run:` 正文，用打桩的 `gh` 复演 23 个判定——含入口早退的正反两向、第一轮 pending/第二轮绿、三个 API 读取失败分支），`--live` 再用真实只读 API 复演 v1.0.0 那次的三种判法；改门禁的判定就要同时改这张表 |
-| 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改三处声明 + 已发布包引用 → 提交 PR → 合并后打 tag |
+| 发布顺序 | `[Unreleased]` 归档为带日期的版本段 → 同一提交改四处声明 + 已发布包引用 → 提交 PR → 合并后打 tag |
 
 ### [MUST] 日志分级规范
 

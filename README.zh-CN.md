@@ -26,7 +26,7 @@ config.json plugins: [PayPlugin] ──▶ 渠道装配 → 服务构造 → 路
 
 ## 特性
 
-- **插件即库**：`drogon-pay/1.0.0` Conan 包（`static-library`），CMake 目标
+- **插件即库**：`drogon-pay/1.1.0` Conan 包（`static-library`），CMake 目标
   `DrogonPay::DrogonPay`，公共 API 仅 4 个头文件
 - **渠道 SPI**：`drogon_pay::PaymentChannel` 抽象接口 + `ChannelRegistry`
   启动期注册/冻结；未知渠道显式 `CHANNEL_NOT_AVAILABLE`，无隐式兜底
@@ -44,7 +44,7 @@ config.json plugins: [PayPlugin] ──▶ 渠道装配 → 服务构造 → 路
 ```python
 # conanfile.py
 def requirements(self):
-    self.requires("drogon-pay/1.0.0")
+    self.requires("drogon-pay/1.1.0")
 ```
 
 ```cmake

@@ -12,7 +12,7 @@ openapi: 3.0.3
 
 info:
   title: Drogon Pay Server API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Payment gateway surface exposed by the example host: order creation,
     status/refund queries, an operator reconciliation summary, auth metrics,
@@ -729,51 +729,6 @@ paths:
         "200":
           description: Empty preflight answer
 
-  /health:
-    get:
-      tags: [host]
-      operationId: healthDeprecated
-      summary: Readiness probe (deprecated alias of /readyz)
-      deprecated: true
-      description: |
-        Same behaviour as `/readyz` plus `Deprecation: true` and
-        `Sunset: 2026-08-28` response headers. Kept for hosts that have not
-        migrated their probes.
-      security: []
-      responses:
-        "200":
-          description: Ready
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [ready]
-        "503":
-          description: Not ready
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [not_ready]
-                  failed:
-                    type: array
-                    items:
-                      type: string
-    options:
-      tags: [host]
-      operationId: healthDeprecatedPreflight
-      summary: CORS preflight
-      security: []
-      responses:
-        "200":
-          description: Empty preflight answer
-
   /metrics:
     get:
       tags: [host]
@@ -949,7 +904,7 @@ components:
   schemas:
     Amount:
       type: string
-      pattern: "^\d+(\.\d{1,2})?$"
+      pattern: '^\d+(\.\d{1,2})?$'
       example: "9.99"
       description: |
         Decimal money in **yuan**, up to two fractional digits, stored verbatim
@@ -1311,10 +1266,10 @@ components:
               type: object
             wechat_query_error:
               type: string
-              description: Present with `code: 1` when the WeChat query failed.
+              description: 'Present with `code: 1` when the WeChat query failed.'
             alipay_query_error:
               type: string
-              description: Present with `code: 1` when the Alipay query failed.
+              description: 'Present with `code: 1` when the Alipay query failed.'
 
     CreateRefundRequest:
       type: object

@@ -100,7 +100,7 @@ sudo apt install libcurl4-openssl-dev libssl-dev zlib1g-dev
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/lucaswang420/drogon-pay.git
+git clone https://github.com/voidvec/drogon-pay.git
 cd drogon-pay
 ```
 
@@ -307,8 +307,6 @@ curl http://localhost:5566/readyz    # 就绪探针（探测 DB/Redis 连通性�
   "status": "ready"
 }
 ```
-
-> `/health` 是 `/readyz` 的废弃别名（响应头含 `Deprecation: true`）。
 
 ---
 

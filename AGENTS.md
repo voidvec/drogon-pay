@@ -112,14 +112,27 @@ Rules in [TECH_SPECS.md](TECH_SPECS.md) "迁移工程化"; new files via
 
 ### Versioning
 
-The version is declared three times and never derived: `project(drogon-pay
-VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, and the top-level
-`"version"` in `examples/pay-admin/package.json`. `scripts/check_version_sync.py`
-enforces it: the FAST gate runs it with no arguments, which requires the three
+The version is declared four times and never derived: `project(drogon-pay
+VERSION …)` in `CMakeLists.txt`, `version = …` in `conanfile.py`, the top-level
+`"version"` in `examples/pay-admin/package.json`, and `info: version:` in
+`examples/pay-server/openapi.yaml` — the last one because the contract publishes a
+version to consumers, and a document no gate reads is how it stated a release that
+had never shipped. `scripts/check_version_sync.py`
+enforces it: the FAST gate runs it with no arguments, which requires the four
 declarations to agree, and the `version-check` job that opens
 `.github/workflows/release.yml` re-runs it with `--tag "$GITHUB_REF_NAME"`, which
 also requires the tag to equal them and `CHANGELOG.md` to carry a `## [x.y.z]`
-section. A tag is never merged, so the ruleset's required checks do not cover
+section. The contract site is read **line by line** — the FAST gate is
+stdlib-only, so it cannot import a YAML parser — which makes every spelling a
+scanner and a parser could disagree about a hole in the gate;
+`scripts/ci/version_sync_scenarios.py` pins those shapes as a decision table
+(anchor, tag, alias, block scalar, continuation, junk at the value's own indent,
+a second document, tab or non-ASCII padding *and* indentation, a form feed in the
+value, a leading zero, unclosed quote, doubled `''`, trailing comment…; the
+script prints its own case count, because a number pasted into prose is the
+drift this repo deletes elsewhere) that runs beside the guard on
+every pull request, and asserts one fact the table alone could fake: the value the
+repo's own contract reads is a member of the agreeing set. A tag is never merged, so the ruleset's required checks do not cover
 it: `.github/workflows/_tag-gate.yml` — called by release.yml's `ci-gate` and by
 deploy.yml's `tag-gate`, the two workflows that trigger on a `v*` push — refuses to
 build unless the tagged commit is already on `master` **and** the merge pipeline
@@ -137,7 +150,7 @@ pull request into master
 (`scripts/ci/tag_gate_scenarios.py` drives the workflow's own `run:` bytes against
 a stand-in API), so re-run it before editing the gate. Never
 hand-write a version into a deploy/config comment: those strings were the drift
-source and have been deleted. Bumping = three declarations + a new CHANGELOG
+source and have been deleted. Bumping = four declarations + a new CHANGELOG
 section, then tag.
 
 ## Critical Constraints (always enforce)
