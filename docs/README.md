@@ -12,6 +12,7 @@ docs/
 ├── testing/         # Testing guides
 ├── deployment/      # Deployment & monitoring setup
 ├── operations/      # Operations manuals & checklists
+├── review/          # Dated code audits of a subsystem
 └── history/         # Historical records (plans, reports, superseded docs)
 ```
 
@@ -85,6 +86,13 @@ docs/
   checklist
 - [health_check_implementation.md](operations/health_check_implementation.md)
   — health check implementation
+
+### Review
+
+- [2026-09-20-wechat-pay-api-audit.md](review/2026-09-20-wechat-pay-api-audit.md)
+  — code-level audit of the WeChat Pay V3 flow (inbound notifications,
+  outbound transactions/refunds/certificates) against the official API, with
+  the fix batches and the deliberately deferred items
 
 ## 🗄️ Historical Documents
 

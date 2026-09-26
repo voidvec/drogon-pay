@@ -1,0 +1,30 @@
+# Findings that are known false positives, ignored by exact fingerprint.
+#
+# Prefer this over an [allowlist] regex in .gitleaks.toml: an allowlist entry
+# widens the ruleset for every future scan, while a fingerprint retires one
+# already-published finding. Note that gitleaks' allowlist regexes are matched
+# against the *secret* by default (regexTarget = "secret"), not the line, so an
+# entry shaped like the surrounding code will silently match nothing.
+#
+# Fingerprints embed the commit SHA, so these stop applying if the commits below
+# are rebased or squashed away. That is the intended failure mode: re-decide
+# rather than carry a stale suppression forward.
+
+# The AES-256-GCM fixture key in WechatCallbackIntegrationTest.cc. Every
+# encrypted case there encrypts with it and then feeds the ciphertext straight
+# back to the decrypting path, so the value only has to be self-consistent -- it
+# is not a credential. The tip now computes it (see testApiV3Key()) instead of
+# spelling it out; these six suppress the commits that introduced the literal,
+# which stay in the PR's scanned history.
+#
+# Re-decided on 2026-09-23 when the branch was rebased onto master for the
+# Alipay callback batch: same conclusion, so the six entries moved to the new
+# SHAs rather than being dropped. Only the SHA half changed -- those three
+# commits' patches are byte-identical, since the rebase conflicted in other
+# files -- so the trailing numbers carried over untouched.
+e60e81b38c23ca6c49b72892b20864634f203a8a:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:5086
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:3312
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6638
+40f2f3851b5cc0748388b3d7eb6af3f3b1322dd0:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:6897
+4319f6e3c57274ef847973b431942e945ee35cae:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:1129
+4319f6e3c57274ef847973b431942e945ee35cae:tests/integration/WechatCallbackIntegrationTest.cc:generic-api-key:944

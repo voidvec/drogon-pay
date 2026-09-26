@@ -19,6 +19,7 @@ const std::string PayIdempotency::Cols::_response_snapshot = "\"response_snapsho
 const std::string PayIdempotency::Cols::_expire_at = "\"expire_at\"";
 const std::string PayIdempotency::Cols::_created_at = "\"created_at\"";
 const std::string PayIdempotency::Cols::_updated_at = "\"updated_at\"";
+const std::string PayIdempotency::Cols::_owner_token = "\"owner_token\"";
 const std::string PayIdempotency::primaryKeyName = "idempotency_key";
 const bool PayIdempotency::hasPrimaryKey = true;
 const std::string PayIdempotency::tableName = "\"pay_idempotency\"";
@@ -29,7 +30,8 @@ const std::vector<typename PayIdempotency::MetaData> PayIdempotency::metaData_={
 {"response_snapshot","std::string","text",0,0,0,0},
 {"expire_at","::trantor::Date","timestamp without time zone",0,0,0,0},
 {"created_at","::trantor::Date","timestamp without time zone",0,0,0,1},
-{"updated_at","::trantor::Date","timestamp without time zone",0,0,0,1}
+{"updated_at","::trantor::Date","timestamp without time zone",0,0,0,1},
+{"owner_token","std::string","character varying",64,0,0,0}
 };
 const std::string &PayIdempotency::getColumnName(size_t index) noexcept(false)
 {
@@ -118,11 +120,15 @@ PayIdempotency::PayIdempotency(const Row &r, const ssize_t indexOffset) noexcept
                 updatedAt_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);
             }
         }
+        if(!r["owner_token"].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(r["owner_token"].as<std::string>());
+        }
     }
     else
     {
         size_t offset = (size_t)indexOffset;
-        if(offset + 6 > r.size())
+        if(offset + 7 > r.size())
         {
             LOG_FATAL << "Invalid SQL result for this model";
             return;
@@ -212,13 +218,18 @@ PayIdempotency::PayIdempotency(const Row &r, const ssize_t indexOffset) noexcept
                 updatedAt_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);
             }
         }
+        index = offset + 6;
+        if(!r[index].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(r[index].as<std::string>());
+        }
     }
 
 }
 
 PayIdempotency::PayIdempotency(const Json::Value &pJson, const std::vector<std::string> &pMasqueradingVector) noexcept(false)
 {
-    if(pMasqueradingVector.size() != 6)
+    if(pMasqueradingVector.size() != 7)
     {
         LOG_ERROR << "Bad masquerading vector";
         return;
@@ -323,6 +334,14 @@ PayIdempotency::PayIdempotency(const Json::Value &pJson, const std::vector<std::
                 }
                 updatedAt_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);
             }
+        }
+    }
+    if(!pMasqueradingVector[6].empty() && pJson.isMember(pMasqueradingVector[6]))
+    {
+        dirtyFlag_[6] = true;
+        if(!pJson[pMasqueradingVector[6]].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(pJson[pMasqueradingVector[6]].asString());
         }
     }
 }
@@ -431,12 +450,20 @@ PayIdempotency::PayIdempotency(const Json::Value &pJson) noexcept(false)
             }
         }
     }
+    if(pJson.isMember("owner_token"))
+    {
+        dirtyFlag_[6]=true;
+        if(!pJson["owner_token"].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(pJson["owner_token"].asString());
+        }
+    }
 }
 
 void PayIdempotency::updateByMasqueradedJson(const Json::Value &pJson,
                                             const std::vector<std::string> &pMasqueradingVector) noexcept(false)
 {
-    if(pMasqueradingVector.size() != 6)
+    if(pMasqueradingVector.size() != 7)
     {
         LOG_ERROR << "Bad masquerading vector";
         return;
@@ -542,6 +569,14 @@ void PayIdempotency::updateByMasqueradedJson(const Json::Value &pJson,
             }
         }
     }
+    if(!pMasqueradingVector[6].empty() && pJson.isMember(pMasqueradingVector[6]))
+    {
+        dirtyFlag_[6] = true;
+        if(!pJson[pMasqueradingVector[6]].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(pJson[pMasqueradingVector[6]].asString());
+        }
+    }
 }
 
 void PayIdempotency::updateByJson(const Json::Value &pJson) noexcept(false)
@@ -645,6 +680,14 @@ void PayIdempotency::updateByJson(const Json::Value &pJson) noexcept(false)
                 }
                 updatedAt_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);
             }
+        }
+    }
+    if(pJson.isMember("owner_token"))
+    {
+        dirtyFlag_[6] = true;
+        if(!pJson["owner_token"].isNull())
+        {
+            ownerToken_=std::make_shared<std::string>(pJson["owner_token"].asString());
         }
     }
 }
@@ -781,6 +824,33 @@ void PayIdempotency::setUpdatedAt(const ::trantor::Date &pUpdatedAt) noexcept
     dirtyFlag_[5] = true;
 }
 
+const std::string &PayIdempotency::getValueOfOwnerToken() const noexcept
+{
+    static const std::string defaultValue = std::string();
+    if(ownerToken_)
+        return *ownerToken_;
+    return defaultValue;
+}
+const std::shared_ptr<std::string> &PayIdempotency::getOwnerToken() const noexcept
+{
+    return ownerToken_;
+}
+void PayIdempotency::setOwnerToken(const std::string &pOwnerToken) noexcept
+{
+    ownerToken_ = std::make_shared<std::string>(pOwnerToken);
+    dirtyFlag_[6] = true;
+}
+void PayIdempotency::setOwnerToken(std::string &&pOwnerToken) noexcept
+{
+    ownerToken_ = std::make_shared<std::string>(std::move(pOwnerToken));
+    dirtyFlag_[6] = true;
+}
+void PayIdempotency::setOwnerTokenToNull() noexcept
+{
+    ownerToken_.reset();
+    dirtyFlag_[6] = true;
+}
+
 void PayIdempotency::updateId(const uint64_t id)
 {
 }
@@ -793,7 +863,8 @@ const std::vector<std::string> &PayIdempotency::insertColumns() noexcept
         "response_snapshot",
         "expire_at",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "owner_token"
     };
     return inCols;
 }
@@ -866,6 +937,17 @@ void PayIdempotency::outputArgs(drogon::orm::internal::SqlBinder &binder) const
             binder << nullptr;
         }
     }
+    if(dirtyFlag_[6])
+    {
+        if(getOwnerToken())
+        {
+            binder << getValueOfOwnerToken();
+        }
+        else
+        {
+            binder << nullptr;
+        }
+    }
 }
 
 const std::vector<std::string> PayIdempotency::updateColumns() const
@@ -894,6 +976,10 @@ const std::vector<std::string> PayIdempotency::updateColumns() const
     if(dirtyFlag_[5])
     {
         ret.push_back(getColumnName(5));
+    }
+    if(dirtyFlag_[6])
+    {
+        ret.push_back(getColumnName(6));
     }
     return ret;
 }
@@ -966,6 +1052,17 @@ void PayIdempotency::updateArgs(drogon::orm::internal::SqlBinder &binder) const
             binder << nullptr;
         }
     }
+    if(dirtyFlag_[6])
+    {
+        if(getOwnerToken())
+        {
+            binder << getValueOfOwnerToken();
+        }
+        else
+        {
+            binder << nullptr;
+        }
+    }
 }
 Json::Value PayIdempotency::toJson() const
 {
@@ -1018,6 +1115,14 @@ Json::Value PayIdempotency::toJson() const
     {
         ret["updated_at"]=Json::Value();
     }
+    if(getOwnerToken())
+    {
+        ret["owner_token"]=getValueOfOwnerToken();
+    }
+    else
+    {
+        ret["owner_token"]=Json::Value();
+    }
     return ret;
 }
 
@@ -1030,7 +1135,7 @@ Json::Value PayIdempotency::toMasqueradedJson(
     const std::vector<std::string> &pMasqueradingVector) const
 {
     Json::Value ret;
-    if(pMasqueradingVector.size() == 6)
+    if(pMasqueradingVector.size() == 7)
     {
         if(!pMasqueradingVector[0].empty())
         {
@@ -1098,6 +1203,17 @@ Json::Value PayIdempotency::toMasqueradedJson(
                 ret[pMasqueradingVector[5]]=Json::Value();
             }
         }
+        if(!pMasqueradingVector[6].empty())
+        {
+            if(getOwnerToken())
+            {
+                ret[pMasqueradingVector[6]]=getValueOfOwnerToken();
+            }
+            else
+            {
+                ret[pMasqueradingVector[6]]=Json::Value();
+            }
+        }
         return ret;
     }
     LOG_ERROR << "Masquerade failed";
@@ -1149,6 +1265,14 @@ Json::Value PayIdempotency::toMasqueradedJson(
     {
         ret["updated_at"]=Json::Value();
     }
+    if(getOwnerToken())
+    {
+        ret["owner_token"]=getValueOfOwnerToken();
+    }
+    else
+    {
+        ret["owner_token"]=Json::Value();
+    }
     return ret;
 }
 
@@ -1194,13 +1318,18 @@ bool PayIdempotency::validateJsonForCreation(const Json::Value &pJson, std::stri
         if(!validJsonOfField(5, "updated_at", pJson["updated_at"], err, true))
             return false;
     }
+    if(pJson.isMember("owner_token"))
+    {
+        if(!validJsonOfField(6, "owner_token", pJson["owner_token"], err, true))
+            return false;
+    }
     return true;
 }
 bool PayIdempotency::validateMasqueradedJsonForCreation(const Json::Value &pJson,
                                                         const std::vector<std::string> &pMasqueradingVector,
                                                         std::string &err)
 {
-    if(pMasqueradingVector.size() != 6)
+    if(pMasqueradingVector.size() != 7)
     {
         err = "Bad masquerading vector";
         return false;
@@ -1264,6 +1393,14 @@ bool PayIdempotency::validateMasqueradedJsonForCreation(const Json::Value &pJson
                   return false;
           }
       }
+      if(!pMasqueradingVector[6].empty())
+      {
+          if(pJson.isMember(pMasqueradingVector[6]))
+          {
+              if(!validJsonOfField(6, pMasqueradingVector[6], pJson[pMasqueradingVector[6]], err, true))
+                  return false;
+          }
+      }
     }
     catch(const Json::LogicError &e)
     {
@@ -1309,13 +1446,18 @@ bool PayIdempotency::validateJsonForUpdate(const Json::Value &pJson, std::string
         if(!validJsonOfField(5, "updated_at", pJson["updated_at"], err, false))
             return false;
     }
+    if(pJson.isMember("owner_token"))
+    {
+        if(!validJsonOfField(6, "owner_token", pJson["owner_token"], err, false))
+            return false;
+    }
     return true;
 }
 bool PayIdempotency::validateMasqueradedJsonForUpdate(const Json::Value &pJson,
                                                       const std::vector<std::string> &pMasqueradingVector,
                                                       std::string &err)
 {
-    if(pMasqueradingVector.size() != 6)
+    if(pMasqueradingVector.size() != 7)
     {
         err = "Bad masquerading vector";
         return false;
@@ -1354,6 +1496,11 @@ bool PayIdempotency::validateMasqueradedJsonForUpdate(const Json::Value &pJson,
       if(!pMasqueradingVector[5].empty() && pJson.isMember(pMasqueradingVector[5]))
       {
           if(!validJsonOfField(5, pMasqueradingVector[5], pJson[pMasqueradingVector[5]], err, false))
+              return false;
+      }
+      if(!pMasqueradingVector[6].empty() && pJson.isMember(pMasqueradingVector[6]))
+      {
+          if(!validJsonOfField(6, pMasqueradingVector[6], pJson[pMasqueradingVector[6]], err, false))
               return false;
       }
     }
@@ -1455,6 +1602,25 @@ bool PayIdempotency::validJsonOfField(size_t index,
             if(!pJson.isString())
             {
                 err="Type error in the "+fieldName+" field";
+                return false;
+            }
+            break;
+        case 6:
+            if(pJson.isNull())
+            {
+                return true;
+            }
+            if(!pJson.isString())
+            {
+                err="Type error in the "+fieldName+" field";
+                return false;
+            }
+            if(pJson.isString() && std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t>{}
+                .from_bytes(pJson.asCString()).size() > 64)
+            {
+                err="String length exceeds limit for the " +
+                    fieldName +
+                    " field (the maximum value is 64)";
                 return false;
             }
             break;

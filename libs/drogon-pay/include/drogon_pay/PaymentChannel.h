@@ -64,6 +64,24 @@ class PaymentChannel
     /// Query payment state by merchant order number.
     virtual void queryPayment(const std::string &orderNo, JsonCallback &&callback) = 0;
 
+    /**
+     * @brief Close an unpaid trade on the channel side by merchant order
+     *        number.
+     *
+     * The channel only honours a close while the trade has not been paid, so a
+     * paid trade answers the refusal and stays untouched. Callers must treat
+     * "closed" as the answer they proved and every refusal or transport error
+     * as "the trade is still what the next query says it is".
+     * Default: unsupported, so a channel without a close API keeps compiling
+     * and the caller sees an explicit error instead of silence.
+     */
+    virtual void closeOrder(const std::string &orderNo, JsonCallback &&callback)
+    {
+        (void)orderNo;
+        Json::Value result;
+        callback(result, "channel does not support closing orders");
+    }
+
     /// Create a refund.
     virtual void refund(const Json::Value &payload, JsonCallback &&callback) = 0;
 

@@ -11,8 +11,11 @@
 #include "handlers/PayMetricsHandlers.h"
 #include "handlers/AuthCheck.h"
 #include <drogon/drogon.h>
+#include <atomic>
 #include <future>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 PayPlugin::PayPlugin() = default;
 PayPlugin::~PayPlugin() = default;
@@ -38,6 +41,69 @@ const std::map<std::string, std::string> kLegacyKeyMigration = {
   {"wechat_pay", "channels.wechat"},
   {"alipay_sandbox", "channels.alipay"},
 };
+
+// Exception barrier for every registered route. A handler that lets an exception
+// escape does not merely lose that request: trantor catches it in
+// `EventLoop::loop()`, stops the loop and rethrows it once the loop unwinds,
+// which takes `app().run()` -- and with it the process -- down. Before this
+// barrier a single anonymous request with a mistyped JSON body (`{"amount":{}}`,
+// which jsoncpp converts by throwing) killed the whole gateway. The barrier
+// answers 500 only when the handler threw before responding, so an asynchronous
+// completion that arrives later is never answered twice.
+template <typename Handler>
+auto guarded(Handler handler)
+{
+    return
+      [handler = std::move(handler)](
+        const drogon::HttpRequestPtr &req, std::function<void(const drogon::HttpResponsePtr &)> &&cb
+      ) {
+          auto answered = std::make_shared<std::atomic<bool>>(false);
+          auto onceCb = [answered, cb = std::move(cb)](const drogon::HttpResponsePtr &resp) {
+              bool expected = false;
+              if (answered->compare_exchange_strong(expected, true))
+              {
+                  cb(resp);
+              }
+          };
+          const auto fault = [&onceCb](const std::string &reason) {
+              LOG_ERROR << "[PayPlugin] Handler faulted before responding: " << reason;
+              Json::Value body;
+              body["code"] = 500;
+              body["message"] = "Internal server error";
+              auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+              resp->setStatusCode(drogon::k500InternalServerError);
+              onceCb(resp);
+          };
+          try
+          {
+              // A copy, not `std::move(onceCb)`: passing the original would move
+              // its target into the handler, and the fault path below then calls
+              // an empty std::function -- which throws out of the catch block and
+              // takes the process down, the exact failure this barrier exists to
+              // stop. Both copies share `answered`, so the once-only guarantee
+              // holds whichever one the handler reaches.
+              handler(req, std::function<void(const drogon::HttpResponsePtr &)>(onceCb));
+          }
+          catch (const std::exception &e)
+          {
+              if (!answered->load())
+              {
+                  fault(e.what());
+                  return;
+              }
+              LOG_ERROR << "[PayPlugin] Handler threw after responding: " << e.what();
+          }
+          catch (...)
+          {
+              if (!answered->load())
+              {
+                  fault("unknown exception type");
+                  return;
+              }
+              LOG_ERROR << "[PayPlugin] Handler threw after responding (unknown type)";
+          }
+      };
+}
 }  // namespace
 
 void PayPlugin::registerBuiltinChannels(const Json::Value &channelsConfig)
@@ -230,7 +296,26 @@ void PayPlugin::initAndStart(const Json::Value &config)
     // 6. Channel lifecycle hooks (e.g. WechatPayClient::onStart warms up the
     //    platform certificates) + periodic certificate refresh.
     workerLoop->runInLoop([this]() { registry_.startAll(); });
-    startCertRefreshTimer(workerLoop);
+    double certRefreshSeconds = 43200.0;
+    const Json::Value wechatCfg =
+      config.get("channels", Json::Value()).get("wechat", Json::Value());
+    if (wechatCfg.isMember("cert_refresh_interval_seconds"))
+    {
+        const int configured = wechatCfg.get("cert_refresh_interval_seconds", 43200).asInt();
+        // Floor of five minutes: this timer signs and sends a request to
+        // api.mch.weixin.qq.com per tick, and WeChat rate-limits the merchant
+        // account, so an aggressive value hurts the integration it serves.
+        if (configured >= 300)
+        {
+            certRefreshSeconds = static_cast<double>(configured);
+        }
+        else
+        {
+            LOG_WARN << "'cert_refresh_interval_seconds' must be >= 300, using "
+                     << certRefreshSeconds << "s";
+        }
+    }
+    startCertRefreshTimer(workerLoop, certRefreshSeconds);
 
     // 7. Register HTTP routes programmatically (ADD_METHOD_TO static
     //    registration is gone: static-library builds drop those symbols).
@@ -249,23 +334,23 @@ void PayPlugin::registerHttpHandlers()
     // Wraps a handler member function with the checkAuth() precheck that
     // replaced the old PayAuthFilter (null result = authorized).
     const auto authed = [this](auto controller, auto memFn) {
-        return [this, controller, memFn](
-                 const drogon::HttpRequestPtr &req,
-                 std::function<void(const drogon::HttpResponsePtr &)> &&cb
-               ) {
+        return guarded([this, controller, memFn](
+                         const drogon::HttpRequestPtr &req,
+                         std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                       ) {
             if (auto resp = drogon_pay::checkAuth(req, basePath_))
             {
                 cb(resp);
                 return;
             }
             ((*controller).*memFn)(req, std::move(cb));
-        };
+        });
     };
     const auto open = [](auto controller, auto memFn) {
-        return [controller, memFn](
-                 const drogon::HttpRequestPtr &req,
-                 std::function<void(const drogon::HttpResponsePtr &)> &&cb
-               ) { ((*controller).*memFn)(req, std::move(cb)); };
+        return guarded([controller, memFn](
+                         const drogon::HttpRequestPtr &req,
+                         std::function<void(const drogon::HttpResponsePtr &)> &&cb
+                       ) { ((*controller).*memFn)(req, std::move(cb)); });
     };
 
     auto &app = drogon::app();
@@ -454,7 +539,7 @@ void PayPlugin::setTestClients(
     setTestChannels(std::move(channels), std::move(dbClient));
 }
 
-void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop)
+void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop, double intervalSeconds)
 {
     // SPI whitelist: periodic certificate refresh is a wechat-only capability;
     // the initial download happens in WechatPayClient::onStart().
@@ -464,8 +549,9 @@ void PayPlugin::startCertRefreshTimer(trantor::EventLoop *loop)
         return;
     }
 
-    // Set up periodic refresh (every 12 hours by default)
-    certRefreshTimerId_ = loop->runEvery(43200.0, [wechatClient]() {
+    // Set up periodic refresh (channels.wechat.cert_refresh_interval_seconds,
+    // 12 hours by default)
+    certRefreshTimerId_ = loop->runEvery(intervalSeconds, [wechatClient]() {
         wechatClient->downloadCertificates([](const Json::Value &, const std::string &err) {
             if (!err.empty())
             {

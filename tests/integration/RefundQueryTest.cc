@@ -6,6 +6,7 @@
 #include "models/PayPayment.h"
 #include "models/PayRefund.h"
 #include "drogon_pay/PayPlugin.h"
+#include "drogon_pay/PaymentChannel.h"
 #include "services/RefundService.h"
 #include "channels/WechatChannel.h"
 #include "utils/PayUtils.h"
@@ -60,6 +61,282 @@ bool pingRedis(const drogon::nosql::RedisClientPtr &client)
         return false;
     }
     return pingFuture.get();
+}
+
+// Answers a refund with a body the case picks. Every case above reaches
+// `updateRefundWithSuccess` through a real client that fails its own config
+// check, so they pin the refusal branches and never the settlement a successful
+// answer drives -- and the settlement is where an order learned to read
+// REFUNDED on the first partial refund of a ten-part order.
+class RefundStubChannel : public drogon_pay::PaymentChannel
+{
+  public:
+    // `error` stays empty for every case that only needs an answer. The one
+    // case that passes it drives the "the channel answered, but we may not read
+    // the answer" branch, which books a different refund state than a refusal.
+    explicit RefundStubChannel(Json::Value answer, std::string error = std::string())
+        : answer_(std::move(answer)), error_(std::move(error))
+    {
+    }
+
+    const std::string &name() const override
+    {
+        static const std::string kName = "wechat";
+        return kName;
+    }
+
+    bool isConfigured() const override
+    {
+        return true;
+    }
+
+    void createPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void createQRPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void queryPayment(const std::string &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void refund(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(answer_, error_);
+    }
+
+    void queryRefund(const std::string &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    bool verifyCallback(
+      const drogon::HttpRequestPtr &,
+      drogon_pay::CallbackEvent &,
+      std::string &
+    ) override
+    {
+        return false;
+    }
+
+  private:
+    Json::Value answer_;
+    std::string error_;
+};
+
+// nullptr instead of a client that retries: this machine has no Postgres, and a
+// `DbClient` built on an unreachable host keeps the whole suite waiting rather
+// than reporting the missing fixture.
+std::shared_ptr<drogon::orm::DbClient> makeRefundCoverageClient()
+{
+    Json::Value root;
+    if (
+      !loadConfig(root) || !root.isMember("db_clients") || !root["db_clients"].isArray() ||
+      root["db_clients"].empty()
+    )
+    {
+        return nullptr;
+    }
+    const auto connInfo = buildPgConnInfo(root["db_clients"][0]);
+    if (connInfo.empty())
+    {
+        return nullptr;
+    }
+    return drogon::orm::DbClient::newPgClient(connInfo, 1);
+}
+
+void ensureRefundCoverageTables(const std::shared_ptr<drogon::orm::DbClient> &client)
+{
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_order ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "order_no VARCHAR(64) UNIQUE NOT NULL,"
+      "user_id BIGINT NOT NULL,"
+      "amount VARCHAR(32) NOT NULL,"
+      "currency VARCHAR(8) NOT NULL DEFAULT 'CNY',"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "channel VARCHAR(32) NOT NULL DEFAULT 'alipay',"
+      "title VARCHAR(512),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_payment ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "payment_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "channel_trade_no VARCHAR(64),"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_refund ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "refund_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "payment_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "channel_refund_no VARCHAR(64),"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_ledger ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "user_id BIGINT NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "payment_no VARCHAR(64),"
+      "entry_type VARCHAR(32) NOT NULL,"
+      "amount VARCHAR(32) NOT NULL,"
+      "balance VARCHAR(32),"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+}
+
+struct CoverageFixture
+{
+    std::string orderNo;
+    std::string paymentNo;
+};
+
+// A paid order of `orderAmount`, the payment that collected it, and -- when the
+// string is not empty -- one refund already settled against it. The settled row
+// is the whole point: coverage is a statement about the refunds around a
+// settlement, so a case that seeds one refund proves nothing about the sum.
+CoverageFixture seedRefundCoverageOrder(
+  const std::shared_ptr<drogon::orm::DbClient> &client,
+  const std::string &orderAmount,
+  const std::string &priorSettledAmount
+)
+{
+    CoverageFixture fixture;
+    fixture.orderNo = "ord_" + drogon::utils::getUuid();
+    fixture.paymentNo = "pay_" + drogon::utils::getUuid();
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(fixture.orderNo);
+    order.setUserId(31001);
+    order.setAmount(orderAmount);
+    order.setCurrency("CNY");
+    order.setStatus("PAID");
+    order.setChannel("wechat");
+    order.setTitle("Refund coverage");
+    order.setCreatedAt(trantor::Date::now());
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    using PayPayment = drogon_model::pay_test::PayPayment;
+    drogon::orm::Mapper<PayPayment> paymentMapper(client);
+    PayPayment payment;
+    payment.setOrderNo(fixture.orderNo);
+    payment.setPaymentNo(fixture.paymentNo);
+    payment.setStatus("SUCCESS");
+    payment.setAmount(orderAmount);
+    payment.setCreatedAt(trantor::Date::now());
+    payment.setUpdatedAt(trantor::Date::now());
+    paymentMapper.insert(payment);
+
+    if (!priorSettledAmount.empty())
+    {
+        using PayRefund = drogon_model::pay_test::PayRefund;
+        drogon::orm::Mapper<PayRefund> refundMapper(client);
+        PayRefund prior;
+        prior.setRefundNo("refund_prev_" + drogon::utils::getUuid());
+        prior.setOrderNo(fixture.orderNo);
+        prior.setPaymentNo(fixture.paymentNo);
+        prior.setStatus("REFUND_SUCCESS");
+        prior.setAmount(priorSettledAmount);
+        prior.setCreatedAt(trantor::Date::now());
+        prior.setUpdatedAt(trantor::Date::now());
+        refundMapper.insert(prior);
+    }
+    return fixture;
+}
+
+// Books one refund through the service and reports what the channel answer
+// settled. Returns the empty status when the answer never arrived.
+struct RefundSettlement
+{
+    bool timedOut{false};
+    std::string responseStatus;
+};
+
+RefundSettlement settleRefund(
+  const std::shared_ptr<drogon::orm::DbClient> &client,
+  const CoverageFixture &fixture,
+  const std::string &refundAmount,
+  const std::string &channelError = std::string()
+)
+{
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["refund_id"] = "rf_" + drogon::utils::getUuid();
+
+    // With a channel error the service never reads `answer`, so the same stub
+    // serves both halves: an empty error is the success shape, a non-empty one
+    // is whatever refusal or fault the case is about.
+    auto stub = std::make_shared<RefundStubChannel>(answer, channelError);
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    CreateRefundRequest request;
+    request.orderNo = fixture.orderNo;
+    request.paymentNo = fixture.paymentNo;
+    request.amount = refundAmount;
+
+    std::promise<Json::Value> resultPromise;
+    std::promise<std::error_code> errorPromise;
+    auto refundService = plugin.refundService();
+    refundService->createRefund(
+      request,
+      "",
+      [&resultPromise, &errorPromise](const Json::Value &result, const std::error_code &error) {
+          resultPromise.set_value(result);
+          errorPromise.set_value(error);
+      }
+    );
+
+    auto resultFuture = resultPromise.get_future();
+    auto errorFuture = errorPromise.get_future();
+    RefundSettlement settlement;
+    if (
+      resultFuture.wait_for(std::chrono::seconds(10)) != std::future_status::ready ||
+      errorFuture.wait_for(std::chrono::seconds(10)) != std::future_status::ready
+    )
+    {
+        // No REQUIRE here: the case that follows has to delete the seeded rows,
+        // and a hard stop would leave them behind for the next run.
+        settlement.timedOut = true;
+        return settlement;
+    }
+    const auto result = resultFuture.get();
+    settlement.responseStatus = result["data"]["status"].asString();
+    return settlement;
+}
+
+std::string readOrderStatus(
+  const std::shared_ptr<drogon::orm::DbClient> &client,
+  const std::string &orderNo
+)
+{
+    const auto rows =
+      client->execSqlSync("SELECT status FROM pay_order WHERE order_no = $1", orderNo);
+    return rows.empty() ? std::string() : rows.front()["status"].as<std::string>();
 }
 }  // namespace
 
@@ -370,6 +647,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyConflict)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -422,7 +700,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyConflict)
 
     // Should fail with idempotency conflict
     CHECK(error);
-    CHECK(error.value() == 409);  // Idempotency conflict error code
+    CHECK(error.value() == 1409);  // Idempotency conflict error code
     CHECK(result.isMember("message"));
     auto msg = result["message"].asString();
     bool hasKeyword =
@@ -452,6 +730,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -551,6 +830,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyInProgress)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -1181,6 +1461,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot_OnNoWechatClientError)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -1371,6 +1652,7 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot_OnWechatError)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -1580,6 +1862,7 @@ DROGON_TEST(PayPlugin_Refund_SnapshotPersistedBeforeCallback)
       "idempotency_key VARCHAR(128) PRIMARY KEY,"
       "request_hash VARCHAR(64) NOT NULL,"
       "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
       "expire_at TIMESTAMP,"
       "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -1805,6 +2088,149 @@ DROGON_TEST(PayPlugin_Refund_DefaultPaymentNo)
 
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
+}
+
+// A QR order keeps one payment row per precreate attempt, so an attempt whose
+// channel answer never arrived can still sit at INIT beside a later attempt the
+// notification paid. Selecting "the newest row" by creation time then refused the
+// refund of money that had genuinely been taken (1409 "payment not successful"),
+// and the paid attempt stayed unrefunded. The lookup has to prefer the attempt
+// that holds the money; the refund row names the payment it was raised against,
+// which is what this case reads back.
+DROGON_TEST(PayPlugin_Refund_SettledAttemptIsPickedOverANewerOpenOne)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    const auto &db = root["db_clients"][0];
+    auto client = drogon::orm::DbClient::newPgClient(buildPgConnInfo(db), 1);
+    REQUIRE(client != nullptr);
+
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_order ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "order_no VARCHAR(64) UNIQUE NOT NULL,"
+      "user_id BIGINT NOT NULL,"
+      "amount VARCHAR(32) NOT NULL,"
+      "currency VARCHAR(8) NOT NULL DEFAULT 'CNY',"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "channel VARCHAR(32) NOT NULL DEFAULT 'alipay',"
+      "title VARCHAR(512),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_payment ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "payment_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "channel_trade_no VARCHAR(64),"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_refund ("
+      "id BIGSERIAL PRIMARY KEY,"
+      "refund_no VARCHAR(64) UNIQUE NOT NULL,"
+      "order_no VARCHAR(64) NOT NULL,"
+      "payment_no VARCHAR(64) NOT NULL,"
+      "status VARCHAR(32) NOT NULL DEFAULT 'pending',"
+      "amount VARCHAR(32) NOT NULL,"
+      "channel_refund_no VARCHAR(64),"
+      "request_payload TEXT,"
+      "response_payload TEXT,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    const std::string orderNo = "ord_" + drogon::utils::getUuid();
+    const std::string settledNo = "pay_" + drogon::utils::getUuid();
+    const std::string zombieNo = "pay_" + drogon::utils::getUuid();
+    const std::string amount = "9.99";
+
+    using PayOrder = drogon_model::pay_test::PayOrder;
+    drogon::orm::Mapper<PayOrder> orderMapper(client);
+    PayOrder order;
+    order.setOrderNo(orderNo);
+    order.setUserId(30011);
+    order.setAmount(amount);
+    order.setCurrency("CNY");
+    order.setStatus("PAID");
+    order.setChannel("wechat");
+    order.setTitle("Refund picks the settled attempt");
+    order.setCreatedAt(trantor::Date::now().after(-600.0));
+    order.setUpdatedAt(trantor::Date::now());
+    orderMapper.insert(order);
+
+    using PayPayment = drogon_model::pay_test::PayPayment;
+    drogon::orm::Mapper<PayPayment> paymentMapper(client);
+    // The two rows differ only by status and by time: the older one holds the
+    // money, the newer one is the attempt that never got an answer.
+    PayPayment paid;
+    paid.setOrderNo(orderNo);
+    paid.setPaymentNo(settledNo);
+    paid.setStatus("SUCCESS");
+    paid.setAmount(amount);
+    paid.setCreatedAt(trantor::Date::now().after(-300.0));
+    paid.setUpdatedAt(trantor::Date::now().after(-300.0));
+    paymentMapper.insert(paid);
+
+    PayPayment zombie;
+    zombie.setOrderNo(orderNo);
+    zombie.setPaymentNo(zombieNo);
+    zombie.setStatus("INIT");
+    zombie.setAmount(amount);
+    zombie.setCreatedAt(trantor::Date::now());
+    zombie.setUpdatedAt(trantor::Date::now());
+    paymentMapper.insert(zombie);
+
+    Json::Value wechatConfig;
+    wechatConfig["api_v3_key"] = "0123456789abcdef0123456789abcdef";
+    auto wechatClient = std::make_shared<WechatPayClient>(wechatConfig);
+
+    PayPlugin plugin;
+    plugin.setTestClients(wechatClient, nullptr, client);
+
+    CreateRefundRequest request;
+    request.orderNo = orderNo;
+    request.amount = amount;
+
+    std::promise<Json::Value> resultPromise;
+    std::promise<std::error_code> errorPromise;
+    plugin.refundService()->createRefund(
+      request,
+      "",
+      [&resultPromise, &errorPromise](const Json::Value &result, const std::error_code &error) {
+          resultPromise.set_value(result);
+          errorPromise.set_value(error);
+      }
+    );
+
+    auto resultFuture = resultPromise.get_future();
+    auto errorFuture = errorPromise.get_future();
+    REQUIRE(resultFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(errorFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto result = resultFuture.get();
+    const auto error = errorFuture.get();
+
+    // The refund reached the channel and failed there for want of configuration (the
+    // sibling case above documents that answer); what this case pins is that it was
+    // not refused at the payment row, which is the 1409 the old selection answered.
+    CHECK(error.value() != 1409);
+    CHECK(result.get("code", 0).asInt() != 1409);
+
+    const auto refunds =
+      client->execSqlSync("SELECT payment_no, status FROM pay_refund WHERE order_no = $1", orderNo);
+    REQUIRE(!refunds.empty());
+    CHECK(refunds.front()["payment_no"].as<std::string>() == settledNo);
+
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
 }
 
@@ -2471,7 +2897,8 @@ DROGON_TEST(PayPlugin_Refund_AmountExceedsPaid)
 
     // Should fail because refund amount exceeds paid amount
     CHECK(error);
-    CHECK(error.value() == 409);  // Conflict
+    CHECK(error.value() == 1409);  // Conflict
+    CHECK(result.get("code", 0).asInt() == 1409);
     CHECK(result.isMember("message"));
     CHECK(result["message"].asString().find("refund amount exceeds paid") != std::string::npos);
 
@@ -3385,7 +3812,7 @@ DROGON_TEST(PayPlugin_Refund_CumulativeAmountDoesNotExceedPaid)
     plugin.setTestClients(nullptr, nullptr, client);
 
     // Attempt a second refund of 6.00. Cumulative would be 12.00 > 10.00 paid,
-    // so this MUST be rejected with 409 (refund amount exceeds paid).
+    // so this MUST be rejected with 1409 (refund amount exceeds paid).
     CreateRefundRequest request;
     request.orderNo = orderNo;
     request.paymentNo = paymentNo;
@@ -3437,4 +3864,102 @@ DROGON_TEST(PayPlugin_Refund_CumulativeAmountDoesNotExceedPaid)
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", orderNo);
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", orderNo);
+}
+
+DROGON_TEST(PayPlugin_Refund_PartialRefundKeepsOrderPaid)
+{
+    auto client = makeRefundCoverageClient();
+    // Fail fast, and fail as this case: a missing database is a fixture the CI
+    // legs provide, not a defect in the settlement rule.
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    // 10.00 collected, 4.00 already back, this attempt returns 3.00: 7.00 of the
+    // order is still with the merchant, so nothing about the order changed.
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "4.00");
+    const auto settled = settleRefund(client, fixture, "3.00");
+    REQUIRE(!settled.timedOut);
+    CHECK(settled.responseStatus == "REFUND_SUCCESS");
+
+    const auto refundRows = client->execSqlSync(
+      "SELECT COUNT(*) AS settled FROM pay_refund WHERE order_no = $1 AND status = $2",
+      fixture.orderNo,
+      "REFUND_SUCCESS"
+    );
+    CHECK(refundRows.front()["settled"].as<int64_t>() == 2);
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+DROGON_TEST(PayPlugin_Refund_CumulativeRefundsSettleOrder)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    // The same order with 6.00 instead of 3.00: 4.00 + 6.00 returns the whole
+    // 10.00, and only now does the order read REFUNDED. The pair is the proof
+    // that the rule reads the refunds around it and not just this one.
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "4.00");
+    const auto settled = settleRefund(client, fixture, "6.00");
+    REQUIRE(!settled.timedOut);
+    CHECK(settled.responseStatus == "REFUND_SUCCESS");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "REFUNDED");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// An answer we are not allowed to read is not the same event as an answer that
+// says "no". Round 16 put signature verification on the outbound answers, and
+// round 19 made every answer (204 and error envelopes included) go through it,
+// which means `response signature verification failed: ...` became an error the
+// refund path can receive *after* the request was sent. `RefundService`'s
+// classifier decides terminal FAIL versus "still unknown" from the shape of that
+// string, and terminal FAIL is what double-refunds: the caller is handed a
+// dead outcome, retries under a fresh out_refund_no, and WeChat honours a
+// refund it had already accepted. The positive control for the other half is
+// `PayPlugin_Refund_WechatErrorPersistsPayload`, where nothing was ever sent
+// ("wechat pay config missing") and REFUND_FAIL is the honest bookkeeping.
+DROGON_TEST(PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    const auto fixture = seedRefundCoverageOrder(client, "9.01", "");
+    const auto settled = settleRefund(
+      client,
+      fixture,
+      "9.01",
+      "response signature verification failed: "
+      "missing Wechatpay-Timestamp/Nonce/Signature answer headers"
+    );
+    REQUIRE(!settled.timedOut);
+    CHECK(settled.responseStatus == "REFUNDING");
+
+    // Nothing terminal may be written for this attempt either: the row has to
+    // stay open so the reconciliation sweep can settle it from the channel's
+    // own answer later.
+    const auto rows = client->execSqlSync(
+      "SELECT status, response_payload FROM pay_refund "
+      "WHERE order_no = $1 AND payment_no = $2",
+      fixture.orderNo,
+      fixture.paymentNo
+    );
+    REQUIRE(rows.size() == 1);
+    const std::string bookedStatus = rows.front()["status"].as<std::string>();
+    CHECK(bookedStatus != "REFUND_FAIL");
+    CHECK(bookedStatus == "REFUND_INIT");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
 }

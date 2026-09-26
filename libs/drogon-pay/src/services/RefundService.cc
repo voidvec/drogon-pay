@@ -40,6 +40,36 @@ void reportMapperFailure(
     }
 }
 
+// Only a refund that certainly did not happen may be booked terminal. A
+// REFUND_FAIL on an outcome we do not know invites a retry under a fresh
+// out_refund_no, which WeChat would honour as a second refund.
+//   - a local channel fault (missing config, client not ready) never sent a
+//     request, so nothing happened;
+//   - `HTTP 4xx: <code> <message>` is WeChat refusing the refund -- safe to
+//     read only because the channel verifies the answer signature over an
+//     error body as well as over a success one;
+//   - a 5xx, a 4xx with no error envelope (an intermediary answered for us),
+//     a timeout, a transport failure, an unparseable body or an answer that
+//     failed to verify says nothing either way -- reconciliation decides those
+//     from the channel's answer. An unverifiable answer is NOT a local fault:
+//     the request left and something answered, so booking terminal FAIL here
+//     would invite a retry under a fresh out_refund_no that WeChat honours as
+//     a second refund.
+bool refundCertainlyDidNotHappen(const std::string &error)
+{
+    const bool httpRefusal =
+      error.rfind("HTTP 4", 0) == 0 && error.find("no error envelope") == std::string::npos;
+    if (httpRefusal)
+    {
+        return true;
+    }
+    const bool wentThroughHttp = error.rfind("HTTP ", 0) == 0 ||
+                                 error.rfind("http request", 0) == 0 ||
+                                 error == "invalid json response" ||
+                                 error.rfind("response signature verification failed", 0) == 0;
+    return !wentThroughHttp;
+}
+
 // TODO(dedup): duplicated in PaymentService.cc and CallbackService.cc.
 // Extract to PayUtils.h/cc in a future refactoring iteration.
 void insertLedgerEntry(
@@ -305,9 +335,9 @@ void RefundService::createRefund(
               if (*wrappedSharedCb)
               {
                   Json::Value error;
-                  error["code"] = 1004;
+                  error["code"] = 1409;
                   error["message"] = "Idempotency conflict: different parameters for same key";
-                  (*wrappedSharedCb)(error, std::error_code(409, std::system_category()));
+                  (*wrappedSharedCb)(error, std::error_code(1409, std::system_category()));
               }
               return;
           }
@@ -446,61 +476,88 @@ void RefundService::proceedRefund(
     const std::string &reason = request.reason;
     const std::string &paymentNo = request.paymentNo;
 
-    // If paymentNo not provided, find the latest payment for this order
+    // If paymentNo not provided, find the payment of this order that carries the
+    // money. A QR order keeps one row per precreate attempt, which gives two
+    // rules. Closed attempts (FAIL) are dropped, so a row the channel refused is
+    // never the one WeChat is asked to refund. And a settled attempt beats a newer
+    // open one: an attempt whose channel answer never arrived can sit at INIT
+    // beside a later attempt the callback paid, so ordering by creation time alone
+    // picks the zombie and answers "payment not successful" for an order whose
+    // money really landed. The open statuses are kept as the fallback so an order
+    // that is genuinely unpaid still gets the 1409 it got before, rather than a
+    // 1404 that would say the order has no payment at all.
     if (paymentNo.empty())
     {
-        try
-        {
-            Mapper<PayPaymentModel> paymentMapper(dbClient_);
-            auto payCriteria =
-              Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo);
-            paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
-              .limit(1)
-              .findBy(
-                payCriteria,
-                [this,
-                 request,
-                 idempotencyKey,
-                 requestHash,
-                 refundNo,
-                 orderNo,
-                 amount,
-                 reason,
-                 sharedCb](const std::vector<PayPaymentModel> &rows) mutable {
-                    if (rows.empty())
-                    {
-                        if (*sharedCb)
-                        {
-                            Json::Value error;
-                            error["code"] = 1404;
-                            error["message"] = "Payment not found";
-                            (*sharedCb)(error, std::error_code(1404, std::system_category()));
+        auto answerWith =
+          [this, request, idempotencyKey, requestHash, refundNo, orderNo, amount, reason, sharedCb](
+            const std::string &chosenPaymentNo
+          ) mutable {
+              CreateRefundRequest newRequest = request;
+              newRequest.paymentNo = chosenPaymentNo;
+              proceedRefund(newRequest, idempotencyKey, requestHash, std::move(*sharedCb));
+          };
+        // Behind a shared_ptr so each attempt of the lookup holds the same object
+        // and exactly one of them can consume the callback.
+        auto proceedWith = std::make_shared<decltype(answerWith)>(std::move(answerWith));
+
+        auto attemptsFinder = [this, orderNo, sharedCb, proceedWith](
+                                std::vector<std::string> statuses, std::function<void()> thenEmpty
+                              ) -> std::function<void()> {
+            return [this, orderNo, sharedCb, proceedWith, statuses, thenEmpty]() {
+                try
+                {
+                    Mapper<PayPaymentModel> paymentMapper(dbClient_);
+                    auto payCriteria =
+                      Criteria(PayPaymentModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+                      Criteria(PayPaymentModel::Cols::_status, CompareOperator::In, statuses);
+                    paymentMapper.orderBy(PayPaymentModel::Cols::_created_at, SortOrder::DESC)
+                      .limit(1)
+                      .findBy(
+                        payCriteria,
+                        [proceedWith, thenEmpty](const std::vector<PayPaymentModel> &rows) {
+                            if (rows.empty())
+                            {
+                                thenEmpty();
+                                return;
+                            }
+                            (*proceedWith)(rows.front().getValueOfPaymentNo());
+                        },
+                        [sharedCb](const DrogonDbException &e) mutable {
+                            if (*sharedCb)
+                            {
+                                Json::Value error;
+                                error["code"] = 1500;
+                                error["message"] =
+                                  std::string("Database error: ") + e.base().what();
+                                (*sharedCb)(error, std::error_code(1500, std::system_category()));
+                            }
                         }
-                        return;
-                    }
-                    CreateRefundRequest newRequest = request;
-                    newRequest.paymentNo = rows.front().getValueOfPaymentNo();
-                    proceedRefund(newRequest, idempotencyKey, requestHash, std::move(*sharedCb));
-                },
-                [sharedCb](const DrogonDbException &e) mutable {
-                    if (*sharedCb)
-                    {
-                        Json::Value error;
-                        error["code"] = 1500;
-                        error["message"] = std::string("Database error: ") + e.base().what();
-                        (*sharedCb)(error, std::error_code(1500, std::system_category()));
-                    }
+                      );
                 }
-              );
-        }
-        catch (const std::exception &e)
-        {
-            reportMapperFailure(sharedCb, e.what());
-        }
-        catch (...)
-        {
-            reportMapperFailure(sharedCb, "unknown exception");
-        }
+                catch (const std::exception &e)
+                {
+                    reportMapperFailure(sharedCb, e.what());
+                }
+                catch (...)
+                {
+                    reportMapperFailure(sharedCb, "unknown exception");
+                }
+            };
+        };
+
+        // Neither an attempt that holds money nor one still in flight: the order
+        // has no refundable payment row at all (or only closed attempts).
+        auto reportNoAttempt = [sharedCb]() {
+            if (*sharedCb)
+            {
+                Json::Value error;
+                error["code"] = 1404;
+                error["message"] = "Payment not found";
+                (*sharedCb)(error, std::error_code(1404, std::system_category()));
+            }
+        };
+        auto askOpenAttempts = attemptsFinder({"INIT", "PROCESSING"}, reportNoAttempt);
+        attemptsFinder({"SUCCESS", "REFUNDED"}, [askOpenAttempts]() { askOpenAttempts(); })();
         return;
     }
 
@@ -1022,9 +1079,9 @@ void RefundService::proceedWithInsert(
                               if (*sharedCb)
                               {
                                   Json::Value error;
-                                  error["code"] = 409;
+                                  error["code"] = 1409;
                                   error["message"] = "refund amount exceeds paid";
-                                  (*sharedCb)(error, std::error_code(409, std::system_category()));
+                                  (*sharedCb)(error, std::error_code(1409, std::system_category()));
                               }
                               return;
                           }
@@ -1266,7 +1323,7 @@ void RefundService::invokeRefundChannel(
 
         alipayChannel->refund(
           payload,
-          [this, refundNo, orderNo, paymentNo, amount, sharedCb](
+          [this, refundNo, orderNo, paymentNo, amount, totalFen, sharedCb](
             const Json::Value &result, const std::string &error
           ) mutable {
               if (!error.empty())
@@ -1324,6 +1381,7 @@ void RefundService::invokeRefundChannel(
                 orderNo,
                 paymentNo,
                 amount,
+                totalFen,
                 std::move(*sharedCb)
               );
           }
@@ -1376,15 +1434,24 @@ void RefundService::invokeRefundChannel(
 
         wechatChannel->refund(
           payload,
-          [this, refundNo, orderNo, paymentNo, amount, sharedCb](
+          [this, refundNo, orderNo, paymentNo, amount, totalFen, sharedCb](
             const Json::Value &result, const std::string &error
           ) mutable {
               if (!error.empty())
               {
                   const std::string errorMessage = "WeChat error: " + error;
+                  const bool certainlyNotRefunded = refundCertainlyDidNotHappen(error);
                   Json::Value errJson;
                   errJson["error"] = errorMessage;
-                  updateRefundWithError(refundNo, errorMessage, errJson);
+                  if (certainlyNotRefunded)
+                  {
+                      updateRefundWithError(refundNo, errorMessage, errJson);
+                  }
+                  else
+                  {
+                      LOG_WARN << "[RefundService] Refund outcome unknown for " << refundNo
+                               << " (channel call did not complete): " << errorMessage;
+                  }
                   if (*sharedCb)
                   {
                       Json::Value response;
@@ -1394,7 +1461,8 @@ void RefundService::invokeRefundChannel(
                       response["data"]["order_no"] = orderNo;
                       response["data"]["payment_no"] = paymentNo;
                       response["data"]["amount"] = amount;
-                      response["data"]["status"] = "REFUND_FAIL";
+                      response["data"]["status"] =
+                        certainlyNotRefunded ? "REFUND_FAIL" : "REFUNDING";
                       response["data"]["error"] = errorMessage;
                       response["data"]["wechat_response"] = errJson;
                       (*sharedCb)(response, std::error_code(1502, std::system_category()));
@@ -1402,26 +1470,63 @@ void RefundService::invokeRefundChannel(
                   return;
               }
 
-              std::string refundStatus = "REFUNDING";
+              // V3 files an accepted refund under SUCCESS or PROCESSING and
+              // answers CLOSED / ABNORMAL to say the money did not move.
+              // Defaulting an unrecognised body to REFUNDING recorded a refund
+              // WeChat never accepted, and routing CLOSED through the success
+              // path booked a failed refund as one that succeeded.
               const std::string wechatStatus = result.get("status", "").asString();
               const std::string refundId = result.get("refund_id", "").asString();
-              if (wechatStatus == "SUCCESS")
+              const std::string mappedStatus = pay::utils::mapRefundStatus(wechatStatus);
+              if (mappedStatus.empty() || mappedStatus == "REFUND_FAIL")
               {
-                  refundStatus = "REFUND_SUCCESS";
-              }
-              else if (wechatStatus == "CLOSED")
-              {
-                  refundStatus = "REFUND_FAIL";
+                  const std::string code = result.get("code", "").asString();
+                  const bool definitive = !mappedStatus.empty() || !code.empty();
+                  std::string errorMessage = mappedStatus.empty()
+                                               ? "WeChat refund response has no usable status"
+                                               : "WeChat reported refund status " + wechatStatus;
+                  if (!code.empty())
+                  {
+                      errorMessage += ": " + code + " " + result.get("message", "").asString();
+                  }
+
+                  Json::Value errJson;
+                  errJson["error"] = errorMessage;
+                  if (definitive)
+                  {
+                      updateRefundWithError(refundNo, errorMessage, errJson);
+                  }
+                  else
+                  {
+                      LOG_WARN << "[RefundService] Refund outcome unknown for " << refundNo
+                               << " (2xx answer carried no status): " << errorMessage;
+                  }
+                  if (*sharedCb)
+                  {
+                      Json::Value response;
+                      response["code"] = 1502;
+                      response["message"] = errorMessage;
+                      response["data"]["refund_no"] = refundNo;
+                      response["data"]["order_no"] = orderNo;
+                      response["data"]["payment_no"] = paymentNo;
+                      response["data"]["amount"] = amount;
+                      response["data"]["status"] = definitive ? "REFUND_FAIL" : "REFUNDING";
+                      response["data"]["error"] = errorMessage;
+                      response["data"]["wechat_response"] = errJson;
+                      (*sharedCb)(response, std::error_code(1502, std::system_category()));
+                  }
+                  return;
               }
 
               updateRefundWithSuccess(
                 refundNo,
-                refundStatus,
+                mappedStatus,
                 refundId,
                 result,
                 orderNo,
                 paymentNo,
                 amount,
+                totalFen,
                 std::move(*sharedCb)
               );
           }
@@ -1451,66 +1556,36 @@ void RefundService::updateRefundWithError(
   const Json::Value &errJson
 )
 {
+    // Guarded transition: this row can have reached a final status while the
+    // channel call was in flight -- a REFUND_SUCCESS booked by the refund
+    // notification, for instance. Writing FAIL over that would un-refund money
+    // the customer actually received, so the update only fires while the row is
+    // still unsettled and zero rows means another writer settled it first.
     try
     {
-        Mapper<PayRefundModel> refundMapper(dbClient_);
-        auto criteria = Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo);
-        refundMapper.findOne(
-          criteria,
-          [this, errorMessage, errJson, refundNo](PayRefundModel refund) {
-              refund.setStatus("REFUND_FAIL");
-              try
+        Mapper<PayRefundModel> refundUpdater(dbClient_);
+        refundUpdater.updateBy(
+          {PayRefundModel::Cols::_status, PayRefundModel::Cols::_response_payload},
+          [refundNo, errorMessage](const size_t updated) {
+              if (updated == 0)
               {
-                  Mapper<PayRefundModel> refundUpdater(dbClient_);
-                  refundUpdater.update(
-                    refund,
-                    [this, errJson, refundNo](const size_t) {
-                        try
-                        {
-                            Mapper<PayRefundModel> payloadUpdater(dbClient_);
-                            payloadUpdater.updateBy(
-                              {PayRefundModel::Cols::_response_payload},
-                              [](const size_t) {},
-                              [](const DrogonDbException &e) {
-                                  LOG_WARN << "Refund error payload update error: "
-                                           << e.base().what();
-                              },
-                              Criteria(
-                                PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo
-                              ),
-                              toJsonString(errJson)
-                            );
-                        }
-                        catch (const std::exception &e)
-                        {
-                            LOG_ERROR << "[RefundService] Mapper construction failed: " << e.what();
-                        }
-                        catch (...)
-                        {
-                            LOG_ERROR << "[RefundService] Mapper construction failed: unknown "
-                                         "exception";
-                        }
-                    },
-                    [refundNo](const DrogonDbException &e) {
-                        LOG_ERROR << "[RefundService] updateRefundWithError DB write failed for "
-                                     "refund_no="
-                                  << refundNo << ": " << e.base().what();
-                    }
-                  );
-              }
-              catch (const std::exception &e)
-              {
-                  LOG_ERROR << "[RefundService] Mapper construction failed: " << e.what();
-              }
-              catch (...)
-              {
-                  LOG_ERROR << "[RefundService] Mapper construction failed: unknown exception";
+                  LOG_WARN << "[RefundService] Refund " << refundNo
+                           << " had already reached a final status, so REFUND_FAIL ("
+                           << errorMessage << ") was not written";
               }
           },
           [refundNo](const DrogonDbException &e) {
-              LOG_ERROR << "[RefundService] updateRefundWithError lookup failed for refund_no="
+              LOG_ERROR << "[RefundService] updateRefundWithError DB write failed for refund_no="
                         << refundNo << ": " << e.base().what();
-          }
+          },
+          Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo) &&
+            Criteria(
+              PayRefundModel::Cols::_status,
+              CompareOperator::In,
+              std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
+            ),
+          std::string("REFUND_FAIL"),
+          toJsonString(errJson)
         );
     }
     catch (const std::exception &e)
@@ -1531,214 +1606,189 @@ void RefundService::updateRefundWithSuccess(
   const std::string &orderNo,
   const std::string &paymentNo,
   const std::string &amount,
+  int64_t orderTotalFen,
   RefundCallback &&callback
 )
 {
     // Wrap callback in shared_ptr to prevent it from being destroyed during async operations
     auto sharedCb = std::make_shared<RefundCallback>(std::move(callback));
 
+    auto respond = [sharedCb, refundNo, orderNo, paymentNo, amount, refundId, result](
+                     const std::string &status
+                   ) {
+        if (!*sharedCb)
+        {
+            return;
+        }
+        Json::Value response;
+        response["code"] = 0;
+        response["message"] = "Refund created successfully";
+        Json::Value data;
+        data["refund_no"] = refundNo;
+        data["order_no"] = orderNo;
+        data["payment_no"] = paymentNo;
+        data["refund_amount"] = amount;
+        data["status"] = status;
+        data["channel_refund_no"] = refundId;
+        data["wechat_response"] = result;
+        response["data"] = data;
+        (*sharedCb)(response, std::error_code());
+    };
+
+    auto failDb = [sharedCb](const DrogonDbException &e) {
+        if (*sharedCb)
+        {
+            Json::Value error;
+            error["code"] = 1500;
+            error["message"] = std::string("Database error: ") + e.base().what();
+            (*sharedCb)(error, std::error_code(1500, std::system_category()));
+        }
+    };
+
+    // The parent order only moves to REFUNDED once the refund reaches
+    // REFUND_SUCCESS (openapi.yaml OrderStatus, TECH_SPECS.md "订单状态机"). WeChat
+    // accepts an asynchronous refund with status=PROCESSING, which maps to
+    // REFUNDING: the unconditional write this replaces marked the order REFUNDED
+    // the moment WeChat acknowledged the request, for money that had not moved.
+    // The order write is itself guarded on PAID so it cannot roll back a state
+    // another writer (close, refund notification) reached in the meantime.
+    auto writeRefundedOrder = [this, sharedCb, respond, failDb, refundNo, refundStatus, orderNo]() {
+        try
+        {
+            Mapper<PayOrderModel> orderUpdater(dbClient_);
+            orderUpdater.updateBy(
+              {PayOrderModel::Cols::_status},
+              [respond, refundStatus, refundNo, orderNo](const size_t updated) {
+                  if (updated == 0)
+                  {
+                      LOG_WARN << "[RefundService] Order " << orderNo
+                               << " was no longer PAID when refund " << refundNo
+                               << " succeeded; its status was left as it is";
+                  }
+                  else
+                  {
+                      LOG_INFO << "[RefundService] Refund completed: refund_no=" << refundNo
+                               << ", order_no=" << orderNo << ", status=" << refundStatus;
+                  }
+                  respond(refundStatus);
+              },
+              failDb,
+              Criteria(PayOrderModel::Cols::_order_no, CompareOperator::EQ, orderNo) &&
+                Criteria(PayOrderModel::Cols::_status, CompareOperator::EQ, "PAID"),
+              std::string("REFUNDED")
+            );
+        }
+        catch (const std::exception &e)
+        {
+            reportMapperFailure(sharedCb, e.what());
+        }
+        catch (...)
+        {
+            reportMapperFailure(sharedCb, "unknown exception");
+        }
+    };
+
+    auto settleOrder = [this,
+                        respond,
+                        failDb,
+                        sharedCb,
+                        writeRefundedOrder,
+                        refundNo,
+                        refundStatus,
+                        orderNo,
+                        orderTotalFen]() {
+        if (refundStatus != "REFUND_SUCCESS")
+        {
+            LOG_DEBUG << "[RefundService] Refund " << refundNo << " recorded as " << refundStatus
+                      << ", leaving order " << orderNo << " untouched";
+            respond(refundStatus);
+            return;
+        }
+        // A settled refund says nothing about the refunds around it, and WeChat
+        // honours up to fifty of them per order, so REFUND_SUCCESS on one row is
+        // not yet evidence that the order came back. The row above already
+        // committed this refund's REFUND_SUCCESS, so the sum of the settled rows
+        // is everything returned to date. Overstating it would report money back
+        // the customer never received; understating leaves an order PAID that a
+        // later refund notification or query settles.
+        // Aggregate SUM (raw-SQL exemption #3): the Mapper cannot express SUM.
+        try
+        {
+            dbClient_->execSqlAsync(
+              "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) AS sum_amount "
+              "FROM pay_refund WHERE order_no = $1 AND status = $2",
+              [respond,
+               sharedCb,
+               writeRefundedOrder,
+               refundNo,
+               refundStatus,
+               orderNo,
+               orderTotalFen](const Result &r) {
+                  int64_t settledRefundFen = 0;
+                  if (!r.empty())
+                  {
+                      const auto sumText = r.front()["sum_amount"].as<std::string>();
+                      if (!pay::utils::parseAmountToFen(sumText, settledRefundFen))
+                      {
+                          reportMapperFailure(sharedCb, "Invalid settled refund sum");
+                          return;
+                      }
+                  }
+                  if (!pay::utils::refundsCoverOrderAmount(settledRefundFen, orderTotalFen))
+                  {
+                      LOG_DEBUG << "[RefundService] Refund " << refundNo
+                                << " settled, but the refunds on order " << orderNo << " ("
+                                << settledRefundFen << " fen) do not yet cover its total ("
+                                << orderTotalFen << " fen); the order stays as it is";
+                      respond(refundStatus);
+                      return;
+                  }
+                  writeRefundedOrder();
+              },
+              failDb,
+              orderNo,
+              std::string("REFUND_SUCCESS")
+            );
+        }
+        catch (const std::exception &e)
+        {
+            reportMapperFailure(sharedCb, e.what());
+        }
+        catch (...)
+        {
+            reportMapperFailure(sharedCb, "unknown exception");
+        }
+    };
+
     try
     {
-        Mapper<PayRefundModel> refundMapper(dbClient_);
-        auto criteria = Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo);
-        refundMapper.findOne(
-          criteria,
-          [this, refundNo, refundStatus, refundId, result, orderNo, paymentNo, amount, sharedCb](
-            PayRefundModel refund
-          ) mutable {
-              refund.setStatus(refundStatus);
-              refund.setChannelRefundNo(refundId);
-              try
+        Mapper<PayRefundModel> refundUpdater(dbClient_);
+        refundUpdater.updateBy(
+          {PayRefundModel::Cols::_status,
+           PayRefundModel::Cols::_channel_refund_no,
+           PayRefundModel::Cols::_response_payload},
+          [settleOrder, refundNo, refundStatus, amount](const size_t updated) {
+              if (updated == 0)
               {
-                  Mapper<PayRefundModel> refundUpdater(dbClient_);
-                  refundUpdater.update(
-                    refund,
-                    [this,
-                     refundNo,
-                     refundStatus,
-                     refundId,
-                     result,
-                     orderNo,
-                     paymentNo,
-                     amount,
-                     sharedCb](const size_t) {
-                        try
-                        {
-                            Mapper<PayRefundModel> payloadUpdater(dbClient_);
-                            payloadUpdater.updateBy(
-                              {PayRefundModel::Cols::_response_payload},
-                              [this,
-                               refundNo,
-                               refundStatus,
-                               refundId,
-                               result,
-                               orderNo,
-                               paymentNo,
-                               amount,
-                               sharedCb](const size_t) {
-                                  // Update order status to REFUNDED after successful refund
-                                  try
-                                  {
-                                      Mapper<PayOrderModel> orderMapper(dbClient_);
-                                      auto orderCriteria = Criteria(
-                                        PayOrderModel::Cols::_order_no, CompareOperator::EQ, orderNo
-                                      );
-                                      orderMapper.findOne(
-                                        orderCriteria,
-                                        [this,
-                                         refundNo,
-                                         refundStatus,
-                                         refundId,
-                                         result,
-                                         orderNo,
-                                         paymentNo,
-                                         amount,
-                                         sharedCb](PayOrderModel order) mutable {
-                                            order.setStatus("REFUNDED");
-                                            try
-                                            {
-                                                Mapper<PayOrderModel> orderUpdater(dbClient_);
-                                                orderUpdater.update(
-                                                  order,
-                                                  [refundNo,
-                                                   refundStatus,
-                                                   refundId,
-                                                   result,
-                                                   orderNo,
-                                                   paymentNo,
-                                                   amount,
-                                                   sharedCb](const size_t) {
-                                                      LOG_INFO
-                                                        << "[RefundService] Refund completed: "
-                                                           "refund_no="
-                                                        << refundNo << ", order_no=" << orderNo
-                                                        << ", status=" << refundStatus
-                                                        << ", amount=" << amount;
-                                                      if (*sharedCb)
-                                                      {
-                                                          Json::Value response;
-                                                          response["code"] = 0;
-                                                          response["message"] =
-                                                            "Refund created successfully";
-                                                          Json::Value data;
-                                                          data["refund_no"] = refundNo;
-                                                          data["order_no"] = orderNo;
-                                                          data["payment_no"] = paymentNo;
-                                                          data["refund_amount"] = amount;
-                                                          data["status"] = refundStatus;
-                                                          data["channel_refund_no"] = refundId;
-                                                          data["wechat_response"] = result;
-                                                          response["data"] = data;
-                                                          (*sharedCb)(response, std::error_code());
-                                                      }
-                                                  },
-                                                  [sharedCb](const DrogonDbException &e) {
-                                                      if (*sharedCb)
-                                                      {
-                                                          Json::Value error;
-                                                          error["code"] = 1500;
-                                                          error["message"] =
-                                                            std::string("Database error: ") +
-                                                            e.base().what();
-                                                          (*sharedCb)(
-                                                            error,
-                                                            std::error_code(
-                                                              1500, std::system_category()
-                                                            )
-                                                          );
-                                                      }
-                                                  }
-                                                );
-                                            }
-                                            catch (const std::exception &e)
-                                            {
-                                                reportMapperFailure(sharedCb, e.what());
-                                            }
-                                            catch (...)
-                                            {
-                                                reportMapperFailure(sharedCb, "unknown exception");
-                                            }
-                                        },
-                                        [sharedCb](const DrogonDbException &e) {
-                                            if (*sharedCb)
-                                            {
-                                                Json::Value error;
-                                                error["code"] = 1500;
-                                                error["message"] =
-                                                  std::string("Database error: ") + e.base().what();
-                                                (*sharedCb)(
-                                                  error,
-                                                  std::error_code(1500, std::system_category())
-                                                );
-                                            }
-                                        }
-                                      );
-                                  }
-                                  catch (const std::exception &e)
-                                  {
-                                      reportMapperFailure(sharedCb, e.what());
-                                  }
-                                  catch (...)
-                                  {
-                                      reportMapperFailure(sharedCb, "unknown exception");
-                                  }
-                              },
-                              [sharedCb](const DrogonDbException &e) {
-                                  if (*sharedCb)
-                                  {
-                                      Json::Value error;
-                                      error["code"] = 1500;
-                                      error["message"] =
-                                        std::string("Database error: ") + e.base().what();
-                                      (*sharedCb)(
-                                        error, std::error_code(1500, std::system_category())
-                                      );
-                                  }
-                              },
-                              Criteria(
-                                PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo
-                              ),
-                              toJsonString(result)
-                            );
-                        }
-                        catch (const std::exception &e)
-                        {
-                            reportMapperFailure(sharedCb, e.what());
-                        }
-                        catch (...)
-                        {
-                            reportMapperFailure(sharedCb, "unknown exception");
-                        }
-                    },
-                    [sharedCb](const DrogonDbException &e) {
-                        if (*sharedCb)
-                        {
-                            Json::Value error;
-                            error["code"] = 1500;
-                            error["message"] = std::string("Database error: ") + e.base().what();
-                            (*sharedCb)(error, std::error_code(1500, std::system_category()));
-                        }
-                    }
-                  );
+                  // The notification (or reconciliation) advanced this row while the
+                  // channel call was in flight: that status stands. The order step
+                  // below is guarded too, so running it is idempotent.
+                  LOG_WARN << "[RefundService] Refund " << refundNo
+                           << " had already moved out of REFUND_INIT/REFUNDING, so " << refundStatus
+                           << " was not written (amount=" << amount << ")";
               }
-              catch (const std::exception &e)
-              {
-                  reportMapperFailure(sharedCb, e.what());
-              }
-              catch (...)
-              {
-                  reportMapperFailure(sharedCb, "unknown exception");
-              }
+              settleOrder();
           },
-          [sharedCb](const DrogonDbException &e) {
-              if (*sharedCb)
-              {
-                  Json::Value error;
-                  error["code"] = 1500;
-                  error["message"] = std::string("Database error: ") + e.base().what();
-                  (*sharedCb)(error, std::error_code(1500, std::system_category()));
-              }
-          }
+          failDb,
+          Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo) &&
+            Criteria(
+              PayRefundModel::Cols::_status,
+              CompareOperator::In,
+              std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
+            ),
+          refundStatus,
+          refundId,
+          toJsonString(result)
         );
     }
     catch (const std::exception &e)
@@ -2015,6 +2065,7 @@ void RefundService::syncRefundStatusFromWechat(
                                        orderNo,
                                        paymentNo,
                                        refundAmount,
+                                       transPtr,
                                        transDb](const PayOrderModel &order) {
                                           insertLedgerEntry(
                                             transDb,
@@ -2024,9 +2075,169 @@ void RefundService::syncRefundStatusFromWechat(
                                             "REFUND",
                                             refundAmount
                                           );
-                                          if (callback)
+                                          // A refund that settled here is evidence the
+                                          // order may be closed out, but only once the
+                                          // settled refunds cover its total: the refund
+                                          // row was moved to REFUND_SUCCESS earlier in
+                                          // this transaction, so the sum below sees it,
+                                          // and covering the total is what recovers the
+                                          // concurrent case where two settlements each
+                                          // counted without the other and left the order
+                                          // PAID.
+                                          // Aggregate SUM (raw-SQL exemption #3): the
+                                          // Mapper cannot express SUM.
+                                          const auto orderRowStatus = order.getValueOfStatus();
+                                          const auto orderAmount = order.getValueOfAmount();
+                                          if (orderRowStatus != "PAID")
                                           {
-                                              callback(refundStatus);
+                                              // Nothing to settle: the order was already
+                                              // moved on (or never reached PAID), and a
+                                              // closed order must not reopen.
+                                              if (callback)
+                                              {
+                                                  callback(refundStatus);
+                                              }
+                                              return;
+                                          }
+                                          try
+                                          {
+                                              transPtr->execSqlAsync(
+                                                "SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) "
+                                                "AS sum_amount FROM pay_refund WHERE order_no = $1 "
+                                                "AND status = $2",
+                                                [callback,
+                                                 refundStatus,
+                                                 orderNo,
+                                                 orderAmount,
+                                                 transPtr](const Result &sumResult) {
+                                                    int64_t settledRefundFen = 0;
+                                                    if (!sumResult.empty())
+                                                    {
+                                                        const auto sumText =
+                                                          sumResult.front()["sum_amount"]
+                                                            .as<std::string>();
+                                                        if (!pay::utils::parseAmountToFen(
+                                                              sumText, settledRefundFen
+                                                            ))
+                                                        {
+                                                            // An unreadable sum proves
+                                                            // nothing: report the refund as
+                                                            // synced and leave the order as
+                                                            // it is -- a later notification
+                                                            // or query re-runs the check.
+                                                            settledRefundFen = 0;
+                                                        }
+                                                    }
+                                                    int64_t orderTotalFen = 0;
+                                                    if (!pay::utils::parseAmountToFen(
+                                                          orderAmount, orderTotalFen
+                                                        ))
+                                                    {
+                                                        orderTotalFen = 0;
+                                                    }
+                                                    if (!pay::utils::refundsCoverOrderAmount(
+                                                          settledRefundFen, orderTotalFen
+                                                        ))
+                                                    {
+                                                        LOG_DEBUG
+                                                          << "[RefundService] A synced refund "
+                                                             "settled, but the refunds on order "
+                                                          << orderNo << " (" << settledRefundFen
+                                                          << " fen) do not yet cover its total ("
+                                                          << orderTotalFen
+                                                          << " fen); the order stays as it is";
+                                                        if (callback)
+                                                        {
+                                                            callback(refundStatus);
+                                                        }
+                                                        return;
+                                                    }
+                                                    Mapper<PayOrderModel> orderUpdater(transPtr);
+                                                    orderUpdater.updateBy(
+                                                      {PayOrderModel::Cols::_status},
+                                                      [callback,
+                                                       refundStatus,
+                                                       orderNo](const size_t updated) {
+                                                          if (updated == 0)
+                                                          {
+                                                              LOG_DEBUG
+                                                                << "[RefundService] Order "
+                                                                << orderNo
+                                                                << " was no longer PAID when "
+                                                                   "the synced refund covered it";
+                                                          }
+                                                          else
+                                                          {
+                                                              LOG_INFO << "[RefundService] Order "
+                                                                       << orderNo
+                                                                       << " is now REFUNDED on the "
+                                                                          "settled-refund sum";
+                                                          }
+                                                          if (callback)
+                                                          {
+                                                              callback(refundStatus);
+                                                          }
+                                                      },
+                                                      [callback,
+                                                       transPtr](const DrogonDbException &e) {
+                                                          LOG_ERROR << "Refund settle order update "
+                                                                       "error: "
+                                                                    << e.base().what();
+                                                          transPtr->rollback();
+                                                          if (callback)
+                                                          {
+                                                              callback("");
+                                                          }
+                                                      },
+                                                      Criteria(
+                                                        PayOrderModel::Cols::_order_no,
+                                                        CompareOperator::EQ,
+                                                        orderNo
+                                                      ) &&
+                                                        Criteria(
+                                                          PayOrderModel::Cols::_status,
+                                                          CompareOperator::EQ,
+                                                          std::string("PAID")
+                                                        ),
+                                                      std::string("REFUNDED")
+                                                    );
+                                                },
+                                                [callback,
+                                                 transPtr,
+                                                 orderNo](const DrogonDbException &e) {
+                                                    LOG_ERROR << "Refund settled-sum lookup for "
+                                                              << orderNo
+                                                              << " failed: " << e.base().what();
+                                                    transPtr->rollback();
+                                                    if (callback)
+                                                    {
+                                                        callback("");
+                                                    }
+                                                },
+                                                orderNo,
+                                                std::string("REFUND_SUCCESS")
+                                              );
+                                          }
+                                          catch (const std::exception &e)
+                                          {
+                                              LOG_ERROR << "[RefundService] Refund settle step "
+                                                           "failed: "
+                                                        << e.what();
+                                              transPtr->rollback();
+                                              if (callback)
+                                              {
+                                                  callback("");
+                                              }
+                                          }
+                                          catch (...)
+                                          {
+                                              LOG_ERROR << "[RefundService] Refund settle step "
+                                                           "failed: unknown exception";
+                                              transPtr->rollback();
+                                              if (callback)
+                                              {
+                                                  callback("");
+                                              }
                                           }
                                       },
                                       [callback, transPtr](const DrogonDbException &e) {

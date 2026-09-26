@@ -231,21 +231,37 @@ CREATED ──(channel API call)──> PAYING ──(callback SUCCESS)──> P
 #### /api/qrpay/create 路径
 
 ```
-PAYING ──(callback SUCCESS)──> PAID
-   │
-   └──(callback FAIL)─────────> FAILED
+(校验通过) ──> pay_order=CREATED + pay_payment=INIT ──(渠道受理并回码)──> pay_payment=PROCESSING / pay_order=PAYING
+                                    │                                              │
+                                    │<──(渠道明确拒绝)── pay_payment=FAIL ──────────┤
+                                    │                                              ├──(回调 SUCCESS)──> pay_order=PAID
+                                    └──(结果不确定：超时/传输错误/无 code_url) 两行均不关闭
 ```
 
 | 状态 | 含义 | 转换触发 |
 |------|------|----------|
-| `PAYING` | 二维码已生成，等待用户扫码支付 | `PayOrder` INSERT 时设置（注意：与 /api/pay/create 不同，无 `CREATED` 状态） |
-| `PAID` | 支付成功 | 回调通知 |
-| `FAILED` | 支付失败/超时 | 回调失败或订单过期 |
+| `CREATED` | 订单与首条支付记录已落库，尚未向渠道取码 | `pay_order` INSERT 时设置 |
+| `PAYING` | 渠道已受理并返回可支付码 | 渠道成功后 `promoteQrRows` 的守卫更新（`CREATED`/`PAYING` → `PAYING`） |
+| `PAID` | 支付成功 | 回调 `TRANSACTION.SUCCESS` / `TRADE_SUCCESS` |
+| `REFUNDED` | 订单已被退款覆盖到全额的终态 | 退款流程，不属于本路径 |
 
-> **设计说明**: `/api/qrpay/create` 在订单创建前已完成渠道调用（生成 QR 码），因此订单创建时即进入 `PAYING` 状态。`/api/pay/create` 先创建订单再调用渠道，因此使用 `CREATED` 作为中间状态。两种路径的状态差异在 `queryOrder`、`queryOrderList` 和 `reconcileSummary` 等查询/对账接口中均已正确处理。
+| Payment 记录 | 含义 | 转换触发 |
+|------|------|----------|
+| `INIT` | 尝试已记账，渠道尚未答复 | `pay_payment` INSERT 时设置 |
+| `PROCESSING` | 渠道受理，二维码在手 | `promoteQrRows`（仅当行仍在 `INIT`/`PROCESSING`） |
+| `FAIL` | 本次尝试被渠道明确拒绝 | `markQrPaymentFailed`（同上守卫） |
 
-> 订单终态 `REFUNDED` 不属于支付创建路径：只有在退款达到 `REFUND_SUCCESS` 后，
-> 退款流程才把父订单置为 `REFUNDED`。
+> **设计说明**：`/api/qrpay/create` 与 `/api/pay/create` 现在共用同一套订单状态语义——先写
+> `CREATED` 再向渠道取码，因此 QR 路径也会经过 `CREATED`（旧文档记的"QR 无 `CREATED` 状态"
+> 已随 C5 修复作废）。`pay_payment.order_no` 不是唯一键，一次尝试追加一行，重试不会覆盖旧行。
+> 只有渠道**明确拒绝**的尝试才被关闭：超时、传输故障、渠道回了但没有 `code_url`、被中间层挡下的
+> 4xx 都属结果不确定，两行保持飞行中，由回调或对账收敛——把这类尝试置为终态，等于让用户仍能
+> 支付的一笔交易从所有恢复视角里消失（与 `refundCertainlyDidNotHappen` 同一条规则）。
+> 渠道拒绝时订单状态不动，因为同一订单可能还挂着上一个仍然有效的码。
+
+> 订单终态 `REFUNDED` 不属于支付创建路径：只有在某笔退款达到 `REFUND_SUCCESS`、且该订单
+> 上所有已退成功退款之合计覆盖订单总额后，退款流程才把父订单置为 `REFUNDED`。
+> 微信单笔订单最多允许 50 次部分退款，单笔退款成功时订单保持 `PAID`。
 
 #### 退款状态机
 
@@ -259,7 +275,7 @@ REFUND_INIT ──(channel call)──> REFUNDING ──(callback SUCCESS)──
 |------|------|
 | `REFUND_INIT` | 退款记录已写入，待渠道调用（建表默认值） |
 | `REFUNDING` | 渠道受理，等待退款结果 |
-| `REFUND_SUCCESS` | 退款成功，父订单随之变为 `REFUNDED` |
+| `REFUND_SUCCESS` | 退款成功；仅当订单上已退成功之合计覆盖订单总额时，父订单才变为 `REFUNDED` |
 | `REFUND_FAIL` | 退款失败，可重新发起 |
 
 #### Payment 记录状态

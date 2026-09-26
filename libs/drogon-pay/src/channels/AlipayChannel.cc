@@ -221,12 +221,22 @@ bool AlipaySandboxClient::verifyCallback(const Json::Value &params, const std::s
         std::sort(keys.begin(), keys.end());
         for (const auto &key : keys)
         {
-            if (!params[key].isNull())
+            const Json::Value &value = params[key];
+            if (value.isNull())
             {
-                if (!data.empty())
-                    data += "&";
-                data += key + "=" + params[key].asString();
+                continue;
             }
+            const std::string sval = value.asString();
+            // Alipay's signing rule excludes parameters whose value is empty.
+            // Including an empty "key=" here diverges from what Alipay signed
+            // and rejects legitimate notifications (e.g. a blank refund_amount).
+            if (sval.empty())
+            {
+                continue;
+            }
+            if (!data.empty())
+                data += "&";
+            data += key + "=" + sval;
         }
         return verify(data, signature);
     }
@@ -564,7 +574,15 @@ Json::Value AlipaySandboxClient::buildCommonParams() const
 
     // Format timestamp as "yyyy-MM-dd HH:mm:ss" for Alipay API
     auto now = std::time(nullptr);
-    std::tm tm = *std::localtime(&now);
+    // std::localtime returns a pointer to a shared static tm and is not
+    // thread-safe; Drogon may call this from multiple IO-loop threads. Use the
+    // reentrant variants so concurrent requests can't corrupt each other's tm.
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
     char timestamp[20];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm);
     params["timestamp"] = std::string(timestamp);

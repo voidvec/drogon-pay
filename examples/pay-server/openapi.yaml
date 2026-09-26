@@ -30,9 +30,12 @@ info:
       ("9.99", "100", "0.5"); anything else is rejected with business code
       40001 before the request reaches the database.
     * Success envelopes carry `code: 0` (or `code: 200` on the order list)
-      plus `message` and, where there is a payload, `data`. A non-zero `code`
-      is paired with a matching HTTP status, so clients may branch on either;
-      prefer HTTP status for transport decisions and `code` for business ones.
+      plus `message` and, where there is a payload, `data`. The handler derives
+      the HTTP status from the error code a service hands it, so where a
+      business code travels in the error the two agree (400, 404, 409, 502,
+      503); failures that pass an `errno` instead land on HTTP 500
+      whatever the body says. Branch on `code` for business decisions and
+      prefer HTTP status for transport ones.
     * Write operations (`/create`, `/api/qrpay/create`, `/refund`) are
       idempotent. Send `X-Idempotency-Key` (or `Idempotency-Key`) to make a
       retry replay the stored snapshot; omit it and the server derives a key
@@ -79,7 +82,11 @@ paths:
         Persists a `pay_order` row, calls the channel, and returns the channel
         artefacts needed to complete the payment. `user_id` may come from the
         body or from an authenticated request attribute; with API-key auth
-        there is no attribute, so omitting it yields 401.
+        there is no attribute, so omitting it -- or naming a non-positive one,
+        the value `GET /api/pay/orders` reads as "no owner filter" -- yields 401.
+        Every body member is checked against the type this route reads, so a
+        quoted or object-shaped field answers 400 rather than failing.
+        An idempotency collision (business code 1004) arrives as HTTP 404.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -111,7 +118,7 @@ paths:
                     code: 0
                     message: Payment created successfully
                     data:
-                      order_no: "c2d7c8ad-6a4b-4f3f-9a31-32db0a3fcd82"
+                      order_no: "c2d7c8ad6a4b4f3f9a3132db0a3fcd82"
                       payment_no: "PAY2026091810345612345678"
                       status: PAYING
                       code_url: "weixin://wxpay/bizpayurl?pr=xxxx"
@@ -134,14 +141,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         "403":
           $ref: '#/components/responses/Forbidden'
-        "409":
-          $ref: '#/components/responses/Conflict'
+        "404":
+          $ref: '#/components/responses/NotFound'
         "500":
           $ref: '#/components/responses/InternalError'
-        "502":
-          $ref: '#/components/responses/BadGateway'
-        "503":
-          $ref: '#/components/responses/ServiceUnavailable'
     options:
       tags: [payments]
       operationId: createPaymentPreflight
@@ -161,10 +164,36 @@ paths:
       summary: Create a QR-code payment
       description: |
         Historical QR entry point. Unlike `/api/pay/create` it requires
-        `channel` and `user_id` in the body, defaults `subject` to "Payment",
-        and reports failures inside the body with HTTP 200 (codes 500 and
-        1005) rather than via the transport status -- see
-        `docs/development/plugin_integration.md` for the migration note.
+        `channel` and a positive `user_id` in the body, and defaults `subject` to
+        "Payment". It books the order and one payment row before asking the
+        channel for a code, so a paid QR transaction always has a row the
+        notification can settle; `pay_order.order_no` is unique, so a retry
+        reuses that order and appends a new payment row. An attempt whose channel
+        call did not provably fail stays open (HTTP 500, code 500) instead of
+        closing the order, because the user may still be able to pay it.
+        Optional fields: `description`, `product_name` (the channel `subject`),
+        `currency` (WeChat only -- Alipay precreate always prices in CNY; a
+        three-letter ISO-4217 code, case-normalized, and recorded on the order so
+        the notification's currency can match it), `notify_url` (subject to the
+        same private-address ban as `/api/pay/create`), `buyer_id`, and
+        `idempotency_key`. For `channel: wechat`, `order_no` is pre-checked
+        against the official out_trade_no window (6-32 characters of digits,
+        letters and `_ - | *`) and the subject against the non-empty /
+        127-character description rule, so an order the channel could never
+        name answers 400 here instead of lingering in the reconciliation sweep.
+        The replay key is `idempotency_key`, else the `X-Idempotency-Key` or
+        `Idempotency-Key` header, else `QR_<order_no>_<channel>`; the stored
+        request hash covers `user_id`, `currency`, `notify_url` and `buyer_id`
+        beside the order fields, so a second caller reusing an order number under
+        a different owner or price is a conflict rather than a replay of the first
+        caller's code.
+        Body code 400 covers a missing or mistyped field, an amount this route
+        cannot express (40001), an unusable currency or `notify_url`, and a reused
+        order that is already settled, priced or channeled differently, or belongs
+        to another user. The 500 codes (channel fault, database read fault) and
+        1005 (unknown channel) ride an HTTP 500, as do 1003 (no database client);
+        1004 (idempotency conflict, or the same key still in flight) rides an HTTP
+        404 -- see `docs/development/plugin_integration.md` for the migration note.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -175,7 +204,7 @@ paths:
               $ref: '#/components/schemas/CreateQRPaymentRequest'
       responses:
         "200":
-          description: QR created (code 0) or channel failure reported in-body
+          description: QR created (code 0)
           content:
             application/json:
               schema:
@@ -189,18 +218,14 @@ paths:
                       order_no: "ord-2026-0001"
                       qr_code: "https://qr.alipay.com/bax..."
                       out_trade_no: "ord-2026-0001"
-                unknown-channel:
-                  value:
-                    code: 1005
-                    message: "CHANNEL_NOT_AVAILABLE: paypal"
         "400":
           $ref: '#/components/responses/BadRequest'
         "401":
           $ref: '#/components/responses/Unauthorized'
         "403":
           $ref: '#/components/responses/Forbidden'
-        "409":
-          $ref: '#/components/responses/Conflict'
+        "404":
+          $ref: '#/components/responses/NotFound'
         "500":
           $ref: '#/components/responses/InternalError'
     options:
@@ -530,7 +555,11 @@ paths:
         `event_type` must be `TRANSACTION.SUCCESS` or contain `REFUND`;
         anything else is rejected with 400/40004. Accepted notifications answer
         `code: SUCCESS`; verification and persistence failures answer
-        `code: FAIL` with HTTP 500 so WeChat retries.
+        `code: FAIL` with HTTP 500 so WeChat retries. A duplicate that arrives
+        while another delivery still holds an unfinalized idempotency reservation
+        also answers `code: FAIL` (retry) rather than `SUCCESS`: a reservation is
+        not proof the settlement committed, so acknowledging it could stop the
+        retries and strand the payment if the winning delivery then died.
       security: []
       parameters:
         - name: Wechatpay-Timestamp
@@ -574,6 +603,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CallbackAck'
+        "503":
+          description: >-
+            This process has no PayPlugin registered, so no service can take the
+            notification (business code 1501). Never an acknowledgement: WeChat
+            retries, and the next delivery is handled by a process that can book
+            it. The body is the numeric error shape, not the agreed
+            `SUCCESS`/`FAIL` acknowledgement, because a refusal to handle is not
+            an acknowledgement of any kind.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/pay/notify/alipay:
     post:
@@ -748,16 +789,21 @@ components:
       in: header
       required: false
       description: |
-        Optional replay key; `Idempotency-Key` is accepted as a synonym. Reuse
-        with a changed body answers 409, and a replay of a completed request
-        returns the stored snapshot.
+        Optional replay key; `Idempotency-Key` is accepted as a synonym, and
+        `/api/qrpay/create` also reads the same value from its `idempotency_key`
+        body field. Replaying a completed request returns the stored snapshot
+        over HTTP 200. Reusing the key with a changed body is refused: business
+        code 1409 over HTTP 409 on `/api/pay/refund`, code 1004 over HTTP 404 on
+        the two create routes.
       schema:
         type: string
         maxLength: 128
 
   responses:
     BadRequest:
-      description: Malformed body, missing field, or invalid amount format
+      description: |
+        Malformed body, missing field, a field whose JSON type is not the one
+        this route reads, or an invalid amount format.
       content:
         application/json:
           schema:
@@ -767,6 +813,10 @@ components:
               value:
                 code: 400
                 message: "Missing required fields: order_no and amount"
+            mistyped-field:
+              value:
+                code: 400
+                message: "Field amount must be a string"
             bad-amount:
               value:
                 code: 40001
@@ -775,8 +825,9 @@ components:
       description: |
         Missing or unknown API key. The auth layer answers **plain text**, not
         JSON: `missing api key` or `invalid api key`. `/api/pay/create` is the
-        exception -- a key that is present but carries no `user_id` answers a
-        JSON `401 User ID required` from the controller.
+        exception -- a request whose body names no `user_id`, or names one that
+        is not positive, answers a JSON `401 User ID required` from the
+        controller, because nothing was available to own the order.
       content:
         text/plain:
           schema:
@@ -793,7 +844,11 @@ components:
             type: string
             example: api key scope not allowed
     NotFound:
-      description: No order or refund for the supplied number (business codes 1004 / 1404)
+      description: |
+        No order or refund for the supplied number (business codes 1004 / 1404).
+        On the two create routes the same status carries business code 1004 from
+        the idempotency layer instead: the key is already bound to a different
+        body, or the request bound to it is still in flight.
       content:
         application/json:
           schema:
@@ -822,8 +877,15 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     ServiceUnavailable:
       description: |
-        Either the auth layer has no keys configured (`api key not configured`,
-        plain text) or the channel client is not ready (business code 1501).
+        Two different faults, and only one of them is a JSON body. The auth layer
+        with no keys configured answers plain text (`api key not configured`) with
+        no business code at all. A process with no `PayPlugin` registered answers
+        business code 1501 -- every route resolves its service through
+        `getPlugin<PayPlugin>()`, which a static-library link can leave null, and
+        the refund routes also carry 1501 when the channel client they need is not
+        configured. The create routes report that last fault differently: an
+        unusable channel answers 1002 on `/api/pay/create` and 1005 on
+        `/api/qrpay/create`, both over HTTP 500.
       content:
         text/plain:
           schema:
@@ -854,8 +916,11 @@ components:
       description: |
         `pay_order.status`. `CREATED` is the DDL default; `/create` reserves the
         order as `PAYING`; a verified channel success moves it to `PAID`, a
-        completed refund to `REFUNDED`, and a closed/revoked/expired trade to
-        `CLOSED` or `FAILED`.
+        fully returned order to `REFUNDED`, and a closed/revoked/expired trade
+        to `CLOSED` or `FAILED`. `REFUNDED` requires the refunds that have
+        *settled* on the order to cover its total: WeChat honours up to fifty
+        partial refunds per order, so one settled refund leaves the order
+        `PAID`.
 
     PaymentStatus:
       type: string
@@ -870,8 +935,10 @@ components:
       type: string
       enum: [REFUND_INIT, REFUNDING, REFUND_SUCCESS, REFUND_FAIL]
       description: |
-        `pay_refund.status`. The parent order only moves to `REFUNDED` once the
-        refund reaches `REFUND_SUCCESS`.
+        `pay_refund.status`. The parent order only moves to `REFUNDED` once
+        this refund reaches `REFUND_SUCCESS` *and* the order's settled refunds
+        together cover its total; a partial refund settles here while the
+        order stays `PAID`.
 
     ErrorResponse:
       type: object
@@ -970,12 +1037,17 @@ components:
 
     CreatePaymentRequest:
       type: object
-      required: [order_no, amount, user_id]
+      required: [order_no, amount]
       properties:
         order_no:
           type: string
           maxLength: 64
-          description: Merchant order number; must be unique.
+          description: >-
+            Merchant order number; must be unique. For `channel: wechat` the
+            service enforces the official out_trade_no window before booking:
+            6-32 characters of digits, letters and `_ - | *`; anything else is
+            answered with HTTP 400 (code 1001) instead of being booked into an
+            order the channel could never name.
         amount:
           $ref: '#/components/schemas/Amount'
         currency:
@@ -989,6 +1061,17 @@ components:
           type: string
           format: url
           description: Channel-facing callback URL; must be https, or http loopback for local testing.
+        time_expire:
+          type: string
+          description: |
+            Order expiry. RFC 3339 is the only accepted shape on this route
+            for either channel (the validator parses RFC 3339 itself; the
+            Alipay-style `yyyy-MM-dd HH:mm:ss` is refused), and the value
+            also becomes the local `expire_at` the close sweep honours.
+            Only WeChat is then offered it as the channel order's expiry;
+            Alipay uses it for the local deadline alone. The channel's
+            window is enforced before the order exists (1001). Absent means
+            the channel default.
         channel:
           type: string
           enum: [alipay, wechat]
@@ -996,6 +1079,16 @@ components:
         user_id:
           type: integer
           format: int64
+          minimum: 1
+          description: |
+            Owner of the order, stored verbatim on `pay_order.user_id`. Required
+            in practice, but not by this schema: the handler reads it from the
+            body *or* from a `user_id` request attribute an auth layer may set,
+            so the body member is what a plain API-key caller must send. A
+            request that supplies neither is answered 401 rather than booked
+            under owner 0 -- the value `GET /api/pay/orders` treats as "no owner
+            filter". Unlike `/api/qrpay/create`, which always names this field
+            in the body.
         scene_info:
           type: object
           description: Channel-specific scene payload, forwarded verbatim.
@@ -1052,11 +1145,54 @@ components:
           enum: [alipay, wechat]
         user_id:
           type: integer
+          format: int64
+          minimum: 1
+          description: Owner of the order. Must be positive; the booking stores
+            this id verbatim on `pay_order.user_id`.
         description:
           type: string
+          description: |
+            Accepted for symmetry with `/api/pay/create` and ignored here: this
+            route titles the charge with `product_name`, defaulting to "Payment".
         product_name:
           type: string
           description: Becomes the channel `subject`; defaults to "Payment".
+        currency:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+          default: CNY
+          description: |
+            WeChat only -- Alipay precreate prices in CNY whatever is sent. A
+            three-letter ISO-4217 code, upper-cased before it is offered to the
+            channel and recorded on the order, which is the value the settlement
+            notification is compared against. Anything else answers 400 before
+            anything is booked.
+        notify_url:
+          type: string
+          format: url
+          description: |
+            Where the channel posts the settlement. Empty falls back to the
+            configured default. Private, loopback and link-local hosts are
+            refused (400), the same gate `/api/pay/create` applies.
+        buyer_id:
+          type: string
+          description: Alipay only -- scopes the precreated order to a buyer.
+        time_expire:
+          type: string
+          description: |
+            WeChat only on this route -- forwarded verbatim as the native
+            order's expiry (RFC 3339, the channel's window enforced), refused
+            400 before anything is booked, and recorded as the local
+            `expire_at` the close sweep honours. The replay hash covers it:
+            the same order re-requested with a different expiry is a conflict,
+            not a replay.
+        idempotency_key:
+          type: string
+          maxLength: 128
+          description: |
+            Replays and conflicts are keyed on this, else the `X-Idempotency-Key`
+            header, else the `Idempotency-Key` header, else
+            `QR_<order_no>_<channel>`.
 
     CreateQRPaymentResponse:
       type: object
@@ -1064,7 +1200,14 @@ components:
       properties:
         code:
           type: integer
-          description: 0 on success; 500/1005 are reported in-body with HTTP 200.
+          description: |
+            0 on success. 400 (missing or mistyped parameter, an amount this
+            route cannot express, an unusable currency or `notify_url`, or a
+            reused order that cannot be offered again) arrives as HTTP 400;
+            1004 (idempotency) arrives as HTTP 404; every other failure code --
+            500 (channel or database fault), 1003 (no database client) and 1005
+            (unknown channel) -- arrives as HTTP 500, so branch on this for
+            business decisions.
         message:
           type: string
         data:
@@ -1074,8 +1217,17 @@ components:
               type: string
             qr_code:
               type: string
+              description: Alipay only -- the QR content to render.
+            code_url:
+              type: string
+              description: WeChat only -- the `weixin://` URL to render.
             out_trade_no:
               type: string
+              description: |
+                Alipay only -- the merchant order number, echoed back by the
+                channel under Alipay's own name for it. The number Alipay
+                assigns the transaction is `trade_no`, which precreate does not
+                hand out; only the notification carries it.
 
     QueryOrderResponse:
       type: object

@@ -205,6 +205,7 @@
                         "api_v3_key": "__env_var:WECHAT_PAY_API_V3_KEY__",
                         "private_key_path": "__env_var:WECHAT_PAY_PRIVATE_KEY_PATH__",
                         "platform_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CERT_PATH__",
+                        "platform_ca_cert_path": "__env_var:WECHAT_PAY_PLATFORM_CA_CERT_PATH__",
                         "cert_download_min_interval_seconds": 300,
                         "cert_refresh_interval_seconds": 43200,
                         "notify_url": "__env_var:WECHAT_PAY_NOTIFY_URL__",

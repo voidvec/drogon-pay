@@ -46,8 +46,17 @@ curl -X POST http://localhost:5566/api/pay/create \
   }'
 ```
 
-`order_no`, `amount` and `user_id` are required (`user_id` may otherwise come
-from an authenticated request attribute). Response:
+`order_no` and `amount` are required; a body missing either one, or carrying any
+field below it as the wrong JSON type (an object where a string is read), is
+answered `400` with `code: 400`. `user_id` is required too, but answered
+differently: it may come from the body or from a `user_id` request attribute —
+which only exists if a middleware in front of this plugin sets it, and nothing in
+this repository does — and it has to be a positive integer, so a call that names
+no usable owner gets `401` with `code: 401`. It has to be positive because
+`/api/pay/orders` reads `0` as "no owner filter": an order booked under `0` has no
+owner, appears only in that unfiltered listing, and no owner-scoped query can
+ever name it.
+Response:
 
 ```json
 {
@@ -66,11 +75,32 @@ from an authenticated request attribute). Response:
 The Alipay channel returns `qr_code` / `out_trade_no` / `alipay_response` in
 `data` instead of `code_url` / `prepay_id` / `wechat_response`.
 
-Note: `Idempotency-Key` is optional but recommended for retry safety. Omitting
-it makes the server derive a key from `order_no` + `user_id` + amount, which
-still dedupes but is invisible to the caller. A replay with a *changed* body is
-refused: `/api/pay/refund` answers `409`, while the two create endpoints signal
-the same collision with code `1004` over HTTP `404`.
+A failed channel call answers `1002` over HTTP 500 either way, but the attempt
+already booked for it closes (`pay_payment` → `FAIL`) only when the answer
+*proves* the channel refused — its own error envelope, or a 4xx from the channel
+itself. A timeout, a transport fault, or an answer with no `prepay_id` leaves the
+attempt in flight, because a transaction may exist behind a response an
+intermediary rewrote and the notification has to find the row it settles. The
+same rule is what `/api/qrpay/create` follows below.
+
+Note: `Idempotency-Key` (or `X-Idempotency-Key`) is optional but recommended for
+retry safety. Omitting it makes the server derive
+`payment:<order_no>:<user_id>:<sha256(amount + currency)>`, which still dedupes
+but is invisible to the caller. A replay with a *changed* body is refused:
+`/api/pay/refund` answers `409`, while the two create endpoints signal the same
+collision with code `1004` over HTTP `404`. On `/api/qrpay/create` the derived
+key is `QR_<order_no>_<channel>` unless the body or header supplies one.
+
+Both create routes also answer `1501` over HTTP `503` when this process has no
+`PayPlugin` registered at all (the null-pointer case the plugin header documents
+for static-library linking). A channel they cannot reach is a different fault and
+is reported differently: `/api/pay/create` answers `1002` and `/api/qrpay/create`
+answers `1005`, both over HTTP `500`, while the refund routes answer `1501` /
+`503` for the same condition. On the callback side the WeChat route answers that
+same `1501` / `503`, while the Alipay route answers `{"code":"FAIL"}` for both
+ways it cannot serve a notification — no verification client, and no payment
+service — neither one acknowledges, so the channel retries instead of treating a
+payment that was never booked as delivered.
 
 ## Create QR Payment
 
@@ -87,9 +117,34 @@ curl -X POST http://localhost:5566/api/qrpay/create \
   }'
 ```
 
-Unlike `/api/pay/create`, `channel` and `user_id` are mandatory here, and
-channel failures are reported **inside the body with HTTP 200** (`code: 500` or
-`code: 1005 CHANNEL_NOT_AVAILABLE`). Check `code`, not the status, on this one.
+Unlike `/api/pay/create`, `channel` and `user_id` are mandatory here (all four
+required members answer `400` when missing, mistyped, or — for `user_id` — not a
+positive int64), and `product_name` becomes the channel `subject`; `description`
+is accepted but unused on this route, since WeChat's `description` is filled from
+that subject. `currency` (three letters, upper-cased for you, `CNY` by default
+and forced to `CNY` on Alipay), `notify_url`, `buyer_id` and `idempotency_key` all
+reach the booking: `notify_url` is checked against the same SSRF gate
+`/api/pay/create` applies and then sent to WeChat — Alipay takes its callback
+address from server configuration, so the member is inert there — and `buyer_id`
+is an Alipay-only field.
+
+What each refusal means — read `code`, the HTTP status is coarser:
+
+| `code` | HTTP | Reason |
+|--------|------|--------|
+| `400` | 400 | Missing/mistyped member, a non-positive `user_id`, a `currency` that is not three letters on a WeChat booking, a private `notify_url`, or an existing order that is already settled or describes another amount, currency, channel or owner |
+| `40001` | 400 | Amount shape the channels cannot represent (the same `^\d+(\.\d{1,2})?$` check the pay route runs) |
+| `1004` | 404 | The idempotency key was taken by a *different* body, or is still in flight |
+| `1005` | 500 | Unknown or unconfigured channel |
+| `500` | 500 | The channel refused the request |
+| `1003` | 500 | Database fault (including the idempotency check itself) |
+| `1501` | 503 | No `PayPlugin` registered in this process (a channel this process has no client for is `1005` above, not this) |
+
+A channel refusal closes that attempt's `pay_payment` row (`FAIL`) and leaves the
+order alone, so the next call with the same `order_no` appends a new attempt and
+gets its own code; an outcome that cannot be proved refused — a timeout, a
+malformed answer — keeps the attempt in flight instead, because a code may well be
+live on WeChat's side.
 
 ## Query Order
 

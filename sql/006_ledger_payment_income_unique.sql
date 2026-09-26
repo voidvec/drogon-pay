@@ -1,0 +1,43 @@
+-- Defense-in-depth unique guard for income-ledger deduplication (audit round
+-- 17 hardening, same pattern as 003's refund guard).
+--
+-- A PAYMENT ledger entry records that one payment collected money, so a
+-- payment_no can own at most ONE such row. Today the only thing keeping a
+-- second income row out is the application-level CAS: the writers in
+-- CallbackService (payment notification) and PaymentService (query settle)
+-- insert only on the branch where the pay_payment status UPDATE actually hit.
+-- If that CAS gate ever regresses -- a refactor, a new settle door, a
+-- reordered callback -- the double entry would be silent: the ledger is
+-- append-only and nothing at the DB layer contradicts a second PAYMENT row for
+-- the same payment. This index makes the invariant DB-enforced: the duplicate
+-- insert fails loudly inside the settling transaction instead of booking.
+--
+-- REFUND entries are deliberately NOT constrained here: partial refunds are
+-- legitimate repeats against the same payment_no, and pay_ledger carries no
+-- refund_no column to key them by (see audit note in 001; adding one is a
+-- larger schema change than this guard needs).
+--
+-- payment_no is nullable (entry types without a payment), so the predicate
+-- excludes NULL like the FK in 004 does.
+--
+-- Idempotent: CREATE UNIQUE INDEX IF NOT EXISTS. If an existing volume
+-- already carries duplicate PAYMENT rows (it should not -- no such bug has
+-- been observed), the index creation fails the migration loudly, which is the
+-- point: fix the data before shipping the transaction aborts, migrate_db.py
+-- records no schema_migrations row, and the next run retries from scratch.
+-- To find out before the run instead of during it, this is the exact condition
+-- the index tests for:
+--
+--   SELECT payment_no, count(*) FROM pay_ledger
+--    WHERE entry_type = 'PAYMENT' AND payment_no IS NOT NULL
+--    GROUP BY payment_no HAVING count(*) > 1;
+--
+-- Note this is a plain CREATE UNIQUE INDEX, not CONCURRENTLY: migrate_db.py
+-- wraps each file in an explicit transaction, and CONCURRENTLY cannot run
+-- inside one. On a live volume the build takes a SHARE lock over pay_ledger,
+-- which blocks the append-only inserts for its duration -- so run the migration
+-- before the rollout that opens the settle doors, not while traffic is on it.
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_ledger_payment_income
+    ON pay_ledger(payment_no)
+    WHERE entry_type = 'PAYMENT' AND payment_no IS NOT NULL;

@@ -3,6 +3,7 @@
 #include "../channels/AlipayChannel.h"
 #include "../services/CallbackService.h"
 #include "../services/PaymentService.h"
+#include "PluginGuard.h"
 #include <algorithm>
 #include <drogon/HttpAppFramework.h>
 #include <drogon/orm/DbClient.h>
@@ -22,11 +23,11 @@ void WechatCallbackController::notify(
     std::string nonce = std::string(req->getHeader("Wechatpay-Nonce"));
     std::string serialNo = std::string(req->getHeader("Wechatpay-Serial"));
 
-    // Get CallbackService from Plugin
-    auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto callbackService = plugin->callbackService();
+    // The service is resolved *after* the body is validated below: a malformed
+    // notification has to be refused for its own reason whatever the process
+    // looks like, and answering it is not the service's job.
+    // CallbackService comes from Plugin
 
-    // Route to appropriate callback handler based on event_type
     // Parse body to determine callback type
     Json::Value bodyJson;
     std::string eventType;
@@ -63,6 +64,24 @@ void WechatCallbackController::notify(
         return;
     }
 
+    if (!bodyJson["event_type"].isString())
+    {
+        // `asString()` on a member of another type throws, and an exception
+        // escaping a handler is rethrown out of the event loop by trantor, which
+        // stops the loop and unwinds `app().run()`. This endpoint is unsigned
+        // until the service verifies the headers, so the body is attacker-chosen:
+        // `{"event_type":{}` POSTed to the notify URL would have taken the whole
+        // gateway down with it.
+        LOG_WARN << "[WECHAT_CALLBACK] event_type is not a string";
+        Json::Value response;
+        response["code"] = 40003;
+        response["message"] = "Missing event_type";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+        resp->setStatusCode(drogon::k400BadRequest);
+        callback(resp);
+        return;
+    }
+
     eventType = bodyJson["event_type"].asString();
 
     // Reject unknown event types that are neither TRANSACTION nor REFUND.
@@ -75,6 +94,17 @@ void WechatCallbackController::notify(
         auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
         resp->setStatusCode(drogon::k400BadRequest);
         callback(resp);
+        return;
+    }
+
+    // Get CallbackService from Plugin. The body is now known to be one this
+    // endpoint can route, so resolve the service it needs -- and answer the
+    // missing-plugin fault rather than calling a member on a null pointer.
+    auto plugin = drogon::app().getPlugin<PayPlugin>();
+    auto callbackService = plugin ? plugin->callbackService() : nullptr;
+    if (!callbackService)
+    {
+        respondPluginUnavailable(callback, "Callback service");
         return;
     }
 
@@ -155,11 +185,16 @@ void AlipayCallbackController::notify(
     // excludes 'sign', but we need the value here).
     const std::string sign = params.count("sign") ? params["sign"] : std::string{};
 
-    // Get the Alipay client. If it is not configured we MUST reject the callback
-    // rather than processing it unverified - accepting an unverified callback
-    // would let any party forge a payment-success notification (P0-1).
+    // Get the Alipay client. If it is not configured -- or the plugin that owns
+    // it is not in this process at all, which is the same fault from the
+    // verifier's point of view -- we MUST reject the callback rather than
+    // processing it unverified - accepting an unverified callback would let any
+    // party forge a payment-success notification (P0-1). `plugin` is checked here
+    // rather than relied on further down; the service lookup below guards itself
+    // too, because a verification path must not answer with an access violation
+    // on a state this project's own header documents as possible.
     auto plugin = drogon::app().getPlugin<PayPlugin>();
-    auto alipayClient = plugin->alipayClient();
+    auto alipayClient = plugin ? plugin->alipayClient() : nullptr;
     if (!alipayClient)
     {
         LOG_ERROR << "[ALIPAY_CALLBACK] Alipay client not configured, rejecting callback";
@@ -214,6 +249,25 @@ void AlipayCallbackController::notify(
     LOG_DEBUG << "[ALIPAY_CALLBACK] out_trade_no=" << outTradeNo << " trade_no=" << tradeNo
               << " trade_status=" << tradeStatus << " total_amount=" << totalAmount;
 
+    // Merchant-identity re-check (Alipay notification mandate). The signature
+    // already binds app_id, but a notification carrying a foreign app_id means
+    // a mis-configured gateway or a cross-app replay and must not advance our
+    // orders. Only enforced when we know our own app_id.
+    const std::string expectedAppId = alipayClient->getAppId();
+    if (!expectedAppId.empty() && appId != expectedAppId)
+    {
+        LOG_ERROR << "[ALIPAY_CALLBACK] app_id mismatch, rejecting callback. expected="
+                  << expectedAppId << " got=" << appId;
+        Json::Value response;
+        response["code"] = "FAIL";
+        response["message"] = "app_id mismatch";
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setContentTypeString("application/json");
+        resp->addHeader("Content-Type", "application/json; charset=utf-8");
+        callback(resp);
+        return;
+    }
+
     // Build a JSON result object in the shape syncOrderStatusFromAlipay expects.
     Json::Value alipayResult;
     alipayResult["code"] = "10000";  // Alipay success response code
@@ -228,11 +282,46 @@ void AlipayCallbackController::notify(
     alipayResult["notify_type"] = notifyType;
     alipayResult["notify_id"] = notifyId;
 
-    auto paymentService = plugin->paymentService();
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        // A verified notification is about to be acknowledged, and this is the
+        // one process state in which it cannot be booked. Answer the same refusal
+        // the unconfigured-client branch gives: never an acknowledgement here, so
+        // Alipay redelivers instead of treating the payment as delivered.
+        LOG_ERROR << "[ALIPAY_CALLBACK] Payment service unavailable: no PayPlugin registered in "
+                     "this process, rejecting callback";
+        Json::Value response;
+        response["code"] = "FAIL";
+        response["message"] = "Payment service not available in this process";
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setContentTypeString("application/json");
+        resp->addHeader("Content-Type", "application/json; charset=utf-8");
+        callback(resp);
+        return;
+    }
 
     // Call syncOrderStatusFromAlipay to update the database.
     paymentService->syncOrderStatusFromAlipay(
       outTradeNo, alipayResult, [callback, outTradeNo, tradeStatus](const std::string &status) {
+          // An empty status is this service's signal that the order was refused
+          // or not advanced (amount mismatch, DB failure). Reporting success
+          // would tell Alipay the notification was processed, so the refusal
+          // would never surface again on a retry.
+          if (status.empty())
+          {
+              LOG_ERROR << "[AlipayCallback] Order sync REJECTED for " << outTradeNo
+                        << ", trade_status=" << tradeStatus;
+              Json::Value rejected;
+              rejected["code"] = "FAIL";
+              rejected["message"] = "order sync rejected";
+              auto rejResp = HttpResponse::newHttpJsonResponse(rejected);
+              rejResp->setContentTypeString("application/json");
+              rejResp->addHeader("Content-Type", "application/json; charset=utf-8");
+              callback(rejResp);
+              return;
+          }
+
           LOG_DEBUG << "[ALIPAY_CALLBACK] Sync completed for order " << outTradeNo
                     << " status=" << status;
 

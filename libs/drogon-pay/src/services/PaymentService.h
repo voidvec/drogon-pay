@@ -41,7 +41,7 @@ struct CreatePaymentRequest
     std::string currency;
     std::string description;
     std::string notifyUrl;
-    int64_t userId;
+    int64_t userId = 0;
     Json::Value sceneInfo;
     std::string channel;     // Payment channel: "alipay" or "wechat"
     std::string timeExpire;  // Order expiration time (RFC 3339 format)

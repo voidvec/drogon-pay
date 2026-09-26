@@ -41,6 +41,11 @@ int main()
     }
     Json::Value processedConfig = ConfigLoader::loadConfig(config);
 
+    // 3b. Warn about enabled channels that cannot work (non-fatal, so a
+    // partial rollout still boots) instead of leaving the gap to surface as
+    // rejected callbacks.
+    StartupValidator::validateChannelReadiness(processedConfig);
+
     // 4. Load processed config into Drogon
     drogon::app().loadConfigJson(std::move(processedConfig));
     pay::security::setupCorsAndSecurityHeaders();

@@ -113,5 +113,5 @@ class PayPlugin : public drogon::Plugin<PayPlugin>
     void registerBuiltinChannels(const Json::Value &channelsConfig);
     std::map<std::string, drogon_pay::PaymentChannelPtr> channelMap() const;
     void registerHttpHandlers();
-    void startCertRefreshTimer(trantor::EventLoop *loop);
+    void startCertRefreshTimer(trantor::EventLoop *loop, double intervalSeconds);
 };

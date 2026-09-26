@@ -1,11 +1,72 @@
 #define DROGON_TEST_MAIN
 #include <drogon/drogon_test.h>
 #include <drogon/drogon.h>
+#include <drogon_pay/ChannelRegistry.h>
+#include <stdexcept>
+#include "StubChannel.h"
 #include "utils/ConfigLoader.h"
 #include "utils/SecurityHeaders.h"
 #include "TestConfigHelper.h"
 #include <fstream>
 #include <json/json.h>
+
+namespace
+{
+using pay::test_util::StubChannel;
+
+/// Host-side channel factories. PayPlugin consumes them while it assembles, so
+/// registration has to happen before the app starts -- the contract
+/// docs/development/plugin_integration.md spells out as "register the factory
+/// before app().run()". The test binary is a host, so this is the only place
+/// that assembly step can be exercised end to end; HostChannelAssemblyTest
+/// reads the results back off the plugin.
+void registerHostChannelFactories()
+{
+    // Enabled by the config block enableHostChannel() adds below.
+    drogon_pay::ChannelRegistry::registerFactory(
+      pay::test_util::kHostChannelName,
+      [](const Json::Value &config) { return StubChannel::fromConfig(config); }
+    );
+    // Deliberately named after a built-in: the assembly loop has to skip it, so
+    // the real WeChat channel survives. It answers instead of throwing so the
+    // skip is what the assertion detects -- a caught throw would look the same
+    // from the outside as a guarded one.
+    drogon_pay::ChannelRegistry::registerFactory(
+      "wechat", [](const Json::Value &config) -> drogon_pay::PaymentChannelPtr {
+          return StubChannel::fromConfig(config);
+      }
+    );
+    // A host factory that fails must be logged and skipped, not fatal.
+    drogon_pay::ChannelRegistry::registerFactory(
+      pay::test_util::kBrokenHostChannelName,
+      [](const Json::Value &) -> drogon_pay::PaymentChannelPtr {
+          throw std::runtime_error("host factory fails on purpose");
+      }
+    );
+}
+
+/// Adds an enabled `channels.<name>` block to the PayPlugin entry of the loaded
+/// config. Done here rather than in examples/pay-server/config.json because a
+/// fake channel belongs to the test host, not to the example anyone can copy.
+void enableHostChannel(Json::Value &config, const std::string &name, const std::string &marker)
+{
+    for (auto &plugin : config["plugins"])
+    {
+        if (plugin.get("name", "").asString() != "PayPlugin")
+        {
+            continue;
+        }
+        Json::Value block;
+        block["enabled"] = true;
+        // Present so StartupValidator's "enabled but app_id is not set" warning
+        // stays a signal about real channels instead of noise about this fixture.
+        block["app_id"] = name;
+        block["name"] = name;
+        block["marker"] = marker;
+        plugin["config"]["channels"][name] = block;
+    }
+}
+}  // namespace
 
 int main(int argc, char **argv)
 {
@@ -13,6 +74,8 @@ int main(int argc, char **argv)
 
     // Load .env and process config.json placeholders (same as main.cc)
     ConfigLoader::loadEnvFile(".env");
+
+    registerHostChannelFactories();
 
     std::ifstream configFile("./config.json");
     if (configFile.is_open())
@@ -44,6 +107,12 @@ int main(int argc, char **argv)
                 processedConfig["custom_config"]["pay"]["metrics_base_url"] =
                   pay::test_util::testBaseUrl() + "/metrics/base";
             }
+            enableHostChannel(
+              processedConfig, pay::test_util::kHostChannelName, pay::test_util::kHostChannelMarker
+            );
+            enableHostChannel(
+              processedConfig, pay::test_util::kBrokenHostChannelName, "never built"
+            );
             app().loadConfigJson(std::move(processedConfig));
         }
     }

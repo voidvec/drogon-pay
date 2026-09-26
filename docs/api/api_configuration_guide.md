@@ -54,12 +54,20 @@ PayPlugin需要**两类**配置：
 |--------|------|----------|--------|
 | **app_id** | 微信公众号/小程序AppID | 微信公众平台 | `wx8888888888888888` |
 | **mch_id** | 微信支付商户号 | 微信商户平台 | `1234567890` |
-| **serial_no** | 商户API证书序列号 | 证书文件或商户平台 | `ABCDEFGHIJKLMNOPQRST` |
-| **api_v3_key** | APIv3密钥（32字节） | 商户平台设置 | `your32characterbase64encodedkey==` |
+| **serial_no** | **商户API证书**序列号，只用于出站请求的 `Authorization` 签名；回调验签不使用它 | 证书文件或商户平台 | `ABCDEFGHIJKLMNOPQRST` |
+| **api_v3_key** | APIv3密钥（必须正好32字节，否则回调解密失败） | 商户平台设置 | `your32characterbase64encodedkey==` |
 | **private_key_path** | 商户私钥路径 | 下载证书 | `./certs/apiclient_key.pem` |
-| **platform_cert_path** | 平台证书路径 | 自动下载或手动 | `./certs/wechatpay_platform.pem` |
+| **platform_cert_path** | 平台证书静态兜底路径（可选）：仅当证书缓存未命中、且该证书自身的序列号与通知头 `Wechatpay-Serial` 一致时才使用 | 自动下载或手动 | `./certs/wechatpay_platform.pem` |
+| **platform_ca_cert_path** | 平台证书校验的根证书（CA）bundle（可选）：配置后每张下载到的平台证书必须先通过链路校验才会入缓存 | 微信支付根证书 | `./certs/wechatpay_root_ca.pem` |
+| **cert_download_min_interval_seconds** | 触发 `/v3/certificates` 下载的最小间隔（秒），默认 300 | - | `300` |
 | **api_base** | 微信支付API地址 | 固定值 | `https://api.mch.weixin.qq.com` |
-| **timeout_ms** | API超时时间 | 可选 | `5000` |
+| **timeout_ms** | 每一个出站请求的超时时间（毫秒，填 0 表示不限时），默认 5000 | 可选 | `5000` |
+
+**平台证书与轮换**：回调签名用的是通知头 `Wechatpay-Serial` 指名的**平台证书**，与商户证书（`serial_no`）不是一回事。
+通道在进程启动时通过 `/v3/certificates` 预热，并拒绝任何解析失败、不在有效期内、序列号与所登记的号码不符、
+或未通过 `platform_ca_cert_path` 链路校验的证书。收到缓存里没有的序列号时，说明微信已完成轮换：通道会触发一次
+受节流保护的下载，并把该条通知按失败返回，微信按自身策略重投时新证书已在缓存中。除此之外，`PayPlugin` 还有一个定时刷新，
+周期由 `cert_refresh_interval_seconds` 决定（默认 43200 秒，小于 300 会告警并回落到默认值），所以空闲进程也不会一直抱着旧缓存。
 
 ### 如何获取微信支付配置
 
