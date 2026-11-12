@@ -506,10 +506,22 @@ void CallbackService::handlePaymentCallback(
         return;
     }
 
-    // Validate appid and mchid
+    // Validate appid and mchid. Both are officially required in the V3
+    // notification resource: an absent field is refused, not skipped -- the old
+    // "empty means skip the comparison" rule accepted an identity-less
+    // notification as proven. The null-client guard on the comparison is kept
+    // (both handlers already return early when wechatClient_ is null).
     const std::string appId = plainJson.get("appid", "").asString();
     const std::string mchId = plainJson.get("mchid", "").asString();
-    if (!appId.empty() && wechatClient_ && appId != wechatClient_->getAppId())
+    if (appId.empty())
+    {
+        Json::Value error;
+        error["code"] = "FAIL";
+        error["message"] = "missing appid";
+        respond(error, "missing appid");
+        return;
+    }
+    if (wechatClient_ && appId != wechatClient_->getAppId())
     {
         Json::Value error;
         error["code"] = "FAIL";
@@ -517,7 +529,15 @@ void CallbackService::handlePaymentCallback(
         respond(error, "appid mismatch");
         return;
     }
-    if (!mchId.empty() && wechatClient_ && mchId != wechatClient_->getMchId())
+    if (mchId.empty())
+    {
+        Json::Value error;
+        error["code"] = "FAIL";
+        error["message"] = "missing mchid";
+        respond(error, "missing mchid");
+        return;
+    }
+    if (wechatClient_ && mchId != wechatClient_->getMchId())
     {
         Json::Value error;
         error["code"] = "FAIL";
@@ -2491,10 +2511,22 @@ void CallbackService::handleRefundCallback(
         return;
     }
 
-    // Validate appid and mchid
+    // Validate appid and mchid. Both are officially required in the V3
+    // notification resource: an absent field is refused, not skipped -- the old
+    // "empty means skip the comparison" rule accepted an identity-less
+    // notification as proven. The null-client guard on the comparison is kept
+    // (both handlers already return early when wechatClient_ is null).
     const std::string appId = plainJson.get("appid", "").asString();
     const std::string mchId = plainJson.get("mchid", "").asString();
-    if (!appId.empty() && wechatClient_ && appId != wechatClient_->getAppId())
+    if (appId.empty())
+    {
+        Json::Value error;
+        error["code"] = "FAIL";
+        error["message"] = "missing appid";
+        respond(error, "missing appid");
+        return;
+    }
+    if (wechatClient_ && appId != wechatClient_->getAppId())
     {
         Json::Value error;
         error["code"] = "FAIL";
@@ -2502,7 +2534,15 @@ void CallbackService::handleRefundCallback(
         respond(error, "appid mismatch");
         return;
     }
-    if (!mchId.empty() && wechatClient_ && mchId != wechatClient_->getMchId())
+    if (mchId.empty())
+    {
+        Json::Value error;
+        error["code"] = "FAIL";
+        error["message"] = "missing mchid";
+        respond(error, "missing mchid");
+        return;
+    }
+    if (wechatClient_ && mchId != wechatClient_->getMchId())
     {
         Json::Value error;
         error["code"] = "FAIL";
