@@ -4402,6 +4402,13 @@ DROGON_TEST(PayPlugin_WechatCallback_InvalidTradeState)
     const auto result = resultFuture.get();
     const auto error = errorFuture.get();
     CHECK(error);
+    // Pin the whitelist specifically: an unknown trade_state must be rejected as
+    // "invalid trade_state", not merely fail later (e.g. order-not-found) for some
+    // other reason. Without this message check, deleting the whitelist entirely
+    // would still set `error` and the test would pass -- so it is the negative
+    // control for the PAYERROR whitelist addition (F7).
+    CHECK(result["code"].asString() == "FAIL");
+    CHECK(result["message"].asString() == "invalid trade_state");
 
     EVP_PKEY_free(pkey);
     std::error_code ec;
@@ -8946,6 +8953,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
     CHECK(r1.result["code"].asString() == "FAIL");
     CHECK(r1.result["message"].asString() == "missing appid");
     CHECK(paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING");
+    CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAYING");
 
     // Negative: mchid absent (appid present).
     Json::Value noMchId = base;
@@ -8955,6 +8963,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
     CHECK(r2.result["code"].asString() == "FAIL");
     CHECK(r2.result["message"].asString() == "missing mchid");
     CHECK(paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING");
+    CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAYING");
 
     // Positive control: both present and correct settles the payment.
     Json::Value full = base;
@@ -9200,6 +9209,7 @@ DROGON_TEST(PayPlugin_WechatRefundCallback_RequiresAppIdAndMchId)
     CHECK(r1.result["code"].asString() == "FAIL");
     CHECK(r1.result["message"].asString() == "missing appid");
     CHECK(refundMapper.findByPrimaryKey(refund.getValueOfId()).getValueOfStatus() == "REFUNDING");
+    CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAID");
 
     // Negative: mchid absent.
     Json::Value noMchId = base;
@@ -9209,6 +9219,7 @@ DROGON_TEST(PayPlugin_WechatRefundCallback_RequiresAppIdAndMchId)
     CHECK(r2.result["code"].asString() == "FAIL");
     CHECK(r2.result["message"].asString() == "missing mchid");
     CHECK(refundMapper.findByPrimaryKey(refund.getValueOfId()).getValueOfStatus() == "REFUNDING");
+    CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAID");
 
     client->execSqlSync("DELETE FROM pay_refund WHERE refund_no = $1", refundNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", paymentNo);
