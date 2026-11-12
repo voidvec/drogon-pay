@@ -753,6 +753,10 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot)
     reqJson["order_no"] = request.orderNo;
     reqJson["amount"] = request.amount;
     reqJson["reason"] = request.reason;
+    reqJson["refund_no"] = request.refundNo;
+    reqJson["payment_no"] = request.paymentNo;
+    reqJson["funds_account"] = request.fundsAccount;
+    reqJson["notify_url"] = request.notifyUrl;
     std::string requestStr = pay::utils::toJsonString(reqJson);
     std::string requestHash = drogon::utils::getSha256(requestStr);
 
@@ -4287,6 +4291,80 @@ DROGON_TEST(PayPlugin_QueryRefund_WechatOrderQueriesWechat)
     CHECK(response["data"].isMember("wechat_response"));
     CHECK(response["data"]["status"].asString() == "REFUND_SUCCESS");
 
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F4: the idempotency hash must bind the full refund identity. Two refunds of
+// the same amount on the same order are different requests when their refund_no
+// differs, so reusing one idempotency key for both must be a conflict (1409),
+// not a replay of the first attempt's snapshot. The old hash covered only
+// order/amount/reason, so a second refund_no replayed the first. The identical
+// request replayed in between is the positive control: same identity still
+// replays, so the 1409 is specifically about refund_no, not a key that always
+// fails. No wechat client is registered, so each processed attempt answers 1501
+// with the refund_no it booked -- a soft error that still carries data and is
+// therefore snapshotted.
+DROGON_TEST(PayPlugin_Refund_IdempotencyHashBindsRefundNo)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+      "idempotency_key VARCHAR(128) PRIMARY KEY,"
+      "request_hash VARCHAR(64) NOT NULL,"
+      "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    const auto fixture = seedRefundCoverageOrder(client, "20.00", "");
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    auto svc = plugin.refundService();
+    const std::string key = "refund_idem_" + drogon::utils::getUuid();
+    const std::string refundA = "refund_a_" + drogon::utils::getUuid();
+    const std::string refundB = "refund_b_" + drogon::utils::getUuid();
+
+    auto doRefund = [&](const std::string &refundNo) -> Json::Value {
+        CreateRefundRequest req;
+        req.orderNo = fixture.orderNo;
+        req.paymentNo = fixture.paymentNo;
+        req.amount = "10.00";
+        req.reason = "same reason";
+        req.refundNo = refundNo;
+        std::promise<Json::Value> p;
+        svc->createRefund(
+          req, key, [&p](const Json::Value &v, const std::error_code &) { p.set_value(v); }
+        );
+        auto f = p.get_future();
+        if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+        {
+            return Json::Value(Json::objectValue);
+        }
+        return f.get();
+    };
+
+    const auto first = doRefund(refundA);
+    CHECK(first["code"].asInt() == 1501);
+    CHECK(first["data"]["refund_no"].asString() == refundA);
+
+    // Positive control: the identical request replays the snapshot.
+    const auto replay = doRefund(refundA);
+    CHECK(replay["code"].asInt() == 1501);
+    CHECK(replay["data"]["refund_no"].asString() == refundA);
+
+    // Different refund_no under the same key is a different request: conflict,
+    // not a replay of refundA.
+    const auto conflict = doRefund(refundB);
+    CHECK(conflict["code"].asInt() == 1409);
+
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
