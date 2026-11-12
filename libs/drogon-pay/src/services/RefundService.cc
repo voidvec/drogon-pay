@@ -1478,6 +1478,48 @@ void RefundService::invokeRefundChannel(
                   return;
               }
 
+              // F5: the answer must be evidence about THIS refund. The V3
+              // create-refund response echoes out_refund_no / out_trade_no and
+              // carries amount.refund; an echo naming a different refund, or an
+              // amount that disagrees with the request, is not proof this money
+              // moved. Absent identity echoes are tolerated (the channel may
+              // omit them), but a missing or unequal amount fails closed -- the
+              // same discipline as the query-sync and notification gates. Leave
+              // the row open (REFUNDING) for the reconcile sweep to verify
+              // rather than booking a refund WeChat never accepted for us.
+              const std::string echoRefundNo = result.get("out_refund_no", "").asString();
+              const std::string echoOrderNo = result.get("out_trade_no", "").asString();
+              const int64_t echoRefundFen = result["amount"].get("refund", 0).asInt64();
+              if (
+                (!echoRefundNo.empty() && echoRefundNo != refundNo) ||
+                (!echoOrderNo.empty() && echoOrderNo != orderNo) ||
+                !pay::utils::amountEqualsFen(amount, echoRefundFen)
+              )
+              {
+                  const std::string errorMessage =
+                    "WeChat refund response identity/amount mismatch";
+                  LOG_ERROR << "[RefundService] " << errorMessage << " for " << refundNo
+                            << " (echo refund=" << echoRefundNo << ", order=" << echoOrderNo
+                            << ", fen=" << echoRefundFen << ")";
+                  Json::Value errJson;
+                  errJson["error"] = errorMessage;
+                  if (*sharedCb)
+                  {
+                      Json::Value response;
+                      response["code"] = 1502;
+                      response["message"] = errorMessage;
+                      response["data"]["refund_no"] = refundNo;
+                      response["data"]["order_no"] = orderNo;
+                      response["data"]["payment_no"] = paymentNo;
+                      response["data"]["amount"] = amount;
+                      response["data"]["status"] = "REFUNDING";
+                      response["data"]["error"] = errorMessage;
+                      response["data"]["wechat_response"] = errJson;
+                      (*sharedCb)(response, std::error_code(1502, std::system_category()));
+                  }
+                  return;
+              }
+
               // V3 files an accepted refund under SUCCESS or PROCESSING and
               // answers CLOSED / ABNORMAL to say the money did not move.
               // Defaulting an unrecognised body to REFUNDING recorded a refund

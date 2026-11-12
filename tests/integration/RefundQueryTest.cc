@@ -284,9 +284,23 @@ RefundSettlement settleRefund(
   const std::string &channelError = std::string()
 )
 {
+    // A real WeChat V3 refund answer echoes the request identity and carries
+    // amount.refund. The create-path settlement gate (F5) refuses an answer
+    // that cannot prove it is about this refund -- a missing amount fails
+    // closed, same discipline as the query-sync gate -- so the stub must speak
+    // that shape. refundNo is fixed here (not generated inside createRefund)
+    // so the echo can name it.
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    int64_t refundFen = 0;
+    (void)pay::utils::parseAmountToFen(refundAmount, refundFen);
+
     Json::Value answer;
     answer["status"] = "SUCCESS";
     answer["refund_id"] = "rf_" + drogon::utils::getUuid();
+    answer["out_refund_no"] = refundNo;
+    answer["out_trade_no"] = fixture.orderNo;
+    answer["amount"]["refund"] = static_cast<Json::Int64>(refundFen);
+    answer["amount"]["currency"] = "CNY";
 
     // With a channel error the service never reads `answer`, so the same stub
     // serves both halves: an empty error is the success shape, a non-empty one
@@ -299,6 +313,7 @@ RefundSettlement settleRefund(
     request.orderNo = fixture.orderNo;
     request.paymentNo = fixture.paymentNo;
     request.amount = refundAmount;
+    request.refundNo = refundNo;
 
     std::promise<Json::Value> resultPromise;
     std::promise<std::error_code> errorPromise;
@@ -4369,4 +4384,96 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyHashBindsRefundNo)
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F5: the create-refund answer must be evidence about THIS refund. A SUCCESS
+// body whose out_refund_no echo names a different refund, or whose amount.refund
+// disagrees with the requested amount, is not proof this refund settled, so it
+// must not book REFUND_SUCCESS -- it stays REFUNDING for the reconcile sweep to
+// verify (the same "uncertain never books" discipline as the query-sync and
+// notification gates). The matching answer is the positive control: identical
+// shape with the correct echo and amount does settle, so each refusal is about
+// the specific mismatch, not about every SUCCESS answer.
+DROGON_TEST(PayPlugin_CreateRefund_EchoMismatchNotBooked)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    struct Outcome
+    {
+        std::string responseStatus;
+        std::string rowStatus;
+    };
+
+    // Books one refund against a fresh order with the given channel answer and
+    // reports the response status plus the persisted row status. out_trade_no
+    // is pinned to the fixture's order so the echo arm under test is isolated
+    // to out_refund_no / amount. Each call owns its order and refund, so the
+    // negatives and the control never interact.
+    auto runRefund = [&](Json::Value answer, const std::string &refundNo) -> Outcome {
+        const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+        answer["out_trade_no"] = fixture.orderNo;
+        auto stub = std::make_shared<RefundStubChannel>(answer);
+        PayPlugin plugin;
+        plugin.setTestChannels({{"wechat", stub}}, client);
+
+        CreateRefundRequest req;
+        req.orderNo = fixture.orderNo;
+        req.paymentNo = fixture.paymentNo;
+        req.amount = "10.00";
+        req.refundNo = refundNo;
+        std::promise<Json::Value> p;
+        plugin.refundService()->createRefund(
+          req, "", [&p](const Json::Value &v, const std::error_code &) { p.set_value(v); }
+        );
+        auto f = p.get_future();
+        Outcome out;
+        if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+        {
+            return out;  // empty statuses; the CHECKs below fail loudly
+        }
+        out.responseStatus = f.get()["data"]["status"].asString();
+        const auto rows =
+          client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+        out.rowStatus = rows.empty() ? std::string() : rows.front()["status"].as<std::string>();
+
+        client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+        client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+        client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+        client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+        return out;
+    };
+
+    Json::Value success;
+    success["status"] = "SUCCESS";
+    success["refund_id"] = "rf_x";
+    success["amount"]["refund"] = 1000;
+    success["amount"]["currency"] = "CNY";
+
+    // Negative 1: well-formed SUCCESS, but out_refund_no is someone else's.
+    const std::string echoRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value wrongEcho = success;
+    wrongEcho["out_refund_no"] = "someone_elses_refund";
+    const auto rejectedEcho = runRefund(wrongEcho, echoRefundNo);
+    CHECK(rejectedEcho.responseStatus != "REFUND_SUCCESS");
+    CHECK(rejectedEcho.rowStatus != "REFUND_SUCCESS");
+
+    // Negative 2: correct identity, but amount.refund (1 fen) is not the
+    // requested 10.00 (1000 fen).
+    const std::string amountRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value wrongAmount = success;
+    wrongAmount["out_refund_no"] = amountRefundNo;
+    wrongAmount["amount"]["refund"] = 1;
+    const auto rejectedAmount = runRefund(wrongAmount, amountRefundNo);
+    CHECK(rejectedAmount.responseStatus != "REFUND_SUCCESS");
+    CHECK(rejectedAmount.rowStatus != "REFUND_SUCCESS");
+
+    // Positive control: correct identity and amount settles REFUND_SUCCESS.
+    const std::string okRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value matching = success;
+    matching["out_refund_no"] = okRefundNo;
+    const auto settled = runRefund(matching, okRefundNo);
+    CHECK(settled.responseStatus == "REFUND_SUCCESS");
+    CHECK(settled.rowStatus == "REFUND_SUCCESS");
 }
