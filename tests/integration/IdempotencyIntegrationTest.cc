@@ -707,3 +707,164 @@ DROGON_TEST(PayIdempotency_ClearReservationReleasesKey)
 
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
 }
+
+DROGON_TEST(PayIdempotency_ExpiredReservationReclaimed)
+{
+    // F10: a retry that lands on an *expired* reservation must reclaim it
+    // atomically (Started), not fall through to the TTL-filtered findBy, find
+    // nothing, and report a permanent "key disappeared" Error until the purge
+    // sweep runs. The ON CONFLICT ... DO UPDATE ... WHERE expire_at < NOW()
+    // clause resets hash + snapshot + TTL in the same statement.
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+      "idempotency_key VARCHAR(128) PRIMARY KEY,"
+      "request_hash VARCHAR(64) NOT NULL,"
+      "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    using PayIdempotency = drogon_model::pay_test::PayIdempotency;
+    drogon::orm::Mapper<PayIdempotency> mapper(client);
+
+    const std::string key = "exp_" + drogon::utils::getUuid();
+    // Seed a reservation that expired a day ago, with a stale hash and no
+    // snapshot — exactly the row a failed-then-abandoned operation leaves.
+    client->execSqlSync(
+      "INSERT INTO pay_idempotency (idempotency_key, request_hash, "
+      "response_snapshot, expire_at) VALUES ($1, 'old_hash', NULL, "
+      "NOW() - INTERVAL '1 day')",
+      key
+    );
+
+    IdempotencyService svc(client, nullptr, 604800);
+    Json::Value req;
+    req["amount"] = "1.00";
+
+    auto check = [&](const std::string &k, const std::string &h) {
+        auto p = std::make_shared<std::promise<IdempotencyService::CheckResult>>();
+        auto f = p->get_future();
+        svc.checkAndSetStatus(k, h, req, [p](const IdempotencyService::CheckResult &r) {
+            p->set_value(r);
+        });
+        IdempotencyService::CheckResult r;
+        if (!pay::test_util::tryFutureGet(f, r, std::chrono::seconds(5)))
+        {
+            FAIL("check() timed out waiting for checkAndSetStatus callback");
+        }
+        return r;
+    };
+
+    // The expired row is reclaimed: a fresh reservation, not an Error.
+    CHECK(check(key, "new_hash").status == IdempotencyService::CheckStatus::Started);
+
+    // Verify the row was actually reset (hash swapped, snapshot cleared, TTL
+    // pushed into the future), not merely reported as Started.
+    const auto fetched = mapper.findByPrimaryKey(key);
+    CHECK(fetched.getValueOfRequestHash() == "new_hash");
+    CHECK(fetched.getResponseSnapshot() == nullptr);
+    CHECK(fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
+          trantor::Date::now().microSecondsSinceEpoch());
+
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
+}
+
+DROGON_TEST(PayIdempotency_LiveReservationNotReclaimed)
+{
+    // F10 guard direction (positive controls): the reclaim WHERE clause must
+    // exclude still-live reservations. A live row (expire_at in the future) and
+    // a never-expire row (expire_at NULL) must NOT be reclaimed by a retry with
+    // a different hash — they fall through to findBy and report Conflict, with
+    // the stored hash and expiry left untouched. Without the WHERE guard the
+    // DO UPDATE would clobber live reservations and break idempotency.
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+      "idempotency_key VARCHAR(128) PRIMARY KEY,"
+      "request_hash VARCHAR(64) NOT NULL,"
+      "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    using PayIdempotency = drogon_model::pay_test::PayIdempotency;
+    drogon::orm::Mapper<PayIdempotency> mapper(client);
+
+    IdempotencyService svc(client, nullptr, 604800);
+    Json::Value req;
+    req["amount"] = "1.00";
+
+    auto check = [&](const std::string &k, const std::string &h) {
+        auto p = std::make_shared<std::promise<IdempotencyService::CheckResult>>();
+        auto f = p->get_future();
+        svc.checkAndSetStatus(k, h, req, [p](const IdempotencyService::CheckResult &r) {
+            p->set_value(r);
+        });
+        IdempotencyService::CheckResult r;
+        if (!pay::test_util::tryFutureGet(f, r, std::chrono::seconds(5)))
+        {
+            FAIL("check() timed out waiting for checkAndSetStatus callback");
+        }
+        return r;
+    };
+
+    // Seeds a row with the given expire_at SQL, attempts a different-hash
+    // retry, and asserts Conflict + unchanged storage. expireSql is a literal
+    // chosen by this test, not external input.
+    auto assertNotReclaimed = [&](const std::string &expireSql, bool expectNullExpiry) {
+        const std::string key = "live_" + drogon::utils::getUuid();
+        client->execSqlSync(
+          "INSERT INTO pay_idempotency (idempotency_key, request_hash, "
+          "response_snapshot, expire_at) VALUES ($1, 'old_hash', NULL, " + expireSql + ")",
+          key
+        );
+
+        CHECK(check(key, "new_hash").status == IdempotencyService::CheckStatus::Conflict);
+
+        const auto fetched = mapper.findByPrimaryKey(key);
+        CHECK(fetched.getValueOfRequestHash() == "old_hash");
+        if (expectNullExpiry)
+        {
+            CHECK(fetched.getExpireAt() == nullptr);
+        }
+        else
+        {
+            CHECK(fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
+                  trantor::Date::now().microSecondsSinceEpoch());
+        }
+
+        client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
+    };
+
+    assertNotReclaimed("NOW() + INTERVAL '1 day'", false);  // live reservation
+    assertNotReclaimed("NULL", true);                       // never-expire reservation
+}
