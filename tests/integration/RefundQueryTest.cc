@@ -3963,3 +3963,169 @@ DROGON_TEST(PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail)
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
 }
+
+// F9: a terminal refund row must survive a query-sync answer that claims a
+// different outcome. The early REFUND_SUCCESS check only guards that one
+// status, so REFUND_FAIL reaches the transaction: the old unconditional
+// full-row update overwrote it with the answer's status and booked a REFUND
+// ledger entry (pay_ledger has no unique index on REFUND, sql/006). The CAS
+// guard (status IN REFUND_INIT/REFUNDING) makes the write land on zero rows,
+// so neither the status nor the ledger nor the order moves. Deterministic:
+// the terminal state is seeded before the sync, no interleaving required.
+DROGON_TEST(PayPlugin_RefundSync_TerminalNotOverwritten)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUND_FAIL");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = refundNo;
+    answer["refund_id"] = "rf_terminal";
+    answer["amount"]["refund"] = 1000;
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUND_FAIL");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+    const auto ledger = client->execSqlSync(
+      "SELECT COUNT(*) c FROM pay_ledger WHERE order_no = $1 AND entry_type = 'REFUND'",
+      fixture.orderNo
+    );
+    CHECK(ledger.front()["c"].as<int64_t>() == 0);
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F9: the query answer's amount.refund must equal the refund row's amount.
+// A SUCCESS answer carrying a different amount is not evidence about this
+// refund, so it must not settle. The notification path already gates on this;
+// the query-sync path did not.
+DROGON_TEST(PayPlugin_RefundSync_AmountMismatchRefused)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = refundNo;
+    answer["refund_id"] = "rf_amount";
+    answer["amount"]["refund"] = 1;  // 1 fen != row's 1000 fen
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUNDING");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+    const auto ledger = client->execSqlSync(
+      "SELECT COUNT(*) c FROM pay_ledger WHERE order_no = $1 AND entry_type = 'REFUND'",
+      fixture.orderNo
+    );
+    CHECK(ledger.front()["c"].as<int64_t>() == 0);
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F9: the query answer's out_refund_no echo (officially required, doc
+// /doc/v3/merchant/4012791884) must name this refund. An answer about a
+// different refund is not evidence about this one and must not settle it.
+DROGON_TEST(PayPlugin_RefundSync_EchoMismatchRefused)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = "someone_elses_refund";
+    answer["refund_id"] = "rf_echo";
+    answer["amount"]["refund"] = 1000;
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUNDING");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
