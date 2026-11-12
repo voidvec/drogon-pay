@@ -1960,12 +1960,40 @@ void RefundService::syncRefundStatusFromWechat(
               const auto paymentNo = refund.getValueOfPaymentNo();
               const auto refundAmount = refund.getValueOfAmount();
 
+              // The query answer's out_refund_no echo is officially required
+              // (doc /doc/v3/merchant/4012791884): an answer naming a different
+              // refund is not evidence about this one and must not book it.
+              const std::string echoedRefundNo = result.get("out_refund_no", "").asString();
+              if (!echoedRefundNo.empty() && echoedRefundNo != refundNo)
+              {
+                  LOG_ERROR << "[RefundService] Refund query echo mismatch for " << refundNo
+                            << " (got " << echoedRefundNo << "); not booking";
+                  if (callback)
+                  {
+                      callback("");
+                  }
+                  return;
+              }
+              // Amount gate, same shape as the notification path: the answer's
+              // amount.refund must equal the refund row's amount. A missing or
+              // unequal amount proves nothing, so nothing is booked.
+              const int64_t answerRefundFen = result["amount"].get("refund", 0).asInt64();
+              if (!pay::utils::amountEqualsFen(refundAmount, answerRefundFen))
+              {
+                  LOG_ERROR << "[RefundService] Refund query amount mismatch for " << refundNo
+                            << " (answer fen=" << answerRefundFen << "); not booking";
+                  if (callback)
+                  {
+                      callback("");
+                  }
+                  return;
+              }
+
               dbClient_->newTransactionAsync([refundStatus,
                                               refundId,
                                               refundNo,
                                               result,
                                               callback,
-                                              refund,
                                               orderNo,
                                               paymentNo,
                                               refundAmount](
@@ -1982,13 +2010,11 @@ void RefundService::syncRefundStatusFromWechat(
 
                   auto transDb = std::static_pointer_cast<DbClient>(transPtr);
 
-                  refund.setStatus(refundStatus);
-                  refund.setChannelRefundNo(refundId);
                   try
                   {
                       Mapper<PayRefundModel> refundUpdater(transPtr);
-                      refundUpdater.update(
-                        refund,
+                      refundUpdater.updateBy(
+                        {PayRefundModel::Cols::_status, PayRefundModel::Cols::_channel_refund_no},
                         [refundStatus,
                          orderNo,
                          paymentNo,
@@ -1997,7 +2023,22 @@ void RefundService::syncRefundStatusFromWechat(
                          result,
                          transPtr,
                          transDb,
-                         callback](const size_t) {
+                         callback](const size_t updated) {
+                            if (updated == 0)
+                            {
+                                // Another writer (notification/reconcile) already
+                                // moved the row to a terminal state: that state
+                                // stands. REFUND ledger entries carry no DB unique
+                                // index, so a lost CAS must never insert one.
+                                LOG_WARN << "[RefundService] Refund " << refundNo
+                                         << " already settled by another writer; query sync "
+                                         << refundStatus << " not written";
+                                if (callback)
+                                {
+                                    callback(refundStatus);
+                                }
+                                return;
+                            }
                             const std::string responsePayload = toJsonString(result);
                             try
                             {
@@ -2273,7 +2314,15 @@ void RefundService::syncRefundStatusFromWechat(
                                 }
                             }
                         },
-                        rollbackDone
+                        rollbackDone,
+                        Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo) &&
+                          Criteria(
+                            PayRefundModel::Cols::_status,
+                            CompareOperator::In,
+                            std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
+                          ),
+                        refundStatus,
+                        refundId
                       );
                   }
                   catch (const std::exception &e)
