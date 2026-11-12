@@ -89,6 +89,10 @@ docs/
 
 ### Review
 
+- [2026-11-12-project-deep-analysis.md](review/2026-11-12-project-deep-analysis.md)
+  — whole-repo deep analysis prepared for the Repo Wiki knowledge base:
+  assembly flow, service/channel internals, data layer, engineering gates,
+  and a verified doc-vs-code drift list
 - [2026-09-20-wechat-pay-api-audit.md](review/2026-09-20-wechat-pay-api-audit.md)
   — code-level audit of the WeChat Pay V3 flow (inbound notifications,
   outbound transactions/refunds/certificates) against the official API, with
