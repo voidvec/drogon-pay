@@ -562,7 +562,8 @@ void CallbackService::handlePaymentCallback(
 
     const bool tradeStateValid = tradeState == "SUCCESS" || tradeState == "USERPAYING" ||
                                  tradeState == "NOTPAY" || tradeState == "CLOSED" ||
-                                 tradeState == "REVOKED" || tradeState == "REFUND";
+                                 tradeState == "REVOKED" || tradeState == "REFUND" ||
+                                 tradeState == "PAYERROR";
     if (!tradeStateValid)
     {
         Json::Value error;
