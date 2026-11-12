@@ -1838,38 +1838,82 @@ void RefundService::queryRefund(const std::string &refundNo, RefundCallback &&ca
                   return;
               }
 
-              wechatChannel->queryRefund(
-                refundNo,
-                [this,
-                 refundNo,
-                 response,
-                 sharedCb](const Json::Value &result, const std::string &error) mutable {
-                    if (!error.empty())
-                    {
+              // A refund query only means something for a wechat order: asking
+              // WeChat about an Alipay refund earns REFUND_NOT_FOUND. pay_refund
+              // has no channel column, so read the parent order to decide. When
+              // the order cannot be read, fall back to the DB snapshot (the same
+              // semantics as having no wechat client) rather than failing the
+              // whole query.
+              try
+              {
+                  Mapper<PayOrderModel> orderMapper(dbClient_);
+                  orderMapper.findOne(
+                    Criteria(
+                      PayOrderModel::Cols::_order_no,
+                      CompareOperator::EQ,
+                      refund.getValueOfOrderNo()
+                    ),
+                    [this, refundNo, response, sharedCb, wechatChannel](
+                      const PayOrderModel &order) mutable {
+                        if (order.getValueOfChannel() != "wechat")
+                        {
+                            if (*sharedCb)
+                            {
+                                (*sharedCb)(response, std::error_code());
+                            }
+                            return;
+                        }
+                        wechatChannel->queryRefund(
+                          refundNo,
+                          [this,
+                           refundNo,
+                           response,
+                           sharedCb](const Json::Value &result, const std::string &error) mutable {
+                              if (!error.empty())
+                              {
+                                  if (*sharedCb)
+                                  {
+                                      (*sharedCb)(response, std::error_code());
+                                  }
+                                  return;
+                              }
+
+                              syncRefundStatusFromWechat(
+                                refundNo,
+                                result,
+                                [response, result, sharedCb](const std::string &status) mutable {
+                                    if (!status.empty())
+                                    {
+                                        response["data"]["status"] = status;
+                                    }
+                                    response["data"]["wechat_response"] = result;
+                                    if (*sharedCb)
+                                    {
+                                        (*sharedCb)(response, std::error_code());
+                                    }
+                                }
+                              );
+                          }
+                        );
+                    },
+                    [sharedCb, response](const DrogonDbException &e) {
+                        LOG_WARN << "[RefundService] Refund order-channel lookup failed: "
+                                 << e.base().what();
                         if (*sharedCb)
                         {
                             (*sharedCb)(response, std::error_code());
                         }
-                        return;
                     }
-
-                    syncRefundStatusFromWechat(
-                      refundNo,
-                      result,
-                      [response, result, sharedCb](const std::string &status) mutable {
-                          if (!status.empty())
-                          {
-                              response["data"]["status"] = status;
-                          }
-                          response["data"]["wechat_response"] = result;
-                          if (*sharedCb)
-                          {
-                              (*sharedCb)(response, std::error_code());
-                          }
-                      }
-                    );
-                }
-              );
+                  );
+              }
+              catch (const std::exception &e)
+              {
+                  LOG_WARN << "[RefundService] Refund order-channel mapper failed: " << e.what();
+                  if (*sharedCb)
+                  {
+                      (*sharedCb)(response, std::error_code());
+                  }
+              }
           },
           [sharedCb](const DrogonDbException &e) {
               if (*sharedCb)

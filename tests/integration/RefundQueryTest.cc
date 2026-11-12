@@ -10,6 +10,7 @@
 #include "services/RefundService.h"
 #include "channels/WechatChannel.h"
 #include "utils/PayUtils.h"
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -4123,6 +4124,168 @@ DROGON_TEST(PayPlugin_RefundSync_EchoMismatchRefused)
     REQUIRE(!after.empty());
     CHECK(after.front()["status"].as<std::string>() == "REFUNDING");
     CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F3: queryRefund may only ask WeChat about a wechat order. pay_refund carries
+// no channel column, so the service reads the parent order's channel. The
+// RefundStubChannel above answers queryRefund with a hardcoded error, and the
+// error branch returns the DB snapshot in both the buggy and the fixed code --
+// it cannot tell the two apart. This spy answers SUCCESS and records that it
+// was called, which is the observable the channel gate actually changes.
+namespace
+{
+class QueryRefundSpyChannel : public drogon_pay::PaymentChannel
+{
+  public:
+    const std::string &name() const override
+    {
+        static const std::string kName = "wechat";
+        return kName;
+    }
+
+    bool isConfigured() const override
+    {
+        return true;
+    }
+
+    void createPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void createQRPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void queryPayment(const std::string &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void refund(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void queryRefund(const std::string &refundNo, JsonCallback &&callback) override
+    {
+        queryRefundCalled.store(true);
+        Json::Value answer;
+        answer["status"] = "SUCCESS";
+        answer["out_refund_no"] = refundNo;
+        answer["refund_id"] = "rf_spy";
+        answer["amount"]["refund"] = 1000;
+        callback(answer, "");
+    }
+
+    bool verifyCallback(
+      const drogon::HttpRequestPtr &,
+      drogon_pay::CallbackEvent &,
+      std::string &
+    ) override
+    {
+        return false;
+    }
+
+    std::atomic<bool> queryRefundCalled{false};
+};
+}  // namespace
+
+// F3 negative: an alipay order's refund must be answered from the DB snapshot
+// without ever asking WeChat (which would earn REFUND_NOT_FOUND).
+DROGON_TEST(PayPlugin_QueryRefund_AlipayOrderSkipsWechat)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+    // seedRefundCoverageOrder books a wechat order; this case is about the
+    // other channel, so flip the parent order to alipay.
+    client->execSqlSync(
+      "UPDATE pay_order SET channel = 'alipay' WHERE order_no = $1", fixture.orderNo
+    );
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    auto stub = std::make_shared<QueryRefundSpyChannel>();
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    std::promise<Json::Value> done;
+    plugin.refundService()->queryRefund(
+      refundNo,
+      [&done](const Json::Value &result, const std::error_code &) { done.set_value(result); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto response = fut.get();
+
+    CHECK(!stub->queryRefundCalled.load());
+    CHECK(response["data"]["status"].asString() == "REFUNDING");
+    CHECK(!response["data"].isMember("wechat_response"));
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F3 positive control: a wechat order's refund DOES query WeChat and surfaces
+// the channel answer. Without this, "skips wechat" could pass by never querying
+// anything at all.
+DROGON_TEST(PayPlugin_QueryRefund_WechatOrderQueriesWechat)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    auto stub = std::make_shared<QueryRefundSpyChannel>();
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    std::promise<Json::Value> done;
+    plugin.refundService()->queryRefund(
+      refundNo,
+      [&done](const Json::Value &result, const std::error_code &) { done.set_value(result); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto response = fut.get();
+
+    CHECK(stub->queryRefundCalled.load());
+    CHECK(response["data"].isMember("wechat_response"));
+    CHECK(response["data"]["status"].asString() == "REFUND_SUCCESS");
 
     client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
