@@ -405,8 +405,10 @@ void RefundService::proceedRefund(
     auto sharedCb = std::make_shared<RefundCallback>(std::move(callback));
 
     // Enhanced input validation
-    // Validate reason field (only check max length, allow empty)
-    if (request.reason.size() > 80)
+    // Validate reason field (only check max length, allow empty). WeChat caps
+    // reason at 80 characters by UTF-8 code point, not byte: a byte cap would
+    // wrongly reject a legitimate CJK reason (one 汉字 is 3 bytes, 1 character).
+    if (pay::utils::utf8CodePointLength(request.reason) > 80)
     {
         if (*sharedCb)
         {

@@ -2994,6 +2994,91 @@ DROGON_TEST(PayPlugin_Refund_ReasonTooLong)
     CHECK(result["message"].asString().find("reason too long") != std::string::npos);
 }
 
+// F8: reason 限长按 UTF-8 码点而非字节。80 个汉字 = 240 字节，旧字节闸门
+// (240 > 80) 会误拒这个合法 reason；新码点闸门 (80 == 80，非 >80) 放行。
+// 81 个汉字 (243 字节, 81 码点) 仍越界被拒。上面的 ReasonTooLong（81 个 ASCII）
+// 是 ASCII 侧负向对照；本例补 CJK 侧的守卫方向：正例不再被 reason 闸门拒、
+// 反例仍被拒。reason 闸门在订单/支付查找之前触发，故无需播种订单——正例其后
+// 因订单不存在而失败属预期，断言只区分"是不是 reason too long"。该查找是只读
+// 的，正例不会留下任何写入。
+DROGON_TEST(PayPlugin_Refund_ReasonCjkBoundary)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+    client->execSqlSync("SELECT 1");
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    auto refundService = plugin.refundService();
+
+    // The error message createRefund produced for `reason`. The order is random
+    // and nonexistent, so a reason that clears the length gate fails later for a
+    // different reason -- which is exactly what tells the two gates apart.
+    auto messageFor = [&](const std::string &reason) -> std::string {
+        CreateRefundRequest request;
+        request.orderNo = "ord_" + drogon::utils::getUuid();
+        request.amount = "1.00";
+        request.reason = reason;
+        request.refundNo = "";
+
+        std::promise<Json::Value> resultPromise;
+        std::promise<std::error_code> errorPromise;
+        refundService->createRefund(
+          request,
+          "",
+          [&resultPromise, &errorPromise](const Json::Value &result, const std::error_code &error) {
+              resultPromise.set_value(result);
+              errorPromise.set_value(error);
+          }
+        );
+        auto resultFuture = resultPromise.get_future();
+        auto errorFuture = errorPromise.get_future();
+        Json::Value result;
+        std::error_code error;
+        if (!pay::test_util::tryFutureGet(resultFuture, result, std::chrono::seconds(5)))
+        {
+            FAIL("createRefund result timed out");
+        }
+        if (!pay::test_util::tryFutureGet(errorFuture, error, std::chrono::seconds(5)))
+        {
+            FAIL("createRefund error timed out");
+        }
+        return result.get("message", "").asString();
+    };
+
+    std::string cn80;
+    for (int i = 0; i < 80; ++i)
+    {
+        cn80 += "退";
+    }
+    CHECK(cn80.size() == 240);
+    // Positive control: 80 codepoints is within the cap, so the reason gate must
+    // NOT reject it (the old byte cap would have). Whatever later error occurs,
+    // it is not "reason too long".
+    const std::string msg80 = messageFor(cn80);
+    CHECK(msg80.find("reason too long") == std::string::npos);
+
+    std::string cn81;
+    for (int i = 0; i < 81; ++i)
+    {
+        cn81 += "退";
+    }
+    CHECK(cn81.size() == 243);
+    // Negative control: 81 codepoints exceeds the cap and is still rejected.
+    const std::string msg81 = messageFor(cn81);
+    CHECK(msg81.find("reason too long") != std::string::npos);
+}
+
 DROGON_TEST(PayPlugin_Refund_InvalidFundsAccount)
 {
     Json::Value root;

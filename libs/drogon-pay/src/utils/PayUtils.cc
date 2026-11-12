@@ -527,8 +527,6 @@ bool validateNotifyUrl(const std::string &url, std::string &errorMessage)
     return true;
 }
 
-namespace
-{
 // UTF-8 code points = bytes that are not continuation bytes (10xxxxxx).
 size_t utf8CodePointLength(const std::string &s)
 {
@@ -542,7 +540,6 @@ size_t utf8CodePointLength(const std::string &s)
     }
     return n;
 }
-}  // namespace
 
 bool validateWechatOrderFields(
   const std::string &outTradeNo,
