@@ -232,11 +232,19 @@ void RefundService::createRefund(
   RefundCallback &&callback
 )
 {
-    // Calculate request hash for idempotency
+    // Calculate request hash for idempotency. The hash binds the full refund
+    // identity, not just order/amount/reason: a second legitimate refund of the
+    // same amount on the same order carries a different refund_no (and may name
+    // a different payment_no, funds_account or notify_url), so it must not
+    // collide with the first attempt's snapshot.
     Json::Value reqJson;
     reqJson["order_no"] = request.orderNo;
     reqJson["amount"] = request.amount;
     reqJson["reason"] = request.reason;
+    reqJson["refund_no"] = request.refundNo;
+    reqJson["payment_no"] = request.paymentNo;
+    reqJson["funds_account"] = request.fundsAccount;
+    reqJson["notify_url"] = request.notifyUrl;
     const std::string requestStr = pay::utils::toJsonString(reqJson);
 
     // Use SHA-256 for cryptographic hashing (more secure than std::hash)

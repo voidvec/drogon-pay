@@ -2,6 +2,7 @@
 #include "drogon_pay/PayPlugin.h"
 #include "../services/PaymentService.h"
 #include "../services/RefundService.h"
+#include "../utils/PayUtils.h"
 #include "PluginGuard.h"
 #include <drogon/HttpAppFramework.h>
 #include <drogon/orm/DbClient.h>
@@ -617,10 +618,20 @@ void PayController::refund(
     }
     if (idempotencyKey.empty())
     {
-        // Generate standardized idempotency key
-        // Use order_no and amount as the base to ensure same refund request gets same key
+        // Derive the key from the full refund identity, matching the field set
+        // RefundService hashes: a second refund of the same amount on the same
+        // order but a different refund_no must get its own key, not replay the
+        // first attempt's snapshot.
+        Json::Value keyJson;
+        keyJson["order_no"] = request.orderNo;
+        keyJson["amount"] = request.amount;
+        keyJson["reason"] = request.reason;
+        keyJson["refund_no"] = request.refundNo;
+        keyJson["payment_no"] = request.paymentNo;
+        keyJson["funds_account"] = request.fundsAccount;
+        keyJson["notify_url"] = request.notifyUrl;
         idempotencyKey = "refund:" + request.orderNo + ":" +
-                         drogon::utils::getSha256(request.amount + request.reason);
+                         drogon::utils::getSha256(pay::utils::toJsonString(keyJson));
     }
 
     // Get service and call
