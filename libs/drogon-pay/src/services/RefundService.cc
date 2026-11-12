@@ -1906,7 +1906,8 @@ void RefundService::queryRefund(const std::string &refundNo, RefundCallback &&ca
                       refund.getValueOfOrderNo()
                     ),
                     [this, refundNo, response, sharedCb, wechatChannel](
-                      const PayOrderModel &order) mutable {
+                      const PayOrderModel &order
+                    ) mutable {
                         if (order.getValueOfChannel() != "wechat")
                         {
                             if (*sharedCb)

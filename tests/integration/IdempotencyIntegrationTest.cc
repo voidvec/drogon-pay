@@ -778,8 +778,10 @@ DROGON_TEST(PayIdempotency_ExpiredReservationReclaimed)
     const auto fetched = mapper.findByPrimaryKey(key);
     CHECK(fetched.getValueOfRequestHash() == "new_hash");
     CHECK(fetched.getResponseSnapshot() == nullptr);
-    CHECK(fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
-          trantor::Date::now().microSecondsSinceEpoch());
+    CHECK(
+      fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
+      trantor::Date::now().microSecondsSinceEpoch()
+    );
 
     client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
 }
@@ -844,7 +846,8 @@ DROGON_TEST(PayIdempotency_LiveReservationNotReclaimed)
         const std::string key = "live_" + drogon::utils::getUuid();
         client->execSqlSync(
           "INSERT INTO pay_idempotency (idempotency_key, request_hash, "
-          "response_snapshot, expire_at) VALUES ($1, 'old_hash', NULL, " + expireSql + ")",
+          "response_snapshot, expire_at) VALUES ($1, 'old_hash', NULL, " +
+            expireSql + ")",
           key
         );
 
@@ -858,8 +861,10 @@ DROGON_TEST(PayIdempotency_LiveReservationNotReclaimed)
         }
         else
         {
-            CHECK(fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
-                  trantor::Date::now().microSecondsSinceEpoch());
+            CHECK(
+              fetched.getValueOfExpireAt().microSecondsSinceEpoch() >
+              trantor::Date::now().microSecondsSinceEpoch()
+            );
         }
 
         client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);

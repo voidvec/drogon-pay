@@ -8800,9 +8800,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
       "processed BOOLEAN NOT NULL DEFAULT FALSE,"
       "received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
-    client->execSqlSync(
-      "ALTER TABLE pay_callback ALTER COLUMN signature TYPE VARCHAR(512)"
-    );
+    client->execSqlSync("ALTER TABLE pay_callback ALTER COLUMN signature TYPE VARCHAR(512)");
 
     const std::string orderNo = "ord_" + drogon::utils::getUuid();
     const std::string paymentNo = "pay_" + drogon::utils::getUuid();
@@ -8873,8 +8871,7 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
         reply.notifyId = "notify_" + drogon::utils::getUuid();
         const std::string nonce = "nonce1234567";
         const std::string aad = "transaction";
-        const std::string ciphertext =
-          encryptAesGcm(toJsonCompact(plain), nonce, aad, apiV3Key);
+        const std::string ciphertext = encryptAesGcm(toJsonCompact(plain), nonce, aad, apiV3Key);
         if (ciphertext.empty())
         {
             FAIL("encryptAesGcm produced empty ciphertext");
@@ -8952,7 +8949,9 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
     CHECK(r1.error);
     CHECK(r1.result["code"].asString() == "FAIL");
     CHECK(r1.result["message"].asString() == "missing appid");
-    CHECK(paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING");
+    CHECK(
+      paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING"
+    );
     CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAYING");
 
     // Negative: mchid absent (appid present).
@@ -8962,7 +8961,9 @@ DROGON_TEST(PayPlugin_WechatCallback_RequiresAppIdAndMchId)
     CHECK(r2.error);
     CHECK(r2.result["code"].asString() == "FAIL");
     CHECK(r2.result["message"].asString() == "missing mchid");
-    CHECK(paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING");
+    CHECK(
+      paymentMapper.findByPrimaryKey(payment.getValueOfId()).getValueOfStatus() == "PROCESSING"
+    );
     CHECK(orderMapper.findByPrimaryKey(order.getValueOfId()).getValueOfStatus() == "PAYING");
 
     // Positive control: both present and correct settles the payment.
@@ -9127,8 +9128,7 @@ DROGON_TEST(PayPlugin_WechatRefundCallback_RequiresAppIdAndMchId)
         Reply reply;
         const std::string nonce = "nonce1234567";
         const std::string aad = "refund";
-        const std::string ciphertext =
-          encryptAesGcm(toJsonCompact(plain), nonce, aad, apiV3Key);
+        const std::string ciphertext = encryptAesGcm(toJsonCompact(plain), nonce, aad, apiV3Key);
         if (ciphertext.empty())
         {
             FAIL("encryptAesGcm produced empty ciphertext");

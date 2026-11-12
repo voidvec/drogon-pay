@@ -399,8 +399,9 @@ void ReconciliationService::syncPendingRefunds(const std::shared_ptr<int> &faile
                           orm::CompareOperator::EQ,
                           std::string("wechat")
                         ),
-                      [refundService, wechatChannel, rows](
-                        const std::vector<PayOrderModel> &orders) {
+                      [refundService,
+                       wechatChannel,
+                       rows](const std::vector<PayOrderModel> &orders) {
                           std::set<std::string> wechatOrders;
                           for (const auto &order : orders)
                           {

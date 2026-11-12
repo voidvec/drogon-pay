@@ -172,9 +172,8 @@ DROGON_TEST(Reconcile_RefundSweep_OnlyWechatOrders)
     const std::string wxRefund = "refund_wx_" + drogon::utils::getUuid();
     const std::string aliRefund = "refund_ali_" + drogon::utils::getUuid();
 
-    const std::vector<std::pair<std::string, std::string>> orders = {
-      {wxOrder, "wechat"}, {aliOrder, "alipay"}
-    };
+    const std::vector<std::pair<std::string, std::string>> orders =
+      {{wxOrder, "wechat"}, {aliOrder, "alipay"}};
     for (const auto &[orderNo, channel] : orders)
     {
         client->execSqlSync(

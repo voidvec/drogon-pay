@@ -4311,9 +4311,8 @@ DROGON_TEST(PayPlugin_QueryRefund_AlipayOrderSkipsWechat)
     const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
     // seedRefundCoverageOrder books a wechat order; this case is about the
     // other channel, so flip the parent order to alipay.
-    client->execSqlSync(
-      "UPDATE pay_order SET channel = 'alipay' WHERE order_no = $1", fixture.orderNo
-    );
+    client
+      ->execSqlSync("UPDATE pay_order SET channel = 'alipay' WHERE order_no = $1", fixture.orderNo);
 
     const std::string refundNo = "refund_" + drogon::utils::getUuid();
     using PayRefund = drogon_model::pay_test::PayRefund;
@@ -4439,9 +4438,9 @@ DROGON_TEST(PayPlugin_Refund_IdempotencyHashBindsRefundNo)
         req.reason = "same reason";
         req.refundNo = refundNo;
         std::promise<Json::Value> p;
-        svc->createRefund(
-          req, key, [&p](const Json::Value &v, const std::error_code &) { p.set_value(v); }
-        );
+        svc->createRefund(req, key, [&p](const Json::Value &v, const std::error_code &) {
+            p.set_value(v);
+        });
         auto f = p.get_future();
         if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
         {

@@ -1409,10 +1409,12 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           // an in-flight reservation and get 1004 for an attempt that already
           // failed. This is the ordering respondQr/failQr keep on success and on
           // channel error; each call site preserves its own response/ec verbatim.
-          auto refuseQr = [sharedCb, idempotencyService, idempotencyKey, requestHash](
-                            const Json::Value &response, const std::error_code &ec) {
-              idempotencyService->clearReservation(
-                idempotencyKey, requestHash, [sharedCb, response, ec](bool) {
+          auto refuseQr = [sharedCb,
+                           idempotencyService,
+                           idempotencyKey,
+                           requestHash](const Json::Value &response, const std::error_code &ec) {
+              idempotencyService
+                ->clearReservation(idempotencyKey, requestHash, [sharedCb, response, ec](bool) {
                     sharedCb->call(response, ec);
                 });
           };
