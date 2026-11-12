@@ -1825,3 +1825,81 @@ PR #13 合入后本分支与 master 冲突。整合方式由用户选定为 **re
 - §一~§二十六 的锚点**不逐条重测**：那些节是带时间戳的当轮记录，其结论由测试与 CI 钉住，
   行号只是当时的定位辅助；重测 180 余处会产生一个只动行号的巨量 diff，把真正的评审信号
   埋掉。需要定位时按符号名查找更可靠。
+
+## 二十九、第二十一轮：微信支付全流程对照官方 V3 的十项修复（F1–F10）
+
+本轮按用户要求"基于微信支付官方 API，从代码级排查全流程功能与安全问题，制定计划并修复"，
+先审计、再出计划（`docs/superpowers/plans/2026-11-12-wechat-pay-audit-fixes.md`）、再逐项 TDD
+修复。分支 `fix/wechat-pay-audit-round`，11 个提交（10 修复 + 1 测试证据加固），**未 push**。
+
+### 一、缺陷台账与修复（逐条带锚点）
+
+| 编号 | 缺陷 | 修复 | 提交 | 锚点 |
+|------|------|------|------|------|
+| F9 | 退款查询同步采信渠道应答即落终态，无 CAS、无金额/身份门 | settle 改 CAS（`status IN REFUND_INIT/REFUNDING`）+ 应答身份/金额 fail-closed 门 | `0ef940a` | `RefundService.cc:2062-2086`（echo/amount 门）、`:2414-2419`（CAS）、`:2207`（REFUND 记账） |
+| F2 | 退款对账把支付宝订单的退款也拿去问微信 | sweep 按**父订单** `pay_order.channel=='wechat'` 过滤 | `2680fb1` | `ReconciliationService.cc:392-405` |
+| F3 | `queryRefund` 不辨父订单渠道，支付宝退款也问微信 | 按父订单渠道决定是否问微信 | `c120b12` | `RefundService.cc:1902-1917` |
+| F1 | QR 六处拒绝"先应答后删预留"，拒绝把幂等键毒化 | 六处拒绝均**先删预留再应答** | `f474e06` | `PaymentService.cc:1412-1418`（refuseQr）、六处 `:1429/1447/1462/1474/1494/1526` |
+| F4 | 退款幂等哈希/派生键只绑 order+amount，同额二次退款撞键 replay | 哈希与派生键绑全 7 字段（含 refund_no/payment_no/funds_account/notify_url） | `e59fcbb` | `RefundService.cc:240-251`、`PayHandlers.cc:625-634` |
+| F10 | 过期幂等预留无法回收，重试被 InProgress 永久毒化 | INSERT 改 reserve-or-reclaim（`ON CONFLICT … WHERE expire_at<NOW()`），原子回收 | `c58c4c7` | `IdempotencyService.cc:103-118`、`:138`（findBy TTL 过滤） |
+| F5 | 创建退款应答不绑请求身份/金额，错应答可记 REFUND_SUCCESS | wechat 成功路径加身份/金额门，不符则 1502 不落终态 | `b2be437` | `RefundService.cc:1492-1523` |
+| F6 | 通知资源 appid/mchid"空则跳过"，缺席即放行 | 支付与退款**两处**通知缺席即拒（missing appid/mchid） | `64946b9` | `CallbackService.cc:516-547`（支付）、`:2522-2553`（退款） |
+| F7 | trade_state 白名单漏 PAYERROR，真失败通知被拒收重试 | 白名单补 PAYERROR（官方七态齐全） | `bf16157` | `CallbackService.cc:563-566`；映射默认 `PayUtils.cc:424-425` |
+| F8 | reason 按字节限长，27 字中文（81 字节）被误拒 | 按 UTF-8 码点限长（>80 才拒） | `2675f17` | `RefundService.cc:411`；`PayUtils.cc:531-542`、`PayUtils.h:16` |
+
+### 二、候选证伪 / 降级（不做项留证）
+
+- **F8 不新增 `utf8Length`（DRY 偏离计划）**：计划要新增 `pay::utils::utf8Length`，但代码里已有
+  完全相同的匿名命名空间内部 `utf8CodePointLength`（`validateWechatOrderFields` 给 description/attach
+  限长用）。**提升既有 helper 为公有并复用**，而非加重复计数器。一个规范计数器。
+- **F10 不做独立清理定时器**：`reconcile()` 每轮 sweep 已 DELETE 过期幂等行（默认 300s 定时器），
+  独立 purge 定时器冗余；本轮只做原子回收。
+- **幂等"无 refund_no 同额退款撞键"评审判为 Medium，本轮证伪为按设计**：派生键存在的意义正是给
+  不带键的客户端做幂等。两个**字节全同**（同 order/amount/reason、无 refund_no、无幂等头）的请求，
+  服务端无法区分"故意二次退款"与"网络重试"，replay 是正确语义；UUID 在幂等判定**之后**生成，
+  正是为让 replay 返回原 refund_no。评审建议"无 refund_no 时掺每调用 nonce"会**破坏幂等**、
+  把每次重试变成新退款（双退风险），**拒绝采纳**。需要多笔同额退款的客户端应每笔带不同 refund_no
+  或幂等头——F4 已保证不同 refund_no → 不同键。
+
+### 三、评审新发现的遗留（超出 F1–F10 对齐范围，本轮只留证不修）
+
+- **F11（Medium，资金记账，预存缺陷）——创建即成功退款无 REFUND 台账**：
+  `updateRefundWithSuccess`（`RefundService.cc:1653-1854`，由 invokeRefundChannel `:1386/:1573` 调用）
+  经 CAS 落 REFUND_SUCCESS 并可把订单写 REFUNDED，但**不写 REFUND 台账**；REFUND 台账只在
+  查询同步（`:2207`）与退款通知路径写。若微信在创建时同步回 SUCCESS，该退款无台账，且后续
+  查询/通知在 already-SUCCESS 处短路（`:2047`），台账永不补。**建议下一轮**在创建成功 CAS-win
+  分支补 REFUND 记账（与查询路径同形防重）。本轮未修：超出对齐范围、需独立测试周期。
+- **Low（留证）**：① F9 在 already-SUCCESS/lost-CAS 上报渠道映射态而非持久态（`:2047-2053`、
+  `:2123-2136`），累计和门仍防双退；② F9 只校 `out_refund_no` echo、未校 `out_trade_no`（F5 二者都校），
+  非 bypass（settle 用 DB orderNo + 金额门）；③ `amount.refund` 经 `.asInt64()`（`:1494/:2076`、
+  `CallbackService.cc:2865`）遇非整数会抛 `Json::LogicError`，对落库 fail-closed、仅健壮性，
+  且应答来自 TLS 可信渠道；④ F2 sweep 取 50 条最新再过滤（`ReconciliationService.cc:364-372`），
+  ≥50 条滞留支付宝行可饿死微信退款（liveness，非泄漏）；⑤ F10 回收用 DB `NOW()`、findBy 用客户端
+  `now()`（`IdempotencyService.cc:109/:138`），时钟超前时短暂 Error，重试自愈、不偷键。
+
+### 四、测试（正负对照）
+
+- **本机绿（纯逻辑）**：`PayUtils_Utf8CodePointLength`（空/ASCII、27 汉字=81 字节/27 码点、
+  80 码点=240 字节边界正例、81 码点=243 字节越界、混合、4 字节 emoji=1）；14 个 `PayUtils_*`
+  全绿（含被提升 helper 喂给的 `ValidateWechatOrderFields`、`MapTradeState`）。
+- **DB 集成（CI 裁决，本机不跑）**：`PayPlugin_WechatCallback_TransactionPayError`（ACK SUCCESS +
+  支付 FAIL + 订单 FAILED + callback processed + 零 PAYMENT 台账）；`PayPlugin_Refund_ReasonCjkBoundary`
+  （80 汉字不被 reason 门拒——旧字节帽会拒的正例、81 汉字仍拒）；F6 支付/退款缺席负向例。
+- **守卫方向加固（`b3c5260`，测试-only）**：`InvalidTradeState`（F7 负向对照）原仅 `CHECK(error)`，
+  无播种订单时即便删光白名单 UNKNOWN 也会因 order-not-found 置 error 而误绿——补
+  `message=="invalid trade_state"` 钉死白名单；F6 负向例补订单状态 CHECK（支付侧留 PAYING、
+  退款侧留 PAID），证明被拒通知让整个聚合不动而非只一行。
+
+### 五、验证记录
+
+- 全量库+测例 `windows-msvc` `/W4 /WX` 干净编译。
+- 三 Python FAST 门禁绿：`check_migrations`（7 文件）、`check_openapi_routes`（14 路径/26 操作，
+  代码与契约一致）、`check_version_sync`（1.1.0 ×4）。
+- 三组并行只读子代理评审（资金记账方向 / 幂等+跨渠道 / 通知守卫+测试充分性）：**F1–F10 全部成立**，
+  无错向结算、无双结算/双记账窗口、门 fail-closed、reason 帽正确；新发现见 §三。
+
+### 六、诚实边界与遗留
+
+- DB 集成测例本机无 Postgres test 角色会挂起，**由 CI 裁决，本机不声称 DB 跑绿**。
+- F11 与 §三 Low 项本轮**只留证不修**（超出 F1–F10 对齐范围）；F11 为资金记账缺口，建议优先排下一轮。
+- **未 push**：按仓库规则与用户约定，推送与合并待用户评审。
