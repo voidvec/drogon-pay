@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <json/json.h>
 #include <string>
@@ -6,6 +7,13 @@
 namespace pay::utils
 {
 bool getRequiredString(const Json::Value &json, const char *key, std::string &value);
+
+// Number of UTF-8 code points in `s` (continuation bytes 0b10xxxxxx are not
+// counted). WeChat caps several free-text fields by *character*, not byte:
+// refund reason 80, order description 127, attach 128. A byte-length cap would
+// wrongly reject a legitimate CJK value (one 汉字 is 3 bytes but 1 character),
+// so every such limit is measured with this instead of std::string::size().
+std::size_t utf8CodePointLength(const std::string &s);
 
 bool parseAmountToFen(const std::string &amount, int64_t &fen);
 
