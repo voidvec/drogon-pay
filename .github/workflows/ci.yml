@@ -261,21 +261,20 @@ jobs:
             check_name: windows-build-and-test
             log_artifact_name: windows-test-logs
           - platform: macos
-            runs_on: macos-14
+            runs_on: macos-15
             cmake_preset: macos-arm64
             preset_dir: build/macos-arm64
             conan_extra_settings: "-s arch=armv8"
             configure_extra_args: "-DDROGON_PAY_WERROR=ON"
-            # Build-only, and that is the environment deciding, not a shortcut:
-            # the macos-14 image is past Homebrew's support window, so it has no
-            # bottles, so `brew install postgresql@15 redis` compiles from source
-            # and drags llvm@22 + rust in as Redis dependencies. The leg spent its
-            # whole 120-minute allowance inside brew and never reached the suite.
-            # What this leg must prove is the arm64 clang `-Werror` compile (the
-            # only compiler that reports -Wunused-lambda-capture); the name this
-            # leg reports under, `macos-build / build-test`, says exactly that, and
-            # the runtime suite is covered on the two platforms that can stand a
-            # database up.
+            # Build-only by design: this leg proves the arm64 clang `-Werror`
+            # compile (the only compiler that reports -Wunused-lambda-capture);
+            # the name it reports under, `macos-build / build-test`, says exactly
+            # that, and the DB-backed runtime suite is covered on Linux and
+            # Windows. The image was bumped from macos-14, which GitHub retired
+            # on 2026-11-02 (the runner then failed at provisioning with
+            # "configuration ... not supported"). macos-15 has Homebrew bottles,
+            # so standing a database up here is now feasible but is left as a
+            # separate decision rather than folded into the migration.
             use_database: false
             ctest_timeout: 180
             timeout_minutes: 90

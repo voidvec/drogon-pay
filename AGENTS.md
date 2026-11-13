@@ -78,12 +78,13 @@ gh api repos/:owner/:repo/commits/<sha>/check-runs --jq '.check_runs[].name'
 
 Postgres/Redis for the DB-backed suite is provisioned on two of the
 three legs: Docker containers on Linux, and the runner's own PostgreSQL service
-plus Memurai on Windows. The macOS leg is **build-only** — `macos-14` is past
-Homebrew's support window and has no bottles, so installing a database there
-compiles a toolchain instead (a real attempt consumed the job's whole
-120-minute timeout in `brew install` and never reached the suite). What that leg
-does prove is the arm64 clang `-Werror` compile, which is the only lane that
-sees clang-exclusive diagnostics. `.github/workflows/legacy-source-build.yml`
+plus Memurai on Windows. The macOS leg is **build-only** on `macos-15` — GitHub
+retired the `macos-14` image on 2026-11-02 (it then failed at provisioning with
+"configuration ... not supported"), so the leg was migrated. Build-only is kept
+by design: what that leg proves is the arm64 clang `-Werror` compile, the only
+lane that sees clang-exclusive diagnostics, while the DB-backed suite runs on
+Linux and Windows. `macos-15` has Homebrew bottles, so a database there is now
+feasible but left out of scope. `.github/workflows/legacy-source-build.yml`
 holds the pre-Conan build-Drogon-from-source rollback net and is dispatch-only.
 
 ### Database
