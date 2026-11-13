@@ -145,7 +145,7 @@ jobs:
 
   macos-source-build:
     name: macos-build-legacy
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
 
     steps:
