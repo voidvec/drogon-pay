@@ -149,6 +149,26 @@ void WechatCallbackController::notify(
     }
 }
 
+namespace
+{
+// Alipay's failure ack is a JSON body (the gateway only parses the body for the
+// literal "success" token; anything else triggers redelivery). Kept as JSON so
+// the reject reason is observable in logs/tests.
+void alipayFail(
+  const std::function<void(const HttpResponsePtr &)> &callback,
+  const std::string &message
+)
+{
+    Json::Value response;
+    response["code"] = "FAIL";
+    response["message"] = message;
+    auto resp = HttpResponse::newHttpJsonResponse(response);
+    resp->setContentTypeString("application/json");
+    resp->addHeader("Content-Type", "application/json; charset=utf-8");
+    callback(resp);
+}
+}  // namespace
+
 void AlipayCallbackController::notify(
   const HttpRequestPtr &req,
   std::function<void(const HttpResponsePtr &)> &&callback
@@ -181,32 +201,47 @@ void AlipayCallbackController::notify(
         }
     }
 
-    // Extract signature BEFORE removing it from params (verifyCallback also
-    // excludes 'sign', but we need the value here).
-    const std::string sign = params.count("sign") ? params["sign"] : std::string{};
-
-    // Get the Alipay client. If it is not configured -- or the plugin that owns
-    // it is not in this process at all, which is the same fault from the
-    // verifier's point of view -- we MUST reject the callback rather than
-    // processing it unverified - accepting an unverified callback would let any
-    // party forge a payment-success notification (P0-1). `plugin` is checked here
-    // rather than relied on further down; the service lookup below guards itself
-    // too, because a verification path must not answer with an access violation
-    // on a state this project's own header documents as possible.
+    // Resolve the client and service from the plugin. A missing client/plugin
+    // means we cannot verify the notification, so it MUST be refused rather than
+    // processed unverified (P0-1: accepting an unverified callback would let any
+    // party forge a payment-success notification).
     auto plugin = drogon::app().getPlugin<PayPlugin>();
     auto alipayClient = plugin ? plugin->alipayClient() : nullptr;
     if (!alipayClient)
     {
         LOG_ERROR << "[ALIPAY_CALLBACK] Alipay client not configured, rejecting callback";
-        Json::Value response;
-        response["code"] = "FAIL";
-        response["message"] = "Alipay client not configured";
-        auto resp = HttpResponse::newHttpJsonResponse(response);
-        resp->setContentTypeString("application/json");
-        resp->addHeader("Content-Type", "application/json; charset=utf-8");
-        callback(resp);
+        alipayFail(callback, "Alipay client not configured");
         return;
     }
+
+    auto paymentService = plugin ? plugin->paymentService() : nullptr;
+    if (!paymentService)
+    {
+        // A verified notification is about to be acknowledged, and this is the
+        // one process state in which it cannot be booked. Refuse so Alipay
+        // redelivers instead of treating the payment as delivered.
+        LOG_ERROR << "[ALIPAY_CALLBACK] Payment service unavailable: no PayPlugin registered in "
+                     "this process, rejecting callback";
+        alipayFail(callback, "Payment service not available in this process");
+        return;
+    }
+
+    processAlipayNotify(params, alipayClient, paymentService, callback);
+}
+
+void processAlipayNotify(
+  const std::unordered_map<std::string, std::string> &params,
+  const std::shared_ptr<AlipaySandboxClient> &alipayClient,
+  const std::shared_ptr<PaymentService> &paymentService,
+  const std::function<void(const HttpResponsePtr &)> &callback
+)
+{
+    auto field = [&params](const std::string &key) -> std::string {
+        auto it = params.find(key);
+        return (it != params.end()) ? it->second : std::string{};
+    };
+
+    const std::string sign = field("sign");
 
     // Build the parameter set for signature verification. verifyCallback
     // expects a JSON object whose members (excluding 'sign'/'sign_type') are
@@ -219,32 +254,35 @@ void AlipayCallbackController::notify(
 
     // Verify the callback signature BEFORE any database mutation. A failed
     // signature means the notification is not authentic and must not advance
-    // any order state (P0-1: previously signature verification was never
-    // invoked, allowing forged payment-success notifications).
+    // any order state (P0-1).
     if (!alipayClient->verifyCallback(verifyParams, sign))
     {
         LOG_WARN << "[ALIPAY_CALLBACK] Signature verification failed, rejecting callback";
-        Json::Value response;
-        response["code"] = "FAIL";
-        response["message"] = "signature verification failed";
-        auto resp = HttpResponse::newHttpJsonResponse(response);
-        resp->setContentTypeString("application/json");
-        resp->addHeader("Content-Type", "application/json; charset=utf-8");
-        callback(resp);
+        alipayFail(callback, "signature verification failed");
         return;
     }
     LOG_DEBUG << "[ALIPAY_CALLBACK] Signature verified successfully";
 
-    // Extract the key callback parameters.
-    std::string outTradeNo = params["out_trade_no"];
-    std::string tradeNo = params["trade_no"];
-    std::string tradeStatus = params["trade_status"];
-    std::string totalAmount = params["total_amount"];
-    std::string appId = params["app_id"];
-    std::string sellerId = params["seller_id"];
-    std::string notifyTime = params["notify_time"];
-    std::string notifyType = params["notify_type"];
-    std::string notifyId = params["notify_id"];
+    // Fail-closed merchant binding. The app_id/seller_id re-checks below are only
+    // enforced when our own values are configured; an enabled-but-unconfigured
+    // client would silently skip them. In Alipay public-key mode the platform
+    // public key is shared across merchants, so a foreign merchant's genuinely
+    // signed notification could otherwise verify and credit a colliding order.
+    // Refuse to book unless the channel is fully configured. Placed AFTER
+    // verification so a forged notification still fails at the signature gate.
+    if (!alipayClient->isConfigured())
+    {
+        LOG_ERROR << "[ALIPAY_CALLBACK] Alipay client not fully configured, rejecting callback";
+        alipayFail(callback, "Alipay client not configured");
+        return;
+    }
+
+    const std::string outTradeNo = field("out_trade_no");
+    const std::string tradeNo = field("trade_no");
+    const std::string tradeStatus = field("trade_status");
+    const std::string totalAmount = field("total_amount");
+    const std::string appId = field("app_id");
+    const std::string sellerId = field("seller_id");
 
     LOG_DEBUG << "[ALIPAY_CALLBACK] out_trade_no=" << outTradeNo << " trade_no=" << tradeNo
               << " trade_status=" << tradeStatus << " total_amount=" << totalAmount;
@@ -258,13 +296,20 @@ void AlipayCallbackController::notify(
     {
         LOG_ERROR << "[ALIPAY_CALLBACK] app_id mismatch, rejecting callback. expected="
                   << expectedAppId << " got=" << appId;
-        Json::Value response;
-        response["code"] = "FAIL";
-        response["message"] = "app_id mismatch";
-        auto resp = HttpResponse::newHttpJsonResponse(response);
-        resp->setContentTypeString("application/json");
-        resp->addHeader("Content-Type", "application/json; charset=utf-8");
-        callback(resp);
+        alipayFail(callback, "app_id mismatch");
+        return;
+    }
+
+    // seller_id re-check (M2): the four-element merchant validation Alipay
+    // mandates (out_trade_no / total_amount / seller_id / app_id). A valid
+    // signature for a different seller must not credit our order. Only enforced
+    // when our own seller_id is configured.
+    const std::string expectedSellerId = alipayClient->getSellerId();
+    if (!expectedSellerId.empty() && sellerId != expectedSellerId)
+    {
+        LOG_ERROR << "[ALIPAY_CALLBACK] seller_id mismatch, rejecting callback. expected="
+                  << expectedSellerId << " got=" << sellerId;
+        alipayFail(callback, "seller_id mismatch");
         return;
     }
 
@@ -278,28 +323,9 @@ void AlipayCallbackController::notify(
     alipayResult["total_amount"] = totalAmount;
     alipayResult["app_id"] = appId;
     alipayResult["seller_id"] = sellerId;
-    alipayResult["notify_time"] = notifyTime;
-    alipayResult["notify_type"] = notifyType;
-    alipayResult["notify_id"] = notifyId;
-
-    auto paymentService = plugin ? plugin->paymentService() : nullptr;
-    if (!paymentService)
-    {
-        // A verified notification is about to be acknowledged, and this is the
-        // one process state in which it cannot be booked. Answer the same refusal
-        // the unconfigured-client branch gives: never an acknowledgement here, so
-        // Alipay redelivers instead of treating the payment as delivered.
-        LOG_ERROR << "[ALIPAY_CALLBACK] Payment service unavailable: no PayPlugin registered in "
-                     "this process, rejecting callback";
-        Json::Value response;
-        response["code"] = "FAIL";
-        response["message"] = "Payment service not available in this process";
-        auto resp = HttpResponse::newHttpJsonResponse(response);
-        resp->setContentTypeString("application/json");
-        resp->addHeader("Content-Type", "application/json; charset=utf-8");
-        callback(resp);
-        return;
-    }
+    alipayResult["notify_time"] = field("notify_time");
+    alipayResult["notify_type"] = field("notify_type");
+    alipayResult["notify_id"] = field("notify_id");
 
     // Call syncOrderStatusFromAlipay to update the database.
     paymentService->syncOrderStatusFromAlipay(
@@ -312,31 +338,23 @@ void AlipayCallbackController::notify(
           {
               LOG_ERROR << "[AlipayCallback] Order sync REJECTED for " << outTradeNo
                         << ", trade_status=" << tradeStatus;
-              Json::Value rejected;
-              rejected["code"] = "FAIL";
-              rejected["message"] = "order sync rejected";
-              auto rejResp = HttpResponse::newHttpJsonResponse(rejected);
-              rejResp->setContentTypeString("application/json");
-              rejResp->addHeader("Content-Type", "application/json; charset=utf-8");
-              callback(rejResp);
+              alipayFail(callback, "order sync rejected");
               return;
           }
 
           LOG_DEBUG << "[ALIPAY_CALLBACK] Sync completed for order " << outTradeNo
                     << " status=" << status;
-
-          // Acknowledge the notification back to Alipay.
-          Json::Value response;
-          response["code"] = "SUCCESS";
-          response["message"] = "OK";
-
           LOG_INFO << "[AlipayCallback] Callback processed successfully: order_no=" << outTradeNo
                    << ", trade_status=" << tradeStatus << ", synced_status=" << status;
 
-          auto resp = HttpResponse::newHttpJsonResponse(response);
-          resp->setContentTypeString("application/json");
-          resp->addHeader("Content-Type", "application/json; charset=utf-8");
-
+          // H1: Alipay requires the EXACT plain-text body "success" (7 bytes) to
+          // stop redelivery. A JSON {"code":"SUCCESS"} body is not recognized,
+          // so the gateway would retry 8 times over 25h for an already-booked
+          // payment.
+          auto resp = HttpResponse::newHttpResponse();
+          resp->setStatusCode(drogon::k200OK);
+          resp->setContentTypeString("text/plain");
+          resp->setBody("success");
           callback(resp);
       }
     );

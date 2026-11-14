@@ -116,6 +116,40 @@ class AlipaySandboxClient : public drogon_pay::PaymentChannel
      */
     std::string generateUUID() const;
 
+    // ---- Gateway request signing / response verification ----
+    // Exposed (like verifyCallback above) so the protocol contract can be
+    // pinned by tests without a network round-trip.
+
+    /**
+     * @brief Build the full signed common-parameter set for a gateway call.
+     *
+     * notify_url is a TOP-LEVEL public parameter here, never part of
+     * biz_content (Alipay ignores it inside biz_content and then sends no
+     * async notification). The returned object includes `sign`.
+     */
+    Json::Value buildSignedRequestParams(
+      const std::string &method,
+      const Json::Value &bizContent
+    ) const;
+
+    /// Alipay synchronous-response node name for a method, e.g.
+    /// "alipay.trade.create" -> "alipay_trade_create_response".
+    static std::string responseKeyForMethod(const std::string &method);
+
+    /**
+     * @brief Verify the RSA2 signature of a synchronous gateway response.
+     *
+     * Alipay signs the EXACT raw JSON text of the response node (braces
+     * included), not a re-serialization, so the node substring is extracted
+     * from @p rawBody verbatim and checked against `sign` with the Alipay
+     * public key. Fail-closed: false when the node or sign is missing/invalid.
+     */
+    static bool verifyResponseSignature(
+      const std::string &rawBody,
+      const std::string &responseKey,
+      const std::string &alipayPublicKeyPem
+    );
+
   private:
     Json::Value config_;
     std::string appId_;
@@ -141,6 +175,28 @@ class AlipaySandboxClient : public drogon_pay::PaymentChannel
 
     // Build request parameters
     Json::Value buildCommonParams() const;
+
+    // Sorted "k=v&..." string-to-sign. Request signing excludes only `sign`;
+    // notification verification also excludes `sign_type`. Empty/null values
+    // never participate (Alipay's rule).
+    static std::string joinSortedParams(const Json::Value &params, bool excludeSignType);
+
+    // URL-encoded form body for every parameter (including sign).
+    static std::string encodeFormParams(const Json::Value &params);
+
+    // Raw JSON substring of the response node (braces included), or "" when
+    // absent. Alipay signs these exact bytes.
+    static std::string extractResponseNode(
+      const std::string &rawBody,
+      const std::string &responseKey
+    );
+
+    // RSA2 (SHA256withRSA) verify against an explicit PEM public key.
+    static bool verifyWithPem(
+      const std::string &data,
+      const std::string &signature,
+      const std::string &publicKeyPem
+    );
 
     // Send HTTP request
     void sendRequest(
