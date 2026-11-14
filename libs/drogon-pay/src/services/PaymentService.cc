@@ -1404,17 +1404,31 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
               return;
           }
 
+          // A refusal must release the reservation before it answers: answering
+          // first lets a corrected retry that lands inside the delete window read
+          // an in-flight reservation and get 1004 for an attempt that already
+          // failed. This is the ordering respondQr/failQr keep on success and on
+          // channel error; each call site preserves its own response/ec verbatim.
+          auto refuseQr = [sharedCb,
+                           idempotencyService,
+                           idempotencyKey,
+                           requestHash](const Json::Value &response, const std::error_code &ec) {
+              idempotencyService
+                ->clearReservation(idempotencyKey, requestHash, [sharedCb, response, ec](bool) {
+                    sharedCb->call(response, ec);
+                });
+          };
+
           // Proceed with QR payment creation. The payload shape is per channel:
           // Alipay precreate takes `total_amount` in yuan, WeChat V3 native takes
           // `amount.total` in fen plus a `description`. Sending the Alipay field
           // names to WeChat made every WeChat QR order a 400 PARAM_ERROR.
           if (!currencyValid)
           {
-              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
               Json::Value response;
               response["code"] = 400;
               response["message"] = "Invalid currency: expected a three-letter ISO-4217 code";
-              sharedCb->call(response, pay::makePayError(400, "invalid currency"));
+              refuseQr(response, pay::makePayError(400, "invalid currency"));
               return;
           }
 
@@ -1429,11 +1443,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
             !pay::utils::validateTimeExpire(timeExpire, channel, timeExpireError)
           )
           {
-              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
               Json::Value response;
               response["code"] = 400;
               response["message"] = timeExpireError;
-              sharedCb->call(response, pay::makePayError(400, timeExpireError));
+              refuseQr(response, pay::makePayError(400, timeExpireError));
               return;
           }
 
@@ -1445,12 +1458,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
               int64_t totalFen = 0;
               if (!pay::utils::parseAmountToFen(amount, totalFen) || totalFen <= 0)
               {
-                  idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
                   Json::Value response;
                   response["code"] = 400;
                   response["message"] = "Invalid amount for WeChat native payment";
-                  sharedCb
-                    ->call(response, pay::makePayError(400, "invalid amount for native payment"));
+                  refuseQr(response, pay::makePayError(400, "invalid amount for native payment"));
                   return;
               }
               // Same official window as /api/pay/create: an order number the
@@ -1459,12 +1470,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   std::string fieldError;
                   if (!pay::utils::validateWechatOrderFields(orderNo, subject, "", fieldError))
                   {
-                      idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {
-                      });
                       Json::Value response;
                       response["code"] = 400;
                       response["message"] = fieldError;
-                      sharedCb->call(response, pay::makePayError(400, fieldError));
+                      refuseQr(response, pay::makePayError(400, fieldError));
                       return;
                   }
               }
@@ -1481,12 +1490,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
                   std::string urlError;
                   if (!pay::utils::validateNotifyUrl(notifyUrl, urlError))
                   {
-                      idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {
-                      });
                       Json::Value response;
                       response["code"] = 400;
                       response["message"] = urlError;
-                      sharedCb->call(response, pay::makePayError(400, urlError));
+                      refuseQr(response, pay::makePayError(400, urlError));
                       return;
                   }
                   payload["notify_url"] = notifyUrl;
@@ -1515,12 +1522,10 @@ void PaymentService::createQRPayment(const Json::Value &request, PaymentCallback
           auto channelImpl = findChannel(channel);
           if (!channelImpl)
           {
-              idempotencyService->clearReservation(idempotencyKey, requestHash, [](bool) {});
               Json::Value response;
               response["code"] = 1005;
               response["message"] = "CHANNEL_NOT_AVAILABLE: " + channel;
-              sharedCb
-                ->call(response, pay::makePayError(1005, "channel not available: " + channel));
+              refuseQr(response, pay::makePayError(1005, "channel not available: " + channel));
               return;
           }
 

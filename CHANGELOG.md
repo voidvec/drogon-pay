@@ -62,6 +62,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **WeChat Pay V3 full-flow audit, round 21 (F1-F10).** A fresh code-level pass
+  over the whole WeChat flow against the official V3 API landed ten fixes
+  (ledger: `docs/review/2026-09-20-wechat-pay-api-audit.md`, round 21):
+  - **F1** — QR booking's six refusal branches now release the idempotency
+    reservation before answering, so a corrected retry is not blocked by its
+    own dead reservation.
+  - **F2 / F3** — the refund reconciliation sweep and `queryRefund` now filter
+    on the parent order's channel, so Alipay refunds are never sent to WeChat.
+  - **F4** — the refund idempotency hash and the handler's derived key now bind
+    the full refund identity (order_no, amount, reason, refund_no, payment_no,
+    funds_account, notify_url), so a second same-amount refund on one order is
+    not replayed as the first.
+  - **F5** — the create-refund success answer is bound to the request's
+    order_no / refund_no / amount.
+  - **F6** — payment and refund notifications now reject an absent or
+    mismatched `appid` / `mchid` (both officially required), fail-closed.
+  - **F7** — the notification `trade_state` whitelist now covers all seven
+    official states; `PAYERROR` maps to FAILED/FAIL and books no income ledger.
+  - **F8** — the refund `reason` cap counts UTF-8 code points, not bytes, so a
+    legitimate 80-character CJK reason is no longer rejected.
+  - **F9** — refund query-sync now settles behind a CAS update plus
+    amount/identity gates, and marks an order REFUNDED only when settled
+    refunds cover its total.
+  - **F10** — an expired idempotency reservation is reclaimed atomically on
+    retry (reserve-or-reclaim), closing the reclaim race.
 - **A verified Alipay notification could still confirm the wrong order.** The
   async notification path ran the signature check and then trusted
   `trade_status` alone: `syncOrderStatusFromAlipay()` wrote `PAID` without

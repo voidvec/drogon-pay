@@ -10,6 +10,7 @@
 #include "services/RefundService.h"
 #include "channels/WechatChannel.h"
 #include "utils/PayUtils.h"
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -283,9 +284,23 @@ RefundSettlement settleRefund(
   const std::string &channelError = std::string()
 )
 {
+    // A real WeChat V3 refund answer echoes the request identity and carries
+    // amount.refund. The create-path settlement gate (F5) refuses an answer
+    // that cannot prove it is about this refund -- a missing amount fails
+    // closed, same discipline as the query-sync gate -- so the stub must speak
+    // that shape. refundNo is fixed here (not generated inside createRefund)
+    // so the echo can name it.
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    int64_t refundFen = 0;
+    (void)pay::utils::parseAmountToFen(refundAmount, refundFen);
+
     Json::Value answer;
     answer["status"] = "SUCCESS";
     answer["refund_id"] = "rf_" + drogon::utils::getUuid();
+    answer["out_refund_no"] = refundNo;
+    answer["out_trade_no"] = fixture.orderNo;
+    answer["amount"]["refund"] = static_cast<Json::Int64>(refundFen);
+    answer["amount"]["currency"] = "CNY";
 
     // With a channel error the service never reads `answer`, so the same stub
     // serves both halves: an empty error is the success shape, a non-empty one
@@ -298,6 +313,7 @@ RefundSettlement settleRefund(
     request.orderNo = fixture.orderNo;
     request.paymentNo = fixture.paymentNo;
     request.amount = refundAmount;
+    request.refundNo = refundNo;
 
     std::promise<Json::Value> resultPromise;
     std::promise<std::error_code> errorPromise;
@@ -752,6 +768,10 @@ DROGON_TEST(PayPlugin_Refund_IdempotencySnapshot)
     reqJson["order_no"] = request.orderNo;
     reqJson["amount"] = request.amount;
     reqJson["reason"] = request.reason;
+    reqJson["refund_no"] = request.refundNo;
+    reqJson["payment_no"] = request.paymentNo;
+    reqJson["funds_account"] = request.fundsAccount;
+    reqJson["notify_url"] = request.notifyUrl;
     std::string requestStr = pay::utils::toJsonString(reqJson);
     std::string requestHash = drogon::utils::getSha256(requestStr);
 
@@ -2974,6 +2994,91 @@ DROGON_TEST(PayPlugin_Refund_ReasonTooLong)
     CHECK(result["message"].asString().find("reason too long") != std::string::npos);
 }
 
+// F8: reason 限长按 UTF-8 码点而非字节。80 个汉字 = 240 字节，旧字节闸门
+// (240 > 80) 会误拒这个合法 reason；新码点闸门 (80 == 80，非 >80) 放行。
+// 81 个汉字 (243 字节, 81 码点) 仍越界被拒。上面的 ReasonTooLong（81 个 ASCII）
+// 是 ASCII 侧负向对照；本例补 CJK 侧的守卫方向：正例不再被 reason 闸门拒、
+// 反例仍被拒。reason 闸门在订单/支付查找之前触发，故无需播种订单——正例其后
+// 因订单不存在而失败属预期，断言只区分"是不是 reason too long"。该查找是只读
+// 的，正例不会留下任何写入。
+DROGON_TEST(PayPlugin_Refund_ReasonCjkBoundary)
+{
+    Json::Value root;
+    CHECK(loadConfig(root));
+    CHECK(root.isMember("db_clients"));
+    CHECK(root["db_clients"].isArray());
+    CHECK(!root["db_clients"].empty());
+
+    const auto &db = root["db_clients"][0];
+    const std::string connInfo = buildPgConnInfo(db);
+    CHECK(!connInfo.empty());
+
+    auto client = drogon::orm::DbClient::newPgClient(connInfo, 1);
+    CHECK(client != nullptr);
+    client->execSqlSync("SELECT 1");
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    auto refundService = plugin.refundService();
+
+    // The error message createRefund produced for `reason`. The order is random
+    // and nonexistent, so a reason that clears the length gate fails later for a
+    // different reason -- which is exactly what tells the two gates apart.
+    auto messageFor = [&](const std::string &reason) -> std::string {
+        CreateRefundRequest request;
+        request.orderNo = "ord_" + drogon::utils::getUuid();
+        request.amount = "1.00";
+        request.reason = reason;
+        request.refundNo = "";
+
+        std::promise<Json::Value> resultPromise;
+        std::promise<std::error_code> errorPromise;
+        refundService->createRefund(
+          request,
+          "",
+          [&resultPromise, &errorPromise](const Json::Value &result, const std::error_code &error) {
+              resultPromise.set_value(result);
+              errorPromise.set_value(error);
+          }
+        );
+        auto resultFuture = resultPromise.get_future();
+        auto errorFuture = errorPromise.get_future();
+        Json::Value result;
+        std::error_code error;
+        if (!pay::test_util::tryFutureGet(resultFuture, result, std::chrono::seconds(5)))
+        {
+            FAIL("createRefund result timed out");
+        }
+        if (!pay::test_util::tryFutureGet(errorFuture, error, std::chrono::seconds(5)))
+        {
+            FAIL("createRefund error timed out");
+        }
+        return result.get("message", "").asString();
+    };
+
+    std::string cn80;
+    for (int i = 0; i < 80; ++i)
+    {
+        cn80 += "退";
+    }
+    CHECK(cn80.size() == 240);
+    // Positive control: 80 codepoints is within the cap, so the reason gate must
+    // NOT reject it (the old byte cap would have). Whatever later error occurs,
+    // it is not "reason too long".
+    const std::string msg80 = messageFor(cn80);
+    CHECK(msg80.find("reason too long") == std::string::npos);
+
+    std::string cn81;
+    for (int i = 0; i < 81; ++i)
+    {
+        cn81 += "退";
+    }
+    CHECK(cn81.size() == 243);
+    // Negative control: 81 codepoints exceeds the cap and is still rejected.
+    const std::string msg81 = messageFor(cn81);
+    CHECK(msg81.find("reason too long") != std::string::npos);
+}
+
 DROGON_TEST(PayPlugin_Refund_InvalidFundsAccount)
 {
     Json::Value root;
@@ -3962,4 +4067,497 @@ DROGON_TEST(PayPlugin_Refund_UnreadableAnswerStaysUnknownNotFail)
     client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
     client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
     client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F9: a terminal refund row must survive a query-sync answer that claims a
+// different outcome. The early REFUND_SUCCESS check only guards that one
+// status, so REFUND_FAIL reaches the transaction: the old unconditional
+// full-row update overwrote it with the answer's status and booked a REFUND
+// ledger entry (pay_ledger has no unique index on REFUND, sql/006). The CAS
+// guard (status IN REFUND_INIT/REFUNDING) makes the write land on zero rows,
+// so neither the status nor the ledger nor the order moves. Deterministic:
+// the terminal state is seeded before the sync, no interleaving required.
+DROGON_TEST(PayPlugin_RefundSync_TerminalNotOverwritten)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUND_FAIL");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = refundNo;
+    answer["refund_id"] = "rf_terminal";
+    answer["amount"]["refund"] = 1000;
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUND_FAIL");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+    const auto ledger = client->execSqlSync(
+      "SELECT COUNT(*) c FROM pay_ledger WHERE order_no = $1 AND entry_type = 'REFUND'",
+      fixture.orderNo
+    );
+    CHECK(ledger.front()["c"].as<int64_t>() == 0);
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F9: the query answer's amount.refund must equal the refund row's amount.
+// A SUCCESS answer carrying a different amount is not evidence about this
+// refund, so it must not settle. The notification path already gates on this;
+// the query-sync path did not.
+DROGON_TEST(PayPlugin_RefundSync_AmountMismatchRefused)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = refundNo;
+    answer["refund_id"] = "rf_amount";
+    answer["amount"]["refund"] = 1;  // 1 fen != row's 1000 fen
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUNDING");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+    const auto ledger = client->execSqlSync(
+      "SELECT COUNT(*) c FROM pay_ledger WHERE order_no = $1 AND entry_type = 'REFUND'",
+      fixture.orderNo
+    );
+    CHECK(ledger.front()["c"].as<int64_t>() == 0);
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F9: the query answer's out_refund_no echo (officially required, doc
+// /doc/v3/merchant/4012791884) must name this refund. An answer about a
+// different refund is not evidence about this one and must not settle it.
+DROGON_TEST(PayPlugin_RefundSync_EchoMismatchRefused)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    Json::Value answer;
+    answer["status"] = "SUCCESS";
+    answer["out_refund_no"] = "someone_elses_refund";
+    answer["refund_id"] = "rf_echo";
+    answer["amount"]["refund"] = 1000;
+    std::promise<std::string> done;
+    plugin.refundService()->syncRefundStatusFromWechat(
+      refundNo, answer, [&done](const std::string &s) { done.set_value(s); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fut.get();
+
+    const auto after =
+      client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+    REQUIRE(!after.empty());
+    CHECK(after.front()["status"].as<std::string>() == "REFUNDING");
+    CHECK(readOrderStatus(client, fixture.orderNo) == "PAID");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F3: queryRefund may only ask WeChat about a wechat order. pay_refund carries
+// no channel column, so the service reads the parent order's channel. The
+// RefundStubChannel above answers queryRefund with a hardcoded error, and the
+// error branch returns the DB snapshot in both the buggy and the fixed code --
+// it cannot tell the two apart. This spy answers SUCCESS and records that it
+// was called, which is the observable the channel gate actually changes.
+namespace
+{
+class QueryRefundSpyChannel : public drogon_pay::PaymentChannel
+{
+  public:
+    const std::string &name() const override
+    {
+        static const std::string kName = "wechat";
+        return kName;
+    }
+
+    bool isConfigured() const override
+    {
+        return true;
+    }
+
+    void createPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void createQRPayment(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void queryPayment(const std::string &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void refund(const Json::Value &, JsonCallback &&callback) override
+    {
+        callback(Json::Value(Json::objectValue), "unused by this case");
+    }
+
+    void queryRefund(const std::string &refundNo, JsonCallback &&callback) override
+    {
+        queryRefundCalled.store(true);
+        Json::Value answer;
+        answer["status"] = "SUCCESS";
+        answer["out_refund_no"] = refundNo;
+        answer["refund_id"] = "rf_spy";
+        answer["amount"]["refund"] = 1000;
+        callback(answer, "");
+    }
+
+    bool verifyCallback(
+      const drogon::HttpRequestPtr &,
+      drogon_pay::CallbackEvent &,
+      std::string &
+    ) override
+    {
+        return false;
+    }
+
+    std::atomic<bool> queryRefundCalled{false};
+};
+}  // namespace
+
+// F3 negative: an alipay order's refund must be answered from the DB snapshot
+// without ever asking WeChat (which would earn REFUND_NOT_FOUND).
+DROGON_TEST(PayPlugin_QueryRefund_AlipayOrderSkipsWechat)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+    // seedRefundCoverageOrder books a wechat order; this case is about the
+    // other channel, so flip the parent order to alipay.
+    client
+      ->execSqlSync("UPDATE pay_order SET channel = 'alipay' WHERE order_no = $1", fixture.orderNo);
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    auto stub = std::make_shared<QueryRefundSpyChannel>();
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    std::promise<Json::Value> done;
+    plugin.refundService()->queryRefund(
+      refundNo,
+      [&done](const Json::Value &result, const std::error_code &) { done.set_value(result); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto response = fut.get();
+
+    CHECK(!stub->queryRefundCalled.load());
+    CHECK(response["data"]["status"].asString() == "REFUNDING");
+    CHECK(!response["data"].isMember("wechat_response"));
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F3 positive control: a wechat order's refund DOES query WeChat and surfaces
+// the channel answer. Without this, "skips wechat" could pass by never querying
+// anything at all.
+DROGON_TEST(PayPlugin_QueryRefund_WechatOrderQueriesWechat)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+
+    const std::string refundNo = "refund_" + drogon::utils::getUuid();
+    using PayRefund = drogon_model::pay_test::PayRefund;
+    drogon::orm::Mapper<PayRefund> rm(client);
+    PayRefund r;
+    r.setRefundNo(refundNo);
+    r.setOrderNo(fixture.orderNo);
+    r.setPaymentNo(fixture.paymentNo);
+    r.setStatus("REFUNDING");
+    r.setAmount("10.00");
+    r.setCreatedAt(trantor::Date::now());
+    r.setUpdatedAt(trantor::Date::now());
+    rm.insert(r);
+
+    auto stub = std::make_shared<QueryRefundSpyChannel>();
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    std::promise<Json::Value> done;
+    plugin.refundService()->queryRefund(
+      refundNo,
+      [&done](const Json::Value &result, const std::error_code &) { done.set_value(result); }
+    );
+    auto fut = done.get_future();
+    REQUIRE(fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const auto response = fut.get();
+
+    CHECK(stub->queryRefundCalled.load());
+    CHECK(response["data"].isMember("wechat_response"));
+    CHECK(response["data"]["status"].asString() == "REFUND_SUCCESS");
+
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F4: the idempotency hash must bind the full refund identity. Two refunds of
+// the same amount on the same order are different requests when their refund_no
+// differs, so reusing one idempotency key for both must be a conflict (1409),
+// not a replay of the first attempt's snapshot. The old hash covered only
+// order/amount/reason, so a second refund_no replayed the first. The identical
+// request replayed in between is the positive control: same identity still
+// replays, so the 1409 is specifically about refund_no, not a key that always
+// fails. No wechat client is registered, so each processed attempt answers 1501
+// with the refund_no it booked -- a soft error that still carries data and is
+// therefore snapshotted.
+DROGON_TEST(PayPlugin_Refund_IdempotencyHashBindsRefundNo)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+    client->execSqlSync(
+      "CREATE TABLE IF NOT EXISTS pay_idempotency ("
+      "idempotency_key VARCHAR(128) PRIMARY KEY,"
+      "request_hash VARCHAR(64) NOT NULL,"
+      "response_snapshot TEXT,"
+      "owner_token VARCHAR(64),"
+      "expire_at TIMESTAMP,"
+      "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    const auto fixture = seedRefundCoverageOrder(client, "20.00", "");
+
+    PayPlugin plugin;
+    plugin.setTestClients(nullptr, nullptr, client);
+    auto svc = plugin.refundService();
+    const std::string key = "refund_idem_" + drogon::utils::getUuid();
+    const std::string refundA = "refund_a_" + drogon::utils::getUuid();
+    const std::string refundB = "refund_b_" + drogon::utils::getUuid();
+
+    auto doRefund = [&](const std::string &refundNo) -> Json::Value {
+        CreateRefundRequest req;
+        req.orderNo = fixture.orderNo;
+        req.paymentNo = fixture.paymentNo;
+        req.amount = "10.00";
+        req.reason = "same reason";
+        req.refundNo = refundNo;
+        std::promise<Json::Value> p;
+        svc->createRefund(req, key, [&p](const Json::Value &v, const std::error_code &) {
+            p.set_value(v);
+        });
+        auto f = p.get_future();
+        if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+        {
+            return Json::Value(Json::objectValue);
+        }
+        return f.get();
+    };
+
+    const auto first = doRefund(refundA);
+    CHECK(first["code"].asInt() == 1501);
+    CHECK(first["data"]["refund_no"].asString() == refundA);
+
+    // Positive control: the identical request replays the snapshot.
+    const auto replay = doRefund(refundA);
+    CHECK(replay["code"].asInt() == 1501);
+    CHECK(replay["data"]["refund_no"].asString() == refundA);
+
+    // Different refund_no under the same key is a different request: conflict,
+    // not a replay of refundA.
+    const auto conflict = doRefund(refundB);
+    CHECK(conflict["code"].asInt() == 1409);
+
+    client->execSqlSync("DELETE FROM pay_idempotency WHERE idempotency_key = $1", key);
+    client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+    client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+    client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+}
+
+// F5: the create-refund answer must be evidence about THIS refund. A SUCCESS
+// body whose out_refund_no echo names a different refund, or whose amount.refund
+// disagrees with the requested amount, is not proof this refund settled, so it
+// must not book REFUND_SUCCESS -- it stays REFUNDING for the reconcile sweep to
+// verify (the same "uncertain never books" discipline as the query-sync and
+// notification gates). The matching answer is the positive control: identical
+// shape with the correct echo and amount does settle, so each refusal is about
+// the specific mismatch, not about every SUCCESS answer.
+DROGON_TEST(PayPlugin_CreateRefund_EchoMismatchNotBooked)
+{
+    auto client = makeRefundCoverageClient();
+    REQUIRE(client != nullptr);
+    ensureRefundCoverageTables(client);
+
+    struct Outcome
+    {
+        std::string responseStatus;
+        std::string rowStatus;
+    };
+
+    // Books one refund against a fresh order with the given channel answer and
+    // reports the response status plus the persisted row status. out_trade_no
+    // is pinned to the fixture's order so the echo arm under test is isolated
+    // to out_refund_no / amount. Each call owns its order and refund, so the
+    // negatives and the control never interact.
+    auto runRefund = [&](Json::Value answer, const std::string &refundNo) -> Outcome {
+        const auto fixture = seedRefundCoverageOrder(client, "10.00", "");
+        answer["out_trade_no"] = fixture.orderNo;
+        auto stub = std::make_shared<RefundStubChannel>(answer);
+        PayPlugin plugin;
+        plugin.setTestChannels({{"wechat", stub}}, client);
+
+        CreateRefundRequest req;
+        req.orderNo = fixture.orderNo;
+        req.paymentNo = fixture.paymentNo;
+        req.amount = "10.00";
+        req.refundNo = refundNo;
+        std::promise<Json::Value> p;
+        plugin.refundService()->createRefund(
+          req, "", [&p](const Json::Value &v, const std::error_code &) { p.set_value(v); }
+        );
+        auto f = p.get_future();
+        Outcome out;
+        if (f.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+        {
+            return out;  // empty statuses; the CHECKs below fail loudly
+        }
+        out.responseStatus = f.get()["data"]["status"].asString();
+        const auto rows =
+          client->execSqlSync("SELECT status FROM pay_refund WHERE refund_no = $1", refundNo);
+        out.rowStatus = rows.empty() ? std::string() : rows.front()["status"].as<std::string>();
+
+        client->execSqlSync("DELETE FROM pay_ledger WHERE order_no = $1", fixture.orderNo);
+        client->execSqlSync("DELETE FROM pay_refund WHERE order_no = $1", fixture.orderNo);
+        client->execSqlSync("DELETE FROM pay_payment WHERE payment_no = $1", fixture.paymentNo);
+        client->execSqlSync("DELETE FROM pay_order WHERE order_no = $1", fixture.orderNo);
+        return out;
+    };
+
+    Json::Value success;
+    success["status"] = "SUCCESS";
+    success["refund_id"] = "rf_x";
+    success["amount"]["refund"] = 1000;
+    success["amount"]["currency"] = "CNY";
+
+    // Negative 1: well-formed SUCCESS, but out_refund_no is someone else's.
+    const std::string echoRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value wrongEcho = success;
+    wrongEcho["out_refund_no"] = "someone_elses_refund";
+    const auto rejectedEcho = runRefund(wrongEcho, echoRefundNo);
+    CHECK(rejectedEcho.responseStatus != "REFUND_SUCCESS");
+    CHECK(rejectedEcho.rowStatus != "REFUND_SUCCESS");
+
+    // Negative 2: correct identity, but amount.refund (1 fen) is not the
+    // requested 10.00 (1000 fen).
+    const std::string amountRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value wrongAmount = success;
+    wrongAmount["out_refund_no"] = amountRefundNo;
+    wrongAmount["amount"]["refund"] = 1;
+    const auto rejectedAmount = runRefund(wrongAmount, amountRefundNo);
+    CHECK(rejectedAmount.responseStatus != "REFUND_SUCCESS");
+    CHECK(rejectedAmount.rowStatus != "REFUND_SUCCESS");
+
+    // Positive control: correct identity and amount settles REFUND_SUCCESS.
+    const std::string okRefundNo = "refund_" + drogon::utils::getUuid();
+    Json::Value matching = success;
+    matching["out_refund_no"] = okRefundNo;
+    const auto settled = runRefund(matching, okRefundNo);
+    CHECK(settled.responseStatus == "REFUND_SUCCESS");
+    CHECK(settled.rowStatus == "REFUND_SUCCESS");
 }

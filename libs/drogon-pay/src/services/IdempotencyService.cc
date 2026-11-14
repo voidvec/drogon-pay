@@ -91,12 +91,22 @@ void IdempotencyService::checkDatabase(
     const auto expiresAt =
       trantor::Date(now.microSecondsSinceEpoch() + ttlSeconds * static_cast<int64_t>(1000000));
 
-    // Atomic reserve (raw-SQL exemption: INSERT ... ON CONFLICT): the
-    // insert-or-ignore reservation must be a single atomic statement; the
-    // Mapper cannot express ON CONFLICT DO NOTHING.
+    // Atomic reserve-or-reclaim (raw-SQL exemption: INSERT ... ON CONFLICT, and
+    // server-side NOW() shared with purgeExpired). A fresh key inserts; a key
+    // whose reservation has expired is reclaimed in the same statement (reset
+    // hash, NULL snapshot, new TTL) so a retry gets Started instead of falling
+    // through to the TTL-filtered findBy, finding nothing, and reporting a
+    // permanent "key disappeared" Error until the purge sweep runs. A conflict
+    // on a still-live row (expire_at NULL = never expires, or >= NOW()) updates
+    // zero rows and falls through to findBy for InProgress/Replay/Conflict. The
+    // Mapper cannot express ON CONFLICT ... DO UPDATE ... WHERE.
     dbClient->execSqlAsync(
       "INSERT INTO pay_idempotency (idempotency_key, request_hash, response_snapshot, expire_at) "
-      "VALUES ($1, $2, NULL, $3) ON CONFLICT (idempotency_key) DO NOTHING",
+      "VALUES ($1, $2, NULL, $3) "
+      "ON CONFLICT (idempotency_key) DO UPDATE "
+      "SET request_hash = EXCLUDED.request_hash, response_snapshot = NULL, "
+      "expire_at = EXCLUDED.expire_at "
+      "WHERE pay_idempotency.expire_at IS NOT NULL AND pay_idempotency.expire_at < NOW()",
       [dbClient, idempotencyKey, requestHash, sharedCb](const orm::Result &insertResult) {
           if (insertResult.affectedRows() > 0)
           {

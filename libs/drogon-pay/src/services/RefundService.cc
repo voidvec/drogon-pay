@@ -232,11 +232,19 @@ void RefundService::createRefund(
   RefundCallback &&callback
 )
 {
-    // Calculate request hash for idempotency
+    // Calculate request hash for idempotency. The hash binds the full refund
+    // identity, not just order/amount/reason: a second legitimate refund of the
+    // same amount on the same order carries a different refund_no (and may name
+    // a different payment_no, funds_account or notify_url), so it must not
+    // collide with the first attempt's snapshot.
     Json::Value reqJson;
     reqJson["order_no"] = request.orderNo;
     reqJson["amount"] = request.amount;
     reqJson["reason"] = request.reason;
+    reqJson["refund_no"] = request.refundNo;
+    reqJson["payment_no"] = request.paymentNo;
+    reqJson["funds_account"] = request.fundsAccount;
+    reqJson["notify_url"] = request.notifyUrl;
     const std::string requestStr = pay::utils::toJsonString(reqJson);
 
     // Use SHA-256 for cryptographic hashing (more secure than std::hash)
@@ -397,8 +405,10 @@ void RefundService::proceedRefund(
     auto sharedCb = std::make_shared<RefundCallback>(std::move(callback));
 
     // Enhanced input validation
-    // Validate reason field (only check max length, allow empty)
-    if (request.reason.size() > 80)
+    // Validate reason field (only check max length, allow empty). WeChat caps
+    // reason at 80 characters by UTF-8 code point, not byte: a byte cap would
+    // wrongly reject a legitimate CJK reason (one 汉字 is 3 bytes, 1 character).
+    if (pay::utils::utf8CodePointLength(request.reason) > 80)
     {
         if (*sharedCb)
         {
@@ -1470,6 +1480,48 @@ void RefundService::invokeRefundChannel(
                   return;
               }
 
+              // F5: the answer must be evidence about THIS refund. The V3
+              // create-refund response echoes out_refund_no / out_trade_no and
+              // carries amount.refund; an echo naming a different refund, or an
+              // amount that disagrees with the request, is not proof this money
+              // moved. Absent identity echoes are tolerated (the channel may
+              // omit them), but a missing or unequal amount fails closed -- the
+              // same discipline as the query-sync and notification gates. Leave
+              // the row open (REFUNDING) for the reconcile sweep to verify
+              // rather than booking a refund WeChat never accepted for us.
+              const std::string echoRefundNo = result.get("out_refund_no", "").asString();
+              const std::string echoOrderNo = result.get("out_trade_no", "").asString();
+              const int64_t echoRefundFen = result["amount"].get("refund", 0).asInt64();
+              if (
+                (!echoRefundNo.empty() && echoRefundNo != refundNo) ||
+                (!echoOrderNo.empty() && echoOrderNo != orderNo) ||
+                !pay::utils::amountEqualsFen(amount, echoRefundFen)
+              )
+              {
+                  const std::string errorMessage =
+                    "WeChat refund response identity/amount mismatch";
+                  LOG_ERROR << "[RefundService] " << errorMessage << " for " << refundNo
+                            << " (echo refund=" << echoRefundNo << ", order=" << echoOrderNo
+                            << ", fen=" << echoRefundFen << ")";
+                  Json::Value errJson;
+                  errJson["error"] = errorMessage;
+                  if (*sharedCb)
+                  {
+                      Json::Value response;
+                      response["code"] = 1502;
+                      response["message"] = errorMessage;
+                      response["data"]["refund_no"] = refundNo;
+                      response["data"]["order_no"] = orderNo;
+                      response["data"]["payment_no"] = paymentNo;
+                      response["data"]["amount"] = amount;
+                      response["data"]["status"] = "REFUNDING";
+                      response["data"]["error"] = errorMessage;
+                      response["data"]["wechat_response"] = errJson;
+                      (*sharedCb)(response, std::error_code(1502, std::system_category()));
+                  }
+                  return;
+              }
+
               // V3 files an accepted refund under SUCCESS or PROCESSING and
               // answers CLOSED / ABNORMAL to say the money did not move.
               // Defaulting an unrecognised body to REFUNDING recorded a refund
@@ -1838,38 +1890,83 @@ void RefundService::queryRefund(const std::string &refundNo, RefundCallback &&ca
                   return;
               }
 
-              wechatChannel->queryRefund(
-                refundNo,
-                [this,
-                 refundNo,
-                 response,
-                 sharedCb](const Json::Value &result, const std::string &error) mutable {
-                    if (!error.empty())
-                    {
+              // A refund query only means something for a wechat order: asking
+              // WeChat about an Alipay refund earns REFUND_NOT_FOUND. pay_refund
+              // has no channel column, so read the parent order to decide. When
+              // the order cannot be read, fall back to the DB snapshot (the same
+              // semantics as having no wechat client) rather than failing the
+              // whole query.
+              try
+              {
+                  Mapper<PayOrderModel> orderMapper(dbClient_);
+                  orderMapper.findOne(
+                    Criteria(
+                      PayOrderModel::Cols::_order_no,
+                      CompareOperator::EQ,
+                      refund.getValueOfOrderNo()
+                    ),
+                    [this, refundNo, response, sharedCb, wechatChannel](
+                      const PayOrderModel &order
+                    ) mutable {
+                        if (order.getValueOfChannel() != "wechat")
+                        {
+                            if (*sharedCb)
+                            {
+                                (*sharedCb)(response, std::error_code());
+                            }
+                            return;
+                        }
+                        wechatChannel->queryRefund(
+                          refundNo,
+                          [this,
+                           refundNo,
+                           response,
+                           sharedCb](const Json::Value &result, const std::string &error) mutable {
+                              if (!error.empty())
+                              {
+                                  if (*sharedCb)
+                                  {
+                                      (*sharedCb)(response, std::error_code());
+                                  }
+                                  return;
+                              }
+
+                              syncRefundStatusFromWechat(
+                                refundNo,
+                                result,
+                                [response, result, sharedCb](const std::string &status) mutable {
+                                    if (!status.empty())
+                                    {
+                                        response["data"]["status"] = status;
+                                    }
+                                    response["data"]["wechat_response"] = result;
+                                    if (*sharedCb)
+                                    {
+                                        (*sharedCb)(response, std::error_code());
+                                    }
+                                }
+                              );
+                          }
+                        );
+                    },
+                    [sharedCb, response](const DrogonDbException &e) {
+                        LOG_WARN << "[RefundService] Refund order-channel lookup failed: "
+                                 << e.base().what();
                         if (*sharedCb)
                         {
                             (*sharedCb)(response, std::error_code());
                         }
-                        return;
                     }
-
-                    syncRefundStatusFromWechat(
-                      refundNo,
-                      result,
-                      [response, result, sharedCb](const std::string &status) mutable {
-                          if (!status.empty())
-                          {
-                              response["data"]["status"] = status;
-                          }
-                          response["data"]["wechat_response"] = result;
-                          if (*sharedCb)
-                          {
-                              (*sharedCb)(response, std::error_code());
-                          }
-                      }
-                    );
-                }
-              );
+                  );
+              }
+              catch (const std::exception &e)
+              {
+                  LOG_WARN << "[RefundService] Refund order-channel mapper failed: " << e.what();
+                  if (*sharedCb)
+                  {
+                      (*sharedCb)(response, std::error_code());
+                  }
+              }
           },
           [sharedCb](const DrogonDbException &e) {
               if (*sharedCb)
@@ -1960,12 +2057,40 @@ void RefundService::syncRefundStatusFromWechat(
               const auto paymentNo = refund.getValueOfPaymentNo();
               const auto refundAmount = refund.getValueOfAmount();
 
+              // The query answer's out_refund_no echo is officially required
+              // (doc /doc/v3/merchant/4012791884): an answer naming a different
+              // refund is not evidence about this one and must not book it.
+              const std::string echoedRefundNo = result.get("out_refund_no", "").asString();
+              if (!echoedRefundNo.empty() && echoedRefundNo != refundNo)
+              {
+                  LOG_ERROR << "[RefundService] Refund query echo mismatch for " << refundNo
+                            << " (got " << echoedRefundNo << "); not booking";
+                  if (callback)
+                  {
+                      callback("");
+                  }
+                  return;
+              }
+              // Amount gate, same shape as the notification path: the answer's
+              // amount.refund must equal the refund row's amount. A missing or
+              // unequal amount proves nothing, so nothing is booked.
+              const int64_t answerRefundFen = result["amount"].get("refund", 0).asInt64();
+              if (!pay::utils::amountEqualsFen(refundAmount, answerRefundFen))
+              {
+                  LOG_ERROR << "[RefundService] Refund query amount mismatch for " << refundNo
+                            << " (answer fen=" << answerRefundFen << "); not booking";
+                  if (callback)
+                  {
+                      callback("");
+                  }
+                  return;
+              }
+
               dbClient_->newTransactionAsync([refundStatus,
                                               refundId,
                                               refundNo,
                                               result,
                                               callback,
-                                              refund,
                                               orderNo,
                                               paymentNo,
                                               refundAmount](
@@ -1982,13 +2107,11 @@ void RefundService::syncRefundStatusFromWechat(
 
                   auto transDb = std::static_pointer_cast<DbClient>(transPtr);
 
-                  refund.setStatus(refundStatus);
-                  refund.setChannelRefundNo(refundId);
                   try
                   {
                       Mapper<PayRefundModel> refundUpdater(transPtr);
-                      refundUpdater.update(
-                        refund,
+                      refundUpdater.updateBy(
+                        {PayRefundModel::Cols::_status, PayRefundModel::Cols::_channel_refund_no},
                         [refundStatus,
                          orderNo,
                          paymentNo,
@@ -1997,7 +2120,22 @@ void RefundService::syncRefundStatusFromWechat(
                          result,
                          transPtr,
                          transDb,
-                         callback](const size_t) {
+                         callback](const size_t updated) {
+                            if (updated == 0)
+                            {
+                                // Another writer (notification/reconcile) already
+                                // moved the row to a terminal state: that state
+                                // stands. REFUND ledger entries carry no DB unique
+                                // index, so a lost CAS must never insert one.
+                                LOG_WARN << "[RefundService] Refund " << refundNo
+                                         << " already settled by another writer; query sync "
+                                         << refundStatus << " not written";
+                                if (callback)
+                                {
+                                    callback(refundStatus);
+                                }
+                                return;
+                            }
                             const std::string responsePayload = toJsonString(result);
                             try
                             {
@@ -2273,7 +2411,15 @@ void RefundService::syncRefundStatusFromWechat(
                                 }
                             }
                         },
-                        rollbackDone
+                        rollbackDone,
+                        Criteria(PayRefundModel::Cols::_refund_no, CompareOperator::EQ, refundNo) &&
+                          Criteria(
+                            PayRefundModel::Cols::_status,
+                            CompareOperator::In,
+                            std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
+                          ),
+                        refundStatus,
+                        refundId
                       );
                   }
                   catch (const std::exception &e)

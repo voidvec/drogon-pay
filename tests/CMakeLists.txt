@@ -31,6 +31,7 @@ set(TEST_SRC
     integration/QrPaymentBookingTest.cc      # C5: QR booking (payment row, retry after refusal)
     integration/QueryOrderListAndReconcileTest.cc  # P1: queryOrderList + reconcileSummary params
     integration/QueryOrderTest.cc
+    integration/ReconcileRefundChannelTest.cc  # F2: refund sweep asks WeChat only about wechat-order refunds
     integration/ReconcileSummaryTest.cc
     integration/RefundQueryTest.cc
     integration/RequestBodyShapeTest.cc  # P0: mistyped body members must answer, not throw

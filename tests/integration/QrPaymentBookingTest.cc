@@ -126,17 +126,12 @@ std::shared_ptr<drogon::orm::DbClient> makeTestClient()
 {
     // One client for the whole run, released on the main thread at exit. These
     // cases answer through a promise and return as soon as the answer lands,
-    // while the chain that produced it is still finishing its own database
-    // work -- the six shape refusals in front of the booking
-    // (`PaymentService.cc:1413`, `:1432`, `:1448`, `:1462`, `:1484`, `:1518`)
-    // still clear the idempotency reservation after the caller has been
-    // answered. Drogon destroys a DbClient
-    // on whichever thread drops the last reference, and that destructor joins
-    // the client's own loop threads, so a chain that outlives the case and ends
-    // up holding the last reference joins itself and aborts the process
-    // (0xC0000409). Production cannot reach
-    // this: its client comes from `app().getDbClient()`, which the framework
-    // keeps until teardown.
+    // while the chain that produced it may still hold a reference to the client.
+    // Drogon destroys a DbClient on whichever thread drops the last reference,
+    // and that destructor joins the client's own loop threads, so a chain that
+    // outlives the case and ends up holding the last reference joins itself and
+    // aborts the process (0xC0000409). Production cannot reach this: its client
+    // comes from `app().getDbClient()`, which the framework keeps until teardown.
     static const std::shared_ptr<drogon::orm::DbClient> client = [] {
         Json::Value root;
         if (
@@ -908,4 +903,50 @@ DROGON_TEST(PayPlugin_QrBooking_MissingOwnerIsRefusedBeforeBooking)
     CHECK(answer.channelCalls == 0);
     const auto rows = client->execSqlSync("SELECT id FROM pay_order WHERE order_no = $1", orderNo);
     CHECK(rows.empty());
+}
+
+// F1: a shape refusal must release the idempotency reservation before it answers.
+// The six refusals in front of the booking used to fire-and-forget the delete and
+// answer first, so a corrected retry that landed inside the delete window read an
+// in-flight reservation and got 1004 for an attempt that had already failed. This
+// pins release-before-answer for the currency refusal (refuseQr) the same way the
+// channel-refusal cases pin it for failQr, with the settled-snapshot probe as the
+// positive control that the key checked is one the service really writes.
+DROGON_TEST(PayPlugin_QrBooking_ShapeRefusalReleasesReservationBeforeAnswer)
+{
+    auto client = makeTestClient();
+    REQUIRE(client != nullptr);
+    ensureQrTables(client);
+
+    const std::string orderNo = qrOrderNo();
+    auto stub = std::make_shared<QrStubChannel>(Json::Value(Json::objectValue), std::string());
+    PayPlugin plugin;
+    plugin.setTestChannels({{"wechat", stub}}, client);
+
+    auto bad = qrRequest(orderNo, "9.99");
+    bad["currency"] = "DOLLARS";
+    const auto refused = offerQrPayment(plugin.paymentService(), bad, stub);
+    CHECK(refused.error);
+    CHECK(refused.result.get("code", 0).asInt() == 400);
+    CHECK(refused.channelCalls == 0);
+    const auto key = "QR_" + orderNo + "_wechat";
+    // The caller only hears back once the delete has settled, so the reservation
+    // is already gone at answer time -- not still in flight for the retry to hit.
+    CHECK(!reservationOpen(client, key));
+    const auto rows = client->execSqlSync("SELECT id FROM pay_order WHERE order_no = $1", orderNo);
+    CHECK(rows.empty());
+
+    // Corrected retry under the same key: it must not be poisoned with 1004.
+    Json::Value accepted;
+    accepted["code_url"] = "weixin://wxpay/bizpayurl?pr=shape_retry";
+    stub->succeedWith(accepted);
+    auto good = qrRequest(orderNo, "9.99");
+    good["currency"] = "CNY";
+    const auto retried = offerQrPayment(plugin.paymentService(), good, stub);
+    // 1004 (in-progress / conflict) is the poisoning: a retry told another attempt
+    // is in flight for one that already failed.
+    CHECK(retried.error.value() != 1004);
+    REQUIRE(retried.result.get("code", -1).asInt() == 0);
+    CHECK(retried.channelCalls == 1);
+    CHECK(reservationSettled(client, key));
 }

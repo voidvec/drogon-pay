@@ -498,3 +498,46 @@ DROGON_TEST(PayUtils_ValidateTimeExpire)
       trantor::Date::fromDbStringLocal("2099-05-20")
     );
 }
+
+// F8: 微信退款 reason 限 80 字符，官方按字符（UTF-8 码点）计，而非字节。
+// 旧闸门用 request.reason.size()（字节数）限长，会把一个 27 字的中文 reason
+// （81 字节）误拒。utf8CodePointLength 只数非 continuation 字节（0b10xxxxxx
+// 不计），所以一个汉字算 1、一个 4 字节 emoji 也算 1。该 helper 原本就是
+// validateWechatOrderFields 给 description/attach 限长用的，这里提升为公有复用。
+DROGON_TEST(PayUtils_Utf8CodePointLength)
+{
+    CHECK(pay::utils::utf8CodePointLength("") == 0);
+    CHECK(pay::utils::utf8CodePointLength("abc") == 3);
+
+    // 27 个汉字 = 81 字节，但 27 码点：按字节限长会误拒这个合法 reason。
+    std::string cn;
+    for (int i = 0; i < 27; ++i)
+    {
+        cn += "退";
+    }
+    CHECK(cn.size() == 81);
+    CHECK(pay::utils::utf8CodePointLength(cn) == 27);
+
+    // 80 码点（240 字节）是 reason 上限的正例：闸门是 >80 才拒，==80 放行。
+    std::string cn80;
+    for (int i = 0; i < 80; ++i)
+    {
+        cn80 += "退";
+    }
+    CHECK(cn80.size() == 240);
+    CHECK(pay::utils::utf8CodePointLength(cn80) == 80);
+
+    // 81 码点（243 字节）越界，应被 reason 闸门拒绝。
+    std::string cn81;
+    for (int i = 0; i < 81; ++i)
+    {
+        cn81 += "退";
+    }
+    CHECK(cn81.size() == 243);
+    CHECK(pay::utils::utf8CodePointLength(cn81) == 81);
+
+    // 混合 ASCII + 多字节：数码点，不数字节。
+    CHECK(pay::utils::utf8CodePointLength("a退b") == 3);
+    // 4 字节 emoji（U+1F600 = F0 9F 98 80）算 1 码点。
+    CHECK(pay::utils::utf8CodePointLength("\xF0\x9F\x98\x80") == 1);
+}

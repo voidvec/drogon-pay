@@ -2,6 +2,7 @@
 #include "../models/PayOrder.h"
 #include "../models/PayRefund.h"
 #include <drogon/drogon.h>
+#include <set>
 
 using namespace drogon;
 
@@ -370,25 +371,79 @@ void ReconciliationService::syncPendingRefunds(const std::shared_ptr<int> &faile
               std::vector<std::string>{"REFUND_INIT", "REFUNDING"}
             ),
             [refundService = refundService_,
-             wechatChannel](const std::vector<PayRefundModel> &rows) {
+             wechatChannel,
+             dbClient = dbClient_](const std::vector<PayRefundModel> &rows) {
+                if (rows.empty())
+                {
+                    return;
+                }
+                // pay_refund has no channel column: read the parent orders in
+                // one batch and ask WeChat only about wechat-order refunds.
+                // Sweeping an Alipay refund against WeChat earns a
+                // REFUND_NOT_FOUND and misreads a live refund as unknown.
+                std::vector<std::string> orderNos;
+                orderNos.reserve(rows.size());
                 for (const auto &row : rows)
                 {
-                    const std::string refundNo = row.getValueOfRefundNo();
-                    wechatChannel->queryRefund(
-                      refundNo,
+                    orderNos.push_back(row.getValueOfOrderNo());
+                }
+                try
+                {
+                    orm::Mapper<PayOrderModel> orderMapper(dbClient);
+                    orderMapper.findBy(
+                      orm::Criteria(
+                        PayOrderModel::Cols::_order_no, orm::CompareOperator::In, orderNos
+                      ) &&
+                        orm::Criteria(
+                          PayOrderModel::Cols::_channel,
+                          orm::CompareOperator::EQ,
+                          std::string("wechat")
+                        ),
                       [refundService,
-                       refundNo](const Json::Value &result, const std::string &error) {
-                          if (!error.empty())
+                       wechatChannel,
+                       rows](const std::vector<PayOrderModel> &orders) {
+                          std::set<std::string> wechatOrders;
+                          for (const auto &order : orders)
                           {
-                              LOG_WARN << "Wechat refund query failed for " << refundNo << ": "
-                                       << error;
-                              return;
+                              wechatOrders.insert(order.getValueOfOrderNo());
                           }
-                          refundService->syncRefundStatusFromWechat(
-                            refundNo, result, [](const std::string &) {}
-                          );
+                          for (const auto &row : rows)
+                          {
+                              if (wechatOrders.count(row.getValueOfOrderNo()) == 0)
+                              {
+                                  continue;
+                              }
+                              const std::string refundNo = row.getValueOfRefundNo();
+                              wechatChannel->queryRefund(
+                                refundNo,
+                                [refundService,
+                                 refundNo](const Json::Value &result, const std::string &error) {
+                                    if (!error.empty())
+                                    {
+                                        LOG_WARN << "Wechat refund query failed for " << refundNo
+                                                 << ": " << error;
+                                        return;
+                                    }
+                                    refundService->syncRefundStatusFromWechat(
+                                      refundNo, result, [](const std::string &) {}
+                                    );
+                                }
+                              );
+                          }
+                      },
+                      [](const orm::DrogonDbException &e) {
+                          LOG_ERROR << "Refund reconcile order-channel lookup error: "
+                                    << e.base().what();
                       }
                     );
+                }
+                catch (const std::exception &e)
+                {
+                    LOG_ERROR << "[ReconciliationService] Mapper construction failed: " << e.what();
+                }
+                catch (...)
+                {
+                    LOG_ERROR << "[ReconciliationService] Mapper construction failed: unknown";
                 }
             },
             [](const orm::DrogonDbException &e) {
